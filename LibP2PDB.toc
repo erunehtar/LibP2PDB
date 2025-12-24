@@ -1,0 +1,7 @@
+## Interface: 11508
+## Title: LibP2PDB
+## Author: Erunehtar
+## Notes: A lightweight, embeddable library for peer-to-peer distributed-database synchronization in WoW addons.
+## Version: 1
+
+LibP2PDB.lua

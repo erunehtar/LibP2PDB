@@ -1,2 +1,2 @@
 # LibP2PDB
-Library that provides a peer-to-peer distributed database API for WoW addons
+A lightweight, embeddable library for peer-to-peer distributed-database synchronization in WoW addons.
