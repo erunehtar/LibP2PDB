@@ -15,8 +15,9 @@ assert(ChatThrottleLib, MAJOR .. " requires ChatThrottleLib")
 
 local assert, print = assert, print
 local type, ipairs, pairs = type, ipairs, pairs
+local min, max, abs = min, max, abs
 local format, strsub, strfind, strjoin = format, strsub, strfind, strjoin
-local unpack = unpack
+local unpack, CopyTable = unpack, CopyTable
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Local WoW API References
@@ -47,17 +48,24 @@ local function IsNotNil(v)
     return v ~= nil
 end
 
+local function IsNumber(n)
+    return type(n) == "number" and n == n -- n == n checks for NaN
+end
+
 local function IsString(s, maxlen)
     return type(s) == "string" and (not maxlen or #s <= maxlen)
+end
+
+local function IsStringOrNumber(v, maxlen)
+    return IsString(v, maxlen) or IsNumber(v)
 end
 
 local function IsNonEmptyString(s, maxlen)
     return type(s) == "string" and #s > 0 and (not maxlen or #s <= maxlen)
 end
 
-local function IsNonEmptyStringOrNumber(v)
-    local t = type(v)
-    return (t == "string" and #v > 0) or (t == "number" and v == v) -- v == v checks for NaN
+local function IsNonEmptyStringOrNumber(v, maxlen)
+    return IsNonEmptyString(v, maxlen) or IsNumber(v)
 end
 
 local function IsTable(t)
@@ -111,11 +119,11 @@ local Private = NewPrivate()
 ---@field writePolicy function|nil Access control function(table, key, row) -> true/false
 
 ---Create a new database instance for peer-to-peer synchronization.
----If a database with the same clusterId already exists, returns the existing instance.
 ---Each database is identified by a unique clusterId and operates independently.
+---Use GetDB to retrieve existing instances.
 ---@param desc LibP2PDB.DBDesc Description of the database instance to create
 ---@return LibP2PDB.DB db The database instance
-function LibP2PDB:New(desc)
+function LibP2PDB:NewDB(desc)
     assert(IsNonEmptyTable(desc), "desc must be a non-empty table")
     assert(IsNonEmptyString(desc.clusterId, 16), "desc.clusterId must be a non-empty string (max 16 chars)")
     assert(IsNonEmptyString(desc.namespace), "desc.namespace must be a non-empty string")
@@ -129,10 +137,8 @@ function LibP2PDB:New(desc)
         end
     end
 
-    -- If a database with the same clusterId exists, return it
-    if Private.clusters[desc.clusterId] then
-        return Private.clusters[desc.clusterId]
-    end
+    -- Ensure clusterId is unique
+    assert(Private.clusters[desc.clusterId] == nil, "a database with clusterId '" .. desc.clusterId .. "' already exists")
 
     -- Default channels if none provided
     local defaultChannels = { "GUILD", "PARTY", "RAID", "YELL" }
@@ -155,9 +161,17 @@ function LibP2PDB:New(desc)
 
     -- Internal registry
     local db = {}
-    Private.clusters[desc.clusterId] = dbi
+    Private.clusters[desc.clusterId] = db
     Private.databases[db] = dbi
     return db
+end
+
+---Retrieve a database instance by its clusterId.
+---@param clusterId string Unique identifier for the database cluster (max 16 chars)
+---@return LibP2PDB.DB|nil db The database instance if found, or nil if not found
+function LibP2PDB:GetDB(clusterId)
+    assert(IsNonEmptyString(clusterId, 16), "clusterId must be a non-empty string (max 16 chars)")
+    return Private.clusters[clusterId]
 end
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -171,13 +185,12 @@ end
 ---@field onValidate function|nil Optional validation function(key, row) -> true/false
 ---@field onChange function|nil Optional callback function(key, row) on row changes
 
----Define a typed table inside the database.
+---Create a new table in the database with an optional schema.
 ---If no schema is provided, the table accepts any fields.
----If a table with the same name already exists, this is a no-op.
 ---@param db LibP2PDB.DB Database instance
 ---@param desc LibP2PDB.TableDesc Description of the table to define
 ---@return boolean result Returns true if the table was created, false if it already existed
-function LibP2PDB:DefineTable(db, desc)
+function LibP2PDB:NewTable(db, desc)
     assert(IsTable(db), "db must be a table")
     assert(IsNonEmptyTable(desc), "desc must be a non-empty table")
     assert(IsNonEmptyString(desc.name), "desc.name must be a non-empty string")
@@ -195,10 +208,8 @@ function LibP2PDB:DefineTable(db, desc)
     local dbi = Private.databases[db]
     assert(dbi, "db is not a recognized database instance")
 
-    -- If a table with the same name already exists, don't do anything
-    if dbi.tables[desc.name] then
-        return false
-    end
+    -- Ensure table does not already exist
+    assert(dbi.tables[desc.name] == nil, "table '" .. desc.name .. "' already exists in the database")
 
     -- Create the table entry
     dbi.tables[desc.name] = {
@@ -447,15 +458,154 @@ function LibP2PDB:Unsubscribe(db, table, callback)
 end
 
 ------------------------------------------------------------------------------------------------------------------------
--- Public API: Persistence (SavedVariables)
+-- Public API: Persistence
 ------------------------------------------------------------------------------------------------------------------------
 
--- Export the entire DB state as a serializable table
+---@class LibP2PDB.VersionState Exported version metadata
+---@field clock number Lamport clock value
+---@field peer string Peer ID that last modified the row
+---@field tombstone boolean|nil Optional tombstone flag indicating deletion
+
+---@class LibP2PDB.RowState Exported row state
+---@field data table Row data
+---@field version LibP2PDB.VersionState Version metadata
+
+---@class LibP2PDB.TableState Exported table state
+---@field rows table<LibP2PDB.RowState> Registry of rows in the exported table
+
+---@class LibP2PDB.DBState Exported database state
+---@field clock number Lamport clock of the exported database
+---@field tables table<LibP2PDB.TableState> Registry of tables and their rows
+
+---Export the entire DB state as a serializable table.
+---@param db LibP2PDB.DB Database instance
+---@return LibP2PDB.DBState state The exported database state
 function LibP2PDB:Export(db)
+    assert(IsTable(db), "db must be a table")
+
+    -- Validate db instance
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database instance")
+
+    -- Build export state
+    local state = {
+        clock = dbi.clock,
+        tables = {},
+    }
+    for tableName, tableData in pairs(dbi.tables) do
+        state.tables[tableName] = {
+            rows = {},
+        }
+        for key, row in pairs(tableData.rows) do
+            state.tables[tableName].rows[key] = {
+                data = CopyTable(row.data),
+                version = CopyTable(row.version),
+            }
+        end
+    end
+    return state
 end
 
--- Load DB state from SavedVariables
-function LibP2PDB:Import(db, savedTable)
+---Import the DB state from an exported table.
+---Merges the imported state with existing data based on version metadata.
+---Validates incoming data against table definitions, skipping invalid entries.
+---@param db LibP2PDB.DB Database instance
+---@param state LibP2PDB.DBState The exported database state to import
+function LibP2PDB:Import(db, state)
+    assert(IsTable(db), "db must be a table")
+    assert(IsTable(state), "exportedDB must be a table")
+    assert(IsNumber(state.clock), "invalid exportedDB clock")
+    assert(IsTable(state.tables), "invalid exportedDB tables")
+
+    -- Validate db instance
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database instance")
+
+    -- Merge Lamport clock
+    dbi.clock = max(dbi.clock, state.clock)
+
+    -- Import DB state
+    for incomingTableName, incomingTableData in pairs(state.tables or {}) do
+        local t = dbi.tables[incomingTableName]
+        if t then
+            for incomingKey, incomingRow in pairs(incomingTableData.rows or {}) do
+                local function processRow()
+                    -- Validate key type
+                    if type(incomingKey) ~= t.keyType then
+                        return
+                    end
+
+                    -- Validate version metadata
+                    local incomingVersion = incomingRow.version
+                    if not incomingVersion or not IsNumber(incomingVersion.clock) or not IsNonEmptyString(incomingVersion.peer) then
+                        return
+                    end
+
+                    -- Validate row data (if not a tombstone)
+                    if not incomingVersion.tombstone then
+                        local incomingData = incomingRow.data
+                        if not IsTable(incomingData) then
+                            return
+                        end
+
+                        -- If a schema is defined, validate fields
+                        if t.schema then
+                            for fieldName, allowedTypes in pairs(t.schema) do
+                                local fieldValue = incomingData[fieldName]
+                                local fieldType = type(fieldValue)
+                                if type(allowedTypes) == "table" then
+                                    -- Multiple allowed types
+                                    local allowed = false
+                                    for _, allowedType in ipairs(allowedTypes) do
+                                        if fieldType == allowedType then
+                                            allowed = true
+                                            break
+                                        end
+                                    end
+                                    if not allowed then
+                                        return
+                                    end
+                                elseif type(allowedTypes) == "string" then
+                                    if fieldType ~= allowedTypes then
+                                        return
+                                    end
+                                else
+                                    return
+                                end
+                            end
+                        end
+
+                        -- Run custom validation if provided
+                        if t.onValidate and not t.onValidate(incomingKey, incomingData) then
+                            return
+                        end
+                    end
+
+                    -- Merge: compare versions
+                    local r = t.rows[incomingKey]
+                    if r then
+                        -- Existing row - compare versions
+                        local existingVersion = r.version
+                        if incomingVersion.clock > existingVersion.clock or
+                           (incomingVersion.clock == existingVersion.clock and incomingVersion.peer > existingVersion.peer) then
+                            -- Incoming row is newer - replace
+                            t.rows[incomingKey] = {
+                                data = CopyTable(incomingRow.data),
+                                version = CopyTable(incomingRow.version),
+                            }
+                        end
+                    else
+                        -- Directly set the row
+                        t.rows[incomingKey] = {
+                            data = CopyTable(incomingRow.data),
+                            version = CopyTable(incomingRow.version),
+                        }
+                    end
+                end
+                pcall(processRow)
+            end
+        end
+    end
 end
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -615,7 +765,7 @@ if testing then
 
     local LibP2PDBTests = {
         New = function()
-            local db = LibP2PDB:New({
+            local db = LibP2PDB:NewDB({
                 clusterId = "TestCluster12345",
                 namespace = "MyNamespace",
                 channels = { "GUILD" },
@@ -632,33 +782,60 @@ if testing then
             Assert.IsEmptyTable(dbi.tables)
             Assert.IsFunction(dbi.onChange)
             --Assert.IsNil(dbi.writePolicy)
+
+            Assert.Throws(function() LibP2PDB:NewDB({
+                clusterId = "TestCluster12345",
+                namespace = "MyNamespace",
+            }) end)
         end,
 
-        New_DescIsInvalid_Throws = function()
-            Assert.Throws(function() LibP2PDB:New(nil) end)
-            Assert.Throws(function() LibP2PDB:New(123) end)
-            Assert.Throws(function() LibP2PDB:New("invalid") end)
-            Assert.Throws(function() LibP2PDB:New({}) end)
+        NewDB_DescIsInvalid_Throws = function()
+            Assert.Throws(function() LibP2PDB:NewDB(nil) end)
+            Assert.Throws(function() LibP2PDB:NewDB(123) end)
+            Assert.Throws(function() LibP2PDB:NewDB("invalid") end)
+            Assert.Throws(function() LibP2PDB:NewDB({}) end)
         end,
 
-        New_DescClusterIdIsInvalid_Throws = function()
-            Assert.Throws(function() LibP2PDB:New({ clusterId = nil, namespace = "n" }) end)
-            Assert.Throws(function() LibP2PDB:New({ clusterId = 123, namespace = "n" }) end)
-            Assert.Throws(function() LibP2PDB:New({ clusterId = {}, namespace = "n" }) end)
-            Assert.Throws(function() LibP2PDB:New({ clusterId = "", namespace = "n" }) end)
-            Assert.Throws(function() LibP2PDB:New({ clusterId = "abcdefg1234567890", namespace = "n" }) end)
+        NewDB_DescClusterIdIsInvalid_Throws = function()
+            Assert.Throws(function() LibP2PDB:NewDB({ clusterId = nil, namespace = "n" }) end)
+            Assert.Throws(function() LibP2PDB:NewDB({ clusterId = 123, namespace = "n" }) end)
+            Assert.Throws(function() LibP2PDB:NewDB({ clusterId = {}, namespace = "n" }) end)
+            Assert.Throws(function() LibP2PDB:NewDB({ clusterId = "", namespace = "n" }) end)
+            Assert.Throws(function() LibP2PDB:NewDB({ clusterId = "abcdefg1234567890", namespace = "n" }) end)
         end,
 
-        New_DescNamespaceIsInvalid_Throws = function()
-            Assert.Throws(function() LibP2PDB:New({ clusterId = "c", namespace = nil }) end)
-            Assert.Throws(function() LibP2PDB:New({ clusterId = "c", namespace = 123 }) end)
-            Assert.Throws(function() LibP2PDB:New({ clusterId = "c", namespace = {} }) end)
-            Assert.Throws(function() LibP2PDB:New({ clusterId = "c", namespace = "" }) end)
+        NewDB_DescNamespaceIsInvalid_Throws = function()
+            Assert.Throws(function() LibP2PDB:NewDB({ clusterId = "c", namespace = nil }) end)
+            Assert.Throws(function() LibP2PDB:NewDB({ clusterId = "c", namespace = 123 }) end)
+            Assert.Throws(function() LibP2PDB:NewDB({ clusterId = "c", namespace = {} }) end)
+            Assert.Throws(function() LibP2PDB:NewDB({ clusterId = "c", namespace = "" }) end)
         end,
 
-        DefineTable = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            Assert.IsTrue(LibP2PDB:DefineTable(db, {
+        GetDB = function()
+            local db1 = LibP2PDB:NewDB({ clusterId = "Cluster1", namespace = "NS1" })
+            local db2 = LibP2PDB:NewDB({ clusterId = "Cluster2", namespace = "NS2" })
+
+            local fetched1 = LibP2PDB:GetDB("Cluster1")
+            Assert.AreEqual(fetched1, db1)
+
+            local fetched2 = LibP2PDB:GetDB("Cluster2")
+            Assert.AreEqual(fetched2, db2)
+
+            local fetchedNil = LibP2PDB:GetDB("NonExistent")
+            Assert.IsNil(fetchedNil)
+        end,
+
+        GetDB_ClusterIdIsInvalid_Throws = function()
+            Assert.Throws(function() LibP2PDB:GetDB(nil) end)
+            Assert.Throws(function() LibP2PDB:GetDB(123) end)
+            Assert.Throws(function() LibP2PDB:GetDB({}) end)
+            Assert.Throws(function() LibP2PDB:GetDB("") end)
+            Assert.Throws(function() LibP2PDB:GetDB("abcdefg1234567890") end)
+        end,
+
+        NewTable = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            Assert.IsTrue(LibP2PDB:NewTable(db, {
                 name = "Users",
                 keyType = "string",
                 schema = {
@@ -683,68 +860,68 @@ if testing then
             Assert.IsEmptyTable(t.rows)
 
             -- Attempt to define the same table again
-            Assert.IsFalse(LibP2PDB:DefineTable(db, {
+            Assert.Throws(function() LibP2PDB:NewTable(db, {
                 name = "Users",
                 keyType = "string",
-            }))
+            }) end)
 
             -- Ensure the original table definition remains unchanged
             local t2 = dbi.tables["Users"]
             Assert.AreEqual(t, t2)
 
             -- Define another table
-            Assert.IsTrue(LibP2PDB:DefineTable(db, {
+            Assert.IsTrue(LibP2PDB:NewTable(db, {
                 name = "Products",
                 keyType = "number",
             }))
         end,
 
-        DefineTable_DBIsInvalid_Throws = function()
-            Assert.Throws(function() LibP2PDB:DefineTable(nil, { name = "Users", keyType = "string" }) end)
-            Assert.Throws(function() LibP2PDB:DefineTable(123, { name = "Users", keyType = "string" }) end)
-            Assert.Throws(function() LibP2PDB:DefineTable("invalid", { name = "Users", keyType = "string" }) end)
+        NewTable_DBIsInvalid_Throws = function()
+            Assert.Throws(function() LibP2PDB:NewTable(nil, { name = "Users", keyType = "string" }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(123, { name = "Users", keyType = "string" }) end)
+            Assert.Throws(function() LibP2PDB:NewTable("invalid", { name = "Users", keyType = "string" }) end)
         end,
 
-        DefineTable_DescIsInvalid_Throws = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            Assert.Throws(function() LibP2PDB:DefineTable(db, nil) end)
-            Assert.Throws(function() LibP2PDB:DefineTable(db, 123) end)
-            Assert.Throws(function() LibP2PDB:DefineTable(db, "invalid") end)
-            Assert.Throws(function() LibP2PDB:DefineTable(db, {}) end)
+        NewTable_DescIsInvalid_Throws = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            Assert.Throws(function() LibP2PDB:NewTable(db, nil) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, 123) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, "invalid") end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, {}) end)
         end,
 
-        DefineTable_DescNameIsInvalid_Throws = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            Assert.Throws(function() LibP2PDB:DefineTable(db, { name = nil, keyType = "string" }) end)
-            Assert.Throws(function() LibP2PDB:DefineTable(db, { name = 123, keyType = "string" }) end)
-            Assert.Throws(function() LibP2PDB:DefineTable(db, { name = "", keyType = "string" }) end)
+        NewTable_DescNameIsInvalid_Throws = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = nil, keyType = "string" }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = 123, keyType = "string" }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "", keyType = "string" }) end)
         end,
 
-        DefineTable_DescKeyTypeIsInvalid_Throws = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            Assert.Throws(function() LibP2PDB:DefineTable(db, { name = "Users", keyType = nil }) end)
-            Assert.Throws(function() LibP2PDB:DefineTable(db, { name = "Users", keyType = 123 }) end)
-            Assert.Throws(function() LibP2PDB:DefineTable(db, { name = "Users", keyType = "invalid" }) end)
+        NewTable_DescKeyTypeIsInvalid_Throws = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = nil }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = 123 }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "invalid" }) end)
         end,
 
-        DefineTable_DescSchemaIsInvalid_Throws = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            Assert.Throws(function() LibP2PDB:DefineTable(db, { name = "Users", keyType = "string", schema = 123 }) end)
+        NewTable_DescSchemaIsInvalid_Throws = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = 123 }) end)
         end,
 
-        DefineTable_DescOnValidateIsInvalid_Throws = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            Assert.Throws(function() LibP2PDB:DefineTable(db, { name = "Users", keyType = "string", onValidate = 123 }) end)
+        NewTable_DescOnValidateIsInvalid_Throws = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", onValidate = 123 }) end)
         end,
 
-        DefineTable_DescOnChangeIsInvalid_Throws = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            Assert.Throws(function() LibP2PDB:DefineTable(db, { name = "Users", keyType = "string", onChange = 123 }) end)
+        NewTable_DescOnChangeIsInvalid_Throws = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", onChange = 123 }) end)
         end,
 
         Insert = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            LibP2PDB:DefineTable(db, {
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, {
                 name = "Users",
                 keyType = "number",
                 schema = {
@@ -780,43 +957,43 @@ if testing then
         end,
 
         Insert_TableIsInvalid_Throws = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
             Assert.Throws(function() LibP2PDB:Insert(db, nil, 1, { name = "A" }) end)
             Assert.Throws(function() LibP2PDB:Insert(db, 123, 1, { name = "A" }) end)
             Assert.Throws(function() LibP2PDB:Insert(db, {}, 1, { name = "A" }) end)
         end,
 
         Insert_KeyIsInvalid_Throws = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            LibP2PDB:DefineTable(db, { name = "Users", keyType = "string" })
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
             Assert.Throws(function() LibP2PDB:Insert(db, "Users", nil, { name = "A" }) end)
             Assert.Throws(function() LibP2PDB:Insert(db, "Users", {}, { name = "A" }) end)
         end,
 
         Insert_KeyTypeMismatch_Throws = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            LibP2PDB:DefineTable(db, { name = "Users", keyType = "number" })
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number" })
             Assert.Throws(function() LibP2PDB:Insert(db, "Users", "user1", { name = "A" }) end)
         end,
 
         Insert_RowIsInvalid_Throws = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            LibP2PDB:DefineTable(db, { name = "Users", keyType = "string" })
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
             Assert.Throws(function() LibP2PDB:Insert(db, "Users", "user1", nil) end)
             Assert.Throws(function() LibP2PDB:Insert(db, "Users", "user1", 123) end)
             Assert.Throws(function() LibP2PDB:Insert(db, "Users", "user1", "invalid") end)
         end,
 
         Insert_RowSchemaMismatch_Throws = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            LibP2PDB:DefineTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             Assert.Throws(function() LibP2PDB:Insert(db, "Users", 1, { name = "Bob" }) end)
             Assert.Throws(function() LibP2PDB:Insert(db, "Users", 1, { name = "Bob", age = "25" }) end)
         end,
 
         Set = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            LibP2PDB:DefineTable(db, {
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, {
                 name = "Users",
                 keyType = "number",
                 schema = {
@@ -852,43 +1029,43 @@ if testing then
         end,
 
         Set_TableIsInvalid_Throws = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
             Assert.Throws(function() LibP2PDB:Set(db, nil, 1, { name = "A" }) end)
             Assert.Throws(function() LibP2PDB:Set(db, 123, 1, { name = "A" }) end)
             Assert.Throws(function() LibP2PDB:Set(db, {}, 1, { name = "A" }) end)
         end,
 
         Set_KeyIsInvalid_Throws = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            LibP2PDB:DefineTable(db, { name = "Users", keyType = "string" })
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
             Assert.Throws(function() LibP2PDB:Set(db, "Users", nil, { name = "A" }) end)
             Assert.Throws(function() LibP2PDB:Set(db, "Users", {}, { name = "A" }) end)
         end,
 
         Set_KeyTypeMismatch_Throws = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            LibP2PDB:DefineTable(db, { name = "Users", keyType = "number" })
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number" })
             Assert.Throws(function() LibP2PDB:Set(db, "Users", "user1", { name = "A" }) end)
         end,
 
         Set_RowIsInvalid_Throws = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            LibP2PDB:DefineTable(db, { name = "Users", keyType = "string" })
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
             Assert.Throws(function() LibP2PDB:Set(db, "Users", "user1", nil) end)
             Assert.Throws(function() LibP2PDB:Set(db, "Users", "user1", 123) end)
             Assert.Throws(function() LibP2PDB:Set(db, "Users", "user1", "invalid") end)
         end,
 
         Set_RowSchemaMismatch_Throws = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            LibP2PDB:DefineTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             Assert.Throws(function() LibP2PDB:Set(db, "Users", 1, { name = "Bob" }) end)
             Assert.Throws(function() LibP2PDB:Set(db, "Users", 1, { name = "Bob", age = "25" }) end)
         end,
 
         Update = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            LibP2PDB:DefineTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             LibP2PDB:Insert(db, "Users", 1, { name = "Bob", age = 25 })
             local updateFn = function(row)
                 row.age = row.age + 1
@@ -907,22 +1084,22 @@ if testing then
         end,
 
         Update_TableIsInvalid_Throws = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
             Assert.Throws(function() LibP2PDB:Update(db, nil, 1, function() end) end)
             Assert.Throws(function() LibP2PDB:Update(db, 123, 1, function() end) end)
             Assert.Throws(function() LibP2PDB:Update(db, {}, 1, function() end) end)
         end,
 
         Update_KeyIsInvalid_Throws = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            LibP2PDB:DefineTable(db, { name = "Users", keyType = "string" })
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
             Assert.Throws(function() LibP2PDB:Update(db, "Users", nil, function() end) end)
             Assert.Throws(function() LibP2PDB:Update(db, "Users", {}, function() end) end)
         end,
 
         Update_UpdateFunctionIsInvalid_Throws = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            LibP2PDB:DefineTable(db, { name = "Users", keyType = "string" })
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
             LibP2PDB:Insert(db, "Users", "user1", { name = "A" })
             Assert.Throws(function() LibP2PDB:Update(db, "Users", "user1", nil) end)
             Assert.Throws(function() LibP2PDB:Update(db, "Users", "user1", 123) end)
@@ -930,8 +1107,8 @@ if testing then
         end,
 
         Get = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            LibP2PDB:DefineTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             LibP2PDB:Insert(db, "Users", 1, { name = "Bob", age = 25 })
             Assert.AreEqual(LibP2PDB:Get(db, "Users", 1), { name = "Bob", age = 25 })
             Assert.IsNil(LibP2PDB:Get(db, "Users", 2))
@@ -944,22 +1121,22 @@ if testing then
         end,
 
         Get_TableIsInvalid_Throws = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
             Assert.Throws(function() LibP2PDB:Get(db, nil, 1) end)
             Assert.Throws(function() LibP2PDB:Get(db, 123, 1) end)
             Assert.Throws(function() LibP2PDB:Get(db, {}, 1) end)
         end,
 
         Get_KeyIsInvalid_Throws = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            LibP2PDB:DefineTable(db, { name = "Users", keyType = "string" })
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
             Assert.Throws(function() LibP2PDB:Get(db, "Users", nil) end)
             Assert.Throws(function() LibP2PDB:Get(db, "Users", {}) end)
         end,
 
         Delete = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            LibP2PDB:DefineTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             LibP2PDB:Insert(db, "Users", 1, { name = "Bob", age = 25 })
             Assert.IsTrue(LibP2PDB:Delete(db, "Users", 1))
             Assert.IsNil(LibP2PDB:Get(db, "Users", 1))
@@ -973,22 +1150,22 @@ if testing then
         end,
 
         Delete_TableIsInvalid_Throws = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
             Assert.Throws(function() LibP2PDB:Delete(db, nil, 1) end)
             Assert.Throws(function() LibP2PDB:Delete(db, 123, 1) end)
             Assert.Throws(function() LibP2PDB:Delete(db, {}, 1) end)
         end,
 
         Delete_KeyIsInvalid_Throws = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            LibP2PDB:DefineTable(db, { name = "Users", keyType = "string" })
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
             Assert.Throws(function() LibP2PDB:Delete(db, "Users", nil) end)
             Assert.Throws(function() LibP2PDB:Delete(db, "Users", {}) end)
         end,
 
         Schema_IsOptional = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            Assert.IsTrue(LibP2PDB:DefineTable(db, { name = "Logs", keyType = "number" }))
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            Assert.IsTrue(LibP2PDB:NewTable(db, { name = "Logs", keyType = "number" }))
             Assert.IsTrue(LibP2PDB:Insert(db, "Logs", 1, { message = "System started", timestamp = 1620000000 }))
             Assert.AreEqual(LibP2PDB:Get(db, "Logs", 1), { message = "System started", timestamp = 1620000000 })
             Assert.IsTrue(LibP2PDB:Insert(db, "Logs", 2, { message = "User logged in", timestamp = 1620003600, username = "Bob" }))
@@ -996,8 +1173,8 @@ if testing then
         end,
 
         Schema_MultipleTypesAllowed = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            Assert.IsTrue(LibP2PDB:DefineTable(db, { name = "Metrics", keyType = "string", schema = { value = { "number", "string" }, timestamp = "number" } }))
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            Assert.IsTrue(LibP2PDB:NewTable(db, { name = "Metrics", keyType = "string", schema = { value = { "number", "string" }, timestamp = "number" } }))
             Assert.IsTrue(LibP2PDB:Insert(db, "Metrics", "cpu_usage", { value = 75.5, timestamp = 1620000000 }))
             Assert.AreEqual(LibP2PDB:Get(db, "Metrics", "cpu_usage"), { value = 75.5, timestamp = 1620000000 })
             Assert.IsTrue(LibP2PDB:Insert(db, "Metrics", "status", { value = "OK", timestamp = 1620003600 }))
@@ -1005,8 +1182,8 @@ if testing then
         end,
 
         Schema_NilTypeAllowed = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            Assert.IsTrue(LibP2PDB:DefineTable(db, { name = "Settings", keyType = "string", schema = { value = { "string", "nil" } } }))
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            Assert.IsTrue(LibP2PDB:NewTable(db, { name = "Settings", keyType = "string", schema = { value = { "string", "nil" } } }))
             Assert.IsTrue(LibP2PDB:Insert(db, "Settings", "theme", { value = "dark" }))
             Assert.AreEqual(LibP2PDB:Get(db, "Settings", "theme"), { value = "dark" })
             Assert.IsTrue(LibP2PDB:Insert(db, "Settings", "notifications", { value = nil }))
@@ -1014,8 +1191,8 @@ if testing then
         end,
 
         Subscribe = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            LibP2PDB:DefineTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             local callbackInvoked = 0
             local callback = function(key, row)
                 callbackInvoked = callbackInvoked + 1
@@ -1035,23 +1212,23 @@ if testing then
         end,
 
         Subscribe_TableIsInvalid_Throws = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
             Assert.Throws(function() LibP2PDB:Subscribe(db, nil, function() end) end)
             Assert.Throws(function() LibP2PDB:Subscribe(db, 123, function() end) end)
             Assert.Throws(function() LibP2PDB:Subscribe(db, {}, function() end) end)
         end,
 
         Subscribe_CallbackIsInvalid_Throws = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            LibP2PDB:DefineTable(db, { name = "Users", keyType = "string" })
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
             Assert.Throws(function() LibP2PDB:Subscribe(db, "Users", nil) end)
             Assert.Throws(function() LibP2PDB:Subscribe(db, "Users", 123) end)
             Assert.Throws(function() LibP2PDB:Subscribe(db, "Users", "invalid") end)
         end,
 
         Unsubscribe = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            LibP2PDB:DefineTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             local callbackInvoked = 0
             local callback = function(key, row)
                 callbackInvoked = callbackInvoked + 1
@@ -1070,18 +1247,57 @@ if testing then
         end,
 
         Unsubscribe_TableIsInvalid_Throws = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
             Assert.Throws(function() LibP2PDB:Unsubscribe(db, nil, function() end) end)
             Assert.Throws(function() LibP2PDB:Unsubscribe(db, 123, function() end) end)
             Assert.Throws(function() LibP2PDB:Unsubscribe(db, {}, function() end) end)
         end,
 
         Unsubscribe_CallbackIsInvalid_Throws = function()
-            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
-            LibP2PDB:DefineTable(db, { name = "Users", keyType = "string" })
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
             Assert.Throws(function() LibP2PDB:Unsubscribe(db, "Users", nil) end)
             Assert.Throws(function() LibP2PDB:Unsubscribe(db, "Users", 123) end)
             Assert.Throws(function() LibP2PDB:Unsubscribe(db, "Users", "invalid") end)
+        end,
+
+        Export = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            LibP2PDB:Insert(db, "Users", 1, { name = "Bob", age = 25 })
+            LibP2PDB:Insert(db, "Users", 2, { name = "Alice", age = 30 })
+
+            local state = LibP2PDB:Export(db)
+            Assert.IsTable(state)
+            Assert.IsTable(state.tables)
+            Assert.IsTable(state.tables["Users"])
+            Assert.IsTable(state.tables["Users"].rows)
+            Assert.AreEqual(state.tables["Users"].rows[1].data, { name = "Bob", age = 25 })
+            Assert.AreEqual(state.tables["Users"].rows[1].version, { clock = 1, peer = Private.peerId })
+            Assert.AreEqual(state.tables["Users"].rows[2].data, { name = "Alice", age = 30 })
+            Assert.AreEqual(state.tables["Users"].rows[2].version, { clock = 2, peer = Private.peerId })
+        end,
+
+        Export_DBIsInvalid_Throws = function()
+            Assert.Throws(function() LibP2PDB:Export(nil) end)
+            Assert.Throws(function() LibP2PDB:Export(123) end)
+            Assert.Throws(function() LibP2PDB:Export("invalid") end)
+        end,
+
+        Import = function()
+            local db1 = LibP2PDB:NewDB({ clusterId = "c1", namespace = "n1" })
+            LibP2PDB:NewTable(db1, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            LibP2PDB:Insert(db1, "Users", 1, { name = "Bob", age = 25 })
+            LibP2PDB:Insert(db1, "Users", 2, { name = "Alice", age = 30 })
+
+            local state = LibP2PDB:Export(db1)
+            local db2 = LibP2PDB:NewDB({ clusterId = "c2", namespace = "n2" })
+            LibP2PDB:NewTable(db2, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+
+            LibP2PDB:Import(db2, state)
+
+            Assert.AreEqual(LibP2PDB:Get(db2, "Users", 1), LibP2PDB:Get(db1, "Users", 1))
+            Assert.AreEqual(LibP2PDB:Get(db2, "Users", 2), LibP2PDB:Get(db1, "Users", 2))
         end,
     }
 
