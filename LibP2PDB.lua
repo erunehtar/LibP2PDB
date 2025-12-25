@@ -1,4 +1,6 @@
+------------------------------------------------------------------------------------------------------------------------
 -- LibP2PDB: A lightweight, embeddable library for peer-to-peer distributed-database synchronization in WoW addons.
+------------------------------------------------------------------------------------------------------------------------
 
 local MAJOR, MINOR = "LibP2PDB", 1
 assert(LibStub, MAJOR .. " requires LibStub")
@@ -17,7 +19,7 @@ local assert, print = assert, print
 local type, ipairs, pairs = type, ipairs, pairs
 local min, max, abs = min, max, abs
 local format, strsub, strfind, strjoin = format, strsub, strfind, strjoin
-local unpack, CopyTable = unpack, CopyTable
+local unpack, tinsert, CopyTable = unpack, table.insert, CopyTable
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Local WoW API References
@@ -78,6 +80,23 @@ end
 
 local function IsFunction(f)
     return type(f) == "function"
+end
+
+local function IsPrimitiveType(t)
+    return t == "string" or t == "number" or t == "boolean" or t == "nil"
+end
+
+local function IsIncomingNewer(incoming, existing)
+    if not existing then
+        return true
+    end
+    if incoming.clock > existing.clock then
+        return true
+    elseif incoming.clock < existing.clock then
+        return false
+    else
+        return incoming.peer > existing.peer -- clocks are equal, use peer ID as tiebreaker
+    end
 end
 
 local function PlayerGUIDShort()
@@ -200,6 +219,15 @@ function LibP2PDB:NewTable(db, desc)
     for fieldName, allowedTypes in pairs(desc.schema or {}) do
         assert(IsNonEmptyString(fieldName), "each field name in desc.schema must be a non-empty string")
         assert(IsNonEmptyString(allowedTypes) or IsNonEmptyTable(allowedTypes), "each field type in desc.schema must be a non-empty string or table of strings")
+        if type(allowedTypes) == "table" then
+            for _, t in ipairs(allowedTypes) do
+                assert(IsNonEmptyString(t), "each type in desc.schema field types must be a non-empty string")
+                assert(IsPrimitiveType(t), "field types in desc.schema must be 'string', 'number', 'boolean', or 'nil'")
+            end
+        else
+            assert(IsNonEmptyString(allowedTypes), "field type in desc.schema must be a non-empty string")
+            assert(IsPrimitiveType(allowedTypes), "field type in desc.schema must be 'string', 'number', 'boolean', or 'nil'")
+        end
     end
     assert(desc.onValidate == nil or IsFunction(desc.onValidate), "desc.onValidate must be a function if provided")
     assert(desc.onChange == nil or IsFunction(desc.onChange), "desc.onChange must be a function if provided")
@@ -511,6 +539,7 @@ end
 ---Validates incoming data against table definitions, skipping invalid entries.
 ---@param db LibP2PDB.DB Database instance
 ---@param state LibP2PDB.DBState The exported database state to import
+---@return boolean,table<string>|nil result Returns true on success, false otherwise. On failure, a table of error messages is returned as the second value.
 function LibP2PDB:Import(db, state)
     assert(IsTable(db), "db must be a table")
     assert(IsTable(state), "exportedDB must be a table")
@@ -525,6 +554,7 @@ function LibP2PDB:Import(db, state)
     dbi.clock = max(dbi.clock, state.clock)
 
     -- Import DB state
+    local result, errors = true, nil
     for incomingTableName, incomingTableData in pairs(state.tables or {}) do
         local t = dbi.tables[incomingTableName]
         if t then
@@ -532,80 +562,91 @@ function LibP2PDB:Import(db, state)
                 local function processRow()
                     -- Validate key type
                     if type(incomingKey) ~= t.keyType then
-                        return
+                        return false, format("skipping row with invalid key type '%s' in table '%s'", type(incomingKey), incomingTableName)
+                    end
+
+                    -- Validate row structure
+                    if not IsTable(incomingRow) then
+                        return false, format("skipping row with invalid structure for key '%s' in table '%s'", tostring(incomingKey), incomingTableName)
                     end
 
                     -- Validate version metadata
                     local incomingVersion = incomingRow.version
-                    if not incomingVersion or not IsNumber(incomingVersion.clock) or not IsNonEmptyString(incomingVersion.peer) then
-                        return
+                    if not IsTable(incomingVersion) or not IsNumber(incomingVersion.clock) or not IsNonEmptyString(incomingVersion.peer) then
+                        return false, format("skipping row with invalid version metadata for key '%s' in table '%s'", tostring(incomingKey), incomingTableName)
                     end
 
-                    -- Validate row data (if not a tombstone)
-                    if not incomingVersion.tombstone then
-                        local incomingData = incomingRow.data
-                        if not IsTable(incomingData) then
-                            return
-                        end
-
-                        -- If a schema is defined, validate fields
-                        if t.schema then
-                            for fieldName, allowedTypes in pairs(t.schema) do
-                                local fieldValue = incomingData[fieldName]
-                                local fieldType = type(fieldValue)
-                                if type(allowedTypes) == "table" then
-                                    -- Multiple allowed types
-                                    local allowed = false
-                                    for _, allowedType in ipairs(allowedTypes) do
-                                        if fieldType == allowedType then
-                                            allowed = true
-                                            break
-                                        end
-                                    end
-                                    if not allowed then
-                                        return
-                                    end
-                                elseif type(allowedTypes) == "string" then
-                                    if fieldType ~= allowedTypes then
-                                        return
-                                    end
-                                else
-                                    return
-                                end
-                            end
-                        end
-
-                        -- Run custom validation if provided
-                        if t.onValidate and not t.onValidate(incomingKey, incomingData) then
-                            return
-                        end
+                    local cleanVersion = {
+                        clock = incomingVersion.clock,
+                        peer = incomingVersion.peer,
+                    }
+                    if incomingVersion.tombstone == true then
+                        cleanVersion.tombstone = true
                     end
 
-                    -- Merge: compare versions
-                    local r = t.rows[incomingKey]
-                    if r then
-                        -- Existing row - compare versions
-                        local existingVersion = r.version
-                        if incomingVersion.clock > existingVersion.clock or
-                           (incomingVersion.clock == existingVersion.clock and incomingVersion.peer > existingVersion.peer) then
-                            -- Incoming row is newer - replace
+                    local existingRow = t.rows[incomingKey]
+
+                    -- Tombstone merge
+                    if cleanVersion.tombstone then
+                        if not existingRow or IsIncomingNewer(cleanVersion, existingRow.version) then
                             t.rows[incomingKey] = {
-                                data = CopyTable(incomingRow.data),
-                                version = CopyTable(incomingRow.version),
+                                data = nil,
+                                version = cleanVersion,
                             }
+                            return true
+                        else
+                            return false, format("skipping tombstone for key '%s' in table '%s' as existing row is newer", tostring(incomingKey), incomingTableName)
+                        end
+                    end
+
+                    -- Validate data
+                    local incomingData = incomingRow.data
+                    if not IsTable(incomingData) then
+                        return false, format("skipping row with invalid data for key '%s' in table '%s'", tostring(incomingKey), incomingTableName)
+                    end
+
+                    local cleanData = {}
+                    local result, msg = pcall(function() cleanData = InternalSchemaCopy(incomingTableName, t.schema, incomingData) end)
+                    if not result then
+                        return false, format("skipping row with schema validation failure for key '%s' in table '%s': %s", tostring(incomingKey), incomingTableName, tostring(msg))
+                    end
+
+                    -- Custom validation
+                    if t.onValidate and not t.onValidate(incomingKey, cleanData) then
+                        return false, format("skipping row that failed custom validation for key '%s' in table '%s'", tostring(incomingKey), incomingTableName)
+                    end
+
+                    -- Merge
+                    if existingRow then
+                        if IsIncomingNewer(cleanVersion, existingRow.version) then
+                            t.rows[incomingKey] = {
+                                data = cleanData,
+                                version = cleanVersion,
+                            }
+                            return true
+                        else
+                            return false, format("skipping row for key '%s' in table '%s' as existing row is newer", tostring(incomingKey), incomingTableName)
                         end
                     else
-                        -- Directly set the row
                         t.rows[incomingKey] = {
-                            data = CopyTable(incomingRow.data),
-                            version = CopyTable(incomingRow.version),
+                            data = cleanData,
+                            version = cleanVersion,
                         }
+                        return true
                     end
                 end
-                pcall(processRow)
+
+                -- Process with error handling
+                local processResult, processErrorMsg = processRow()
+                if not processResult then
+                    result = false
+                    errors = errors or {}
+                    tinsert(errors, "error processing row with key '" .. tostring(incomingKey) .. "' in table '" .. incomingTableName .. "': " .. tostring(processErrorMsg))
+                end
             end
         end
     end
+    return result, errors
 end
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -656,18 +697,22 @@ end
 -- Private Functions
 ------------------------------------------------------------------------------------------------------------------------
 
-function InternalSet(db, dbi, table, t, key, row)
-    -- If a schema is defined, clean the row to only include schema-defined fields
-    local cleanRow
-    if not t.schema then
-        cleanRow = row -- no schema, accept all fields
+function InternalSchemaCopy(table, schema, data)
+    local result = {}
+    if not schema then
+        -- No schema: shallow copy only primitives
+        for fieldName, fieldValue in pairs(data) do
+            local fieldType = type(fieldValue)
+            if IsPrimitiveType(fieldType) then
+                result[fieldName] = fieldValue
+            end
+        end
     else
-        cleanRow = {}
-        for fieldName, allowedTypes in pairs(t.schema) do
-            local fieldValue = row[fieldName]
+        -- Schema defined: validate and copy only defined fields
+        for fieldName, allowedTypes in pairs(schema) do
+            local fieldValue = data[fieldName]
             local fieldType = type(fieldValue)
             if type(allowedTypes) == "table" then
-                -- Multiple allowed types
                 local allowed = false
                 for _, allowedType in ipairs(allowedTypes) do
                     if fieldType == allowedType then
@@ -681,12 +726,18 @@ function InternalSet(db, dbi, table, t, key, row)
             else
                 error("invalid schema definition for field '" .. fieldName .. "' in table '" .. table .. "'")
             end
-            cleanRow[fieldName] = fieldValue
+            result[fieldName] = fieldValue
         end
     end
+    return result
+end
+
+function InternalSet(db, dbi, table, t, key, row)
+    -- Apply schema
+    local data = InternalSchemaCopy(table, t.schema, row)
 
     -- Run custom validation if provided
-    if t.onValidate and not t.onValidate(key, cleanRow) then
+    if t.onValidate and not t.onValidate(key, data) then
         return false
     end
 
@@ -695,7 +746,7 @@ function InternalSet(db, dbi, table, t, key, row)
 
     -- Store the row
     t.rows[key] = {
-        data = cleanRow,
+        data = data,
         version = {
             clock = dbi.clock,
             peer = Private.peerId,
@@ -704,17 +755,17 @@ function InternalSet(db, dbi, table, t, key, row)
 
     -- Fire table change callback
     if t.onChange then
-        t.onChange(key, cleanRow)
+        t.onChange(key, data)
     end
 
     -- Fire db change callback
     if dbi.onChange then
-        dbi.onChange(table, key, cleanRow)
+        dbi.onChange(table, key, data)
     end
 
     -- Fire subscribers
     for callback in pairs(t.subscribers) do
-        callback(key, cleanRow)
+        callback(key, data)
     end
 
     return true
@@ -783,10 +834,12 @@ if testing then
             Assert.IsFunction(dbi.onChange)
             --Assert.IsNil(dbi.writePolicy)
 
-            Assert.Throws(function() LibP2PDB:NewDB({
-                clusterId = "TestCluster12345",
-                namespace = "MyNamespace",
-            }) end)
+            Assert.Throws(function()
+                LibP2PDB:NewDB({
+                    clusterId = "TestCluster12345",
+                    namespace = "MyNamespace",
+                })
+            end)
         end,
 
         NewDB_DescIsInvalid_Throws = function()
@@ -860,10 +913,12 @@ if testing then
             Assert.IsEmptyTable(t.rows)
 
             -- Attempt to define the same table again
-            Assert.Throws(function() LibP2PDB:NewTable(db, {
-                name = "Users",
-                keyType = "string",
-            }) end)
+            Assert.Throws(function()
+                LibP2PDB:NewTable(db, {
+                    name = "Users",
+                    keyType = "string",
+                })
+            end)
 
             -- Ensure the original table definition remains unchanged
             local t2 = dbi.tables["Users"]
@@ -1163,6 +1218,14 @@ if testing then
             Assert.Throws(function() LibP2PDB:Delete(db, "Users", {}) end)
         end,
 
+        Schema_OnlyPrimitiveTypesAllowed = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Products", keyType = "number", schema = { a = "function" } }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Products", keyType = "number", schema = { a = "table" } }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Products", keyType = "number", schema = { a = "userdata" } }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Products", keyType = "number", schema = { a = "thread" } }) end)
+        end,
+
         Schema_IsOptional = function()
             local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
             Assert.IsTrue(LibP2PDB:NewTable(db, { name = "Logs", keyType = "number" }))
@@ -1170,6 +1233,15 @@ if testing then
             Assert.AreEqual(LibP2PDB:Get(db, "Logs", 1), { message = "System started", timestamp = 1620000000 })
             Assert.IsTrue(LibP2PDB:Insert(db, "Logs", 2, { message = "User logged in", timestamp = 1620003600, username = "Bob" }))
             Assert.AreEqual(LibP2PDB:Get(db, "Logs", 2), { message = "User logged in", timestamp = 1620003600, username = "Bob" })
+        end,
+
+        Schema_CopySkipNonPrimitiveTypes = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            Assert.IsTrue(LibP2PDB:NewTable(db, { name = "Config", keyType = "string" }))
+            Assert.IsTrue(LibP2PDB:Insert(db, "Config", "settings", { maxUsers = 100, someFunction = function() end, nestedTable = { a = 1 } }))
+
+            local row = LibP2PDB:Get(db, "Config", "settings")
+            Assert.AreEqual(row, { maxUsers = 100 })
         end,
 
         Schema_MultipleTypesAllowed = function()
@@ -1294,10 +1366,48 @@ if testing then
             local db2 = LibP2PDB:NewDB({ clusterId = "c2", namespace = "n2" })
             LibP2PDB:NewTable(db2, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
 
-            LibP2PDB:Import(db2, state)
+            local result, errors = LibP2PDB:Import(db2, state)
+            Assert.IsTrue(result)
+            Assert.IsNil(errors)
 
             Assert.AreEqual(LibP2PDB:Get(db2, "Users", 1), LibP2PDB:Get(db1, "Users", 1))
             Assert.AreEqual(LibP2PDB:Get(db2, "Users", 2), LibP2PDB:Get(db1, "Users", 2))
+        end,
+
+        Import_DBIsInvalid_Throws = function()
+            Assert.Throws(function() LibP2PDB:Import(nil, {}) end)
+            Assert.Throws(function() LibP2PDB:Import(123, {}) end)
+            Assert.Throws(function() LibP2PDB:Import("invalid", {}) end)
+        end,
+
+        Import_StateIsInvalid_Throws = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            Assert.Throws(function() LibP2PDB:Import(db, nil) end)
+            Assert.Throws(function() LibP2PDB:Import(db, 123) end)
+            Assert.Throws(function() LibP2PDB:Import(db, "invalid") end)
+        end,
+
+        Import_SkipInvalidRows = function()
+            local db1 = LibP2PDB:NewDB({ clusterId = "c1", namespace = "n1" })
+            LibP2PDB:NewTable(db1, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            LibP2PDB:Insert(db1, "Users", 1, { name = "Bob", age = 25 })
+
+            local state = LibP2PDB:Export(db1)
+
+            -- Corrupt the exported state by adding a row with invalid schema
+            state.tables["Users"].rows[2] = { data = { name = "Alice" }, version = { clock = 2, peer = Private.peerId } }
+
+            local db2 = LibP2PDB:NewDB({ clusterId = "c2", namespace = "n2" })
+            LibP2PDB:NewTable(db2, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+
+            local result, errors = LibP2PDB:Import(db2, state)
+            Assert.IsFalse(result)
+            Assert.IsTable(errors)
+            Assert.IsNotEmptyTable(errors)
+
+            -- Valid row should still be imported
+            Assert.AreEqual(LibP2PDB:Get(db2, "Users", 1), LibP2PDB:Get(db1, "Users", 1))
+            Assert.IsNil(LibP2PDB:Get(db2, "Users", 2))
         end,
     }
 
