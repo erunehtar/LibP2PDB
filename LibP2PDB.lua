@@ -15,7 +15,8 @@ assert(ChatThrottleLib, MAJOR .. " requires ChatThrottleLib")
 
 local assert, print = assert, print
 local type, ipairs, pairs = type, ipairs, pairs
-local format, strsub, strfind = format, strsub, strfind
+local format, strsub, strfind, strjoin = format, strsub, strfind, strjoin
+local unpack = unpack
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Local WoW API References
@@ -64,7 +65,7 @@ local function IsTable(t)
 end
 
 local function IsNonEmptyTable(t)
-    return type(t) == "table" and next(t)
+    return type(t) == "table" and next(t) ~= nil
 end
 
 local function IsFunction(f)
@@ -83,7 +84,7 @@ end
 
 local function NewPrivate()
     local private = {}
-    private.clusters = setmetatable({}, { __mode = "k" })
+    private.clusters = {}
     private.databases = setmetatable({}, { __mode = "k" })
     private.peerId = PlayerGUIDShort()
     return private
@@ -166,7 +167,7 @@ end
 ---@class LibP2PDB.TableDesc Description for defining a table in the database
 ---@field name string Name of the table to define
 ---@field keyType string Data type of the primary key ("string" or "number")
----@field schema table<string, string>|nil Optional table schema defining field names and their data types
+---@field schema table<string, string|table<string>>|nil Optional table schema defining field names and their allowed data types
 ---@field onValidate function|nil Optional validation function(key, row) -> true/false
 ---@field onChange function|nil Optional callback function(key, row) on row changes
 
@@ -177,22 +178,22 @@ end
 ---@param desc LibP2PDB.TableDesc Description of the table to define
 ---@return boolean result Returns true if the table was created, false if it already existed
 function LibP2PDB:DefineTable(db, desc)
-    assert(IsTable(db), "db must be a valid database instance")
+    assert(IsTable(db), "db must be a table")
     assert(IsNonEmptyTable(desc), "desc must be a non-empty table")
     assert(IsNonEmptyString(desc.name), "desc.name must be a non-empty string")
     assert(IsNonEmptyString(desc.keyType), "desc.keyType must be a non-empty string")
     assert(desc.keyType == "string" or desc.keyType == "number", "desc.keyType must be 'string' or 'number'")
     assert(desc.schema == nil or IsTable(desc.schema), "desc.schema must be a table if provided")
-    for fieldName, fieldType in pairs(desc.schema or {}) do
-        assert(IsNonEmptyString(fieldName))
-        assert(IsNonEmptyString(fieldType))
+    for fieldName, allowedTypes in pairs(desc.schema or {}) do
+        assert(IsNonEmptyString(fieldName), "each field name in desc.schema must be a non-empty string")
+        assert(IsNonEmptyString(allowedTypes) or IsNonEmptyTable(allowedTypes), "each field type in desc.schema must be a non-empty string or table of strings")
     end
-    assert(desc.onValidate == nil or IsFunction(desc.onValidate))
-    assert(desc.onChange == nil or IsFunction(desc.onChange))
+    assert(desc.onValidate == nil or IsFunction(desc.onValidate), "desc.onValidate must be a function if provided")
+    assert(desc.onChange == nil or IsFunction(desc.onChange), "desc.onChange must be a function if provided")
 
     -- Validate db instance
     local dbi = Private.databases[db]
-    assert(IsNonEmptyTable(dbi), "db is not a recognized database instance")
+    assert(dbi, "db is not a recognized database instance")
 
     -- If a table with the same name already exists, don't do anything
     if dbi.tables[desc.name] then
@@ -205,6 +206,7 @@ function LibP2PDB:DefineTable(db, desc)
         schema = desc.schema,
         onValidate = desc.onValidate,
         onChange = desc.onChange,
+        subscribers = setmetatable({}, { __mode = "k" }),
         rows = {},
     }
     return true
@@ -224,66 +226,25 @@ end
 ---@param row table Row data containing fields defined in the table schema
 ---@return boolean result Returns true on success, false otherwise
 function LibP2PDB:Insert(db, table, key, row)
-    assert(IsTable(db), "db must be a valid database instance")
+    assert(IsTable(db), "db must be a table")
     assert(IsNonEmptyString(table), "table name must be a non-empty string")
     assert(IsNonEmptyStringOrNumber(key), "key must be a string or number")
-    assert(IsNonEmptyTable(row), "row must be a non-empty table")
+    assert(IsTable(row), "row must be a table")
 
     -- Validate db instance
     local dbi = Private.databases[db]
-    assert(IsNonEmptyTable(dbi), "db is not a recognized database instance")
+    assert(dbi, "db is not a recognized database instance")
 
-    -- Validate table, key type, and row schema
+    -- Validate table and key type
     local t = dbi.tables[table]
-    assert(IsTable(t), "table '" .. table .. "' is not defined in the database")
+    assert(t, "table '" .. table .. "' is not defined in the database")
     assert(type(key) == t.keyType, "expected key of type '" .. t.keyType .. "' for table '" .. table .. "', but was '" .. type(key) .. "'")
-    assert(IsTable(row), "row must be a table")
 
     -- Ensure the key does not already exist
     assert(t.rows[key] == nil, "key '" .. tostring(key) .. "' already exists in table '" .. table .. "'")
 
-    -- If a schema is defined, clean the row to only include schema-defined fields
-    local cleanRow
-    if not t.schema then
-        cleanRow = row -- no schema, accept all fields
-    else
-        cleanRow = {}
-        for fieldName, fieldType in pairs(t.schema) do
-            local fieldValue = row[fieldName]
-            assert(IsNotNil(fieldValue), "missing required field '" .. fieldName .. "' in table '" .. table .. "'")
-            assert(type(fieldValue) == fieldType, "expected field '" .. fieldName .. "' of type '" .. fieldType .. "' in table '" .. table .. "', but was '" .. type(fieldValue) .. "'")
-            cleanRow[fieldName] = fieldValue
-        end
-    end
-
-    -- Run custom validation if provided
-    if t.onValidate and not t.onValidate(key, cleanRow) then
-        return false
-    end
-
-    -- Versioning (Lamport clock)
-    dbi.clock = dbi.clock + 1
-
-    -- Store the row
-    t.rows[key] = {
-        data = cleanRow,
-        version = {
-            clock = dbi.clock,
-            peer = Private.peerId,
-        },
-    }
-
-    -- Fire table change callback
-    if t.onChange then
-        t.onChange(key, cleanRow)
-    end
-
-    -- Fire db change callback
-    if dbi.onChange then
-        dbi.onChange(table, key, cleanRow)
-    end
-
-    return true
+    -- Set the row
+    return InternalSet(db, dbi, table, t, key, row)
 end
 
 ---Create or replace an existing row in a table.
@@ -295,64 +256,22 @@ end
 ---@param row table Row data containing fields defined in the table schema
 ---@return boolean result Returns true on success, false otherwise
 function LibP2PDB:Set(db, table, key, row)
-    assert(IsTable(db), "db must be a valid database instance")
+    assert(IsTable(db), "db must be a table")
     assert(IsNonEmptyString(table), "table name must be a non-empty string")
     assert(IsNonEmptyStringOrNumber(key), "key must be a string or number")
-    assert(IsNonEmptyTable(row), "row must be a non-empty table")
+    assert(IsTable(row), "row must be a table")
 
     -- Validate db instance
     local dbi = Private.databases[db]
-    assert(IsNonEmptyTable(dbi), "db is not a recognized database instance")
+    assert(dbi, "db is not a recognized database instance")
 
-    -- Validate table, key type, and row schema
+    -- Validate table and key type
     local t = dbi.tables[table]
-    assert(IsTable(t), "table '" .. table .. "' is not defined in the database")
+    assert(t, "table '" .. table .. "' is not defined in the database")
     assert(type(key) == t.keyType, "expected key of type '" .. t.keyType .. "' for table '" .. table .. "', but was '" .. type(key) .. "'")
-    assert(IsTable(row), "row must be a table")
 
-    -- If a schema is defined, clean the row to only include schema-defined fields
-    local cleanRow
-    if not t.schema then
-        cleanRow = row -- no schema, accept all fields
-    else
-        cleanRow = {}
-        for fieldName, fieldType in pairs(t.schema) do
-            local fieldValue = row[fieldName]
-            assert(IsNotNil(fieldValue), "missing required field '" .. fieldName .. "' in table '" .. table .. "'")
-            assert(type(fieldValue) == fieldType, "expected field '" .. fieldName .. "' of type '" .. fieldType .. "' in table '" .. table .. "', but was '" .. type(fieldValue) .. "'")
-            cleanRow[fieldName] = fieldValue
-        end
-    end
-
-    -- Run custom validation if provided
-    if t.onValidate and not t.onValidate(key, cleanRow) then
-        return false
-    end
-
-    -- Versioning (Lamport clock)
-    dbi.clock = dbi.clock + 1
-
-    -- Store the row
-    t.rows[key] = {
-        data = cleanRow,
-        version = {
-            clock = dbi.clock,
-            peer = Private.peerId,
-            tombstone = nil,
-        },
-    }
-
-    -- Fire table change callback
-    if t.onChange then
-        t.onChange(key, cleanRow)
-    end
-
-    -- Fire db change callback
-    if dbi.onChange then
-        dbi.onChange(table, key, cleanRow)
-    end
-
-    return true
+    -- Set the row
+    return InternalSet(db, dbi, table, t, key, row)
 end
 
 ---Update an existing row.
@@ -363,18 +282,18 @@ end
 ---@param key string|number Primary key value for the row (must match table's keyType)
 ---@param updateFn function Function(currentRow) -> updatedRow
 function LibP2PDB:Update(db, table, key, updateFn)
-    assert(IsTable(db), "db must be a valid database instance")
+    assert(IsTable(db), "db must be a table")
     assert(IsNonEmptyString(table), "table name must be a non-empty string")
     assert(IsNonEmptyStringOrNumber(key), "key must be a string or number")
     assert(IsFunction(updateFn), "updateFn must be a function")
 
     -- Validate db instance
     local dbi = Private.databases[db]
-    assert(IsNonEmptyTable(dbi), "db is not a recognized database instance")
+    assert(dbi, "db is not a recognized database instance")
 
     -- Validate table and key type
     local t = dbi.tables[table]
-    assert(IsTable(t), "table '" .. table .. "' is not defined in the database")
+    assert(t, "table '" .. table .. "' is not defined in the database")
     assert(type(key) == t.keyType, "expected key of type '" .. t.keyType .. "' for table '" .. table .. "', but was '" .. type(key) .. "'")
 
     -- Lookup the existing row
@@ -383,7 +302,7 @@ function LibP2PDB:Update(db, table, key, updateFn)
 
     -- Call the update function to get the new row data
     local updatedRow = updateFn(existingRow.data)
-    assert(IsNonEmptyTable(updatedRow), "updateFn must return a non-empty table")
+    assert(IsTable(updatedRow), "updateFn must return a table")
 
     -- Use Set to apply the updated row (will handle validation, versioning, callbacks)
     return self:Set(db, table, key, updatedRow)
@@ -396,17 +315,17 @@ end
 ---@param key string|number Primary key value for the row (must match table's keyType)
 ---@return table|nil row The row data if found, or nil if not found
 function LibP2PDB:Get(db, table, key)
-    assert(IsTable(db), "db must be a valid database instance")
+    assert(IsTable(db), "db must be a table")
     assert(IsNonEmptyString(table), "table name must be a non-empty string")
     assert(IsNonEmptyStringOrNumber(key), "key must be a string or number")
 
     -- Validate db instance
     local dbi = Private.databases[db]
-    assert(IsNonEmptyTable(dbi), "db is not a recognized database instance")
+    assert(dbi, "db is not a recognized database instance")
 
     -- Validate table and key type
     local t = dbi.tables[table]
-    assert(IsTable(t), "table '" .. table .. "' is not defined in the database")
+    assert(t, "table '" .. table .. "' is not defined in the database")
     assert(type(key) == t.keyType, "expected key of type '" .. t.keyType .. "' for table '" .. table .. "', but was '" .. type(key) .. "'")
 
     -- Lookup the row
@@ -431,17 +350,17 @@ end
 ---@param key string|number Primary key value for the row (must match table's keyType)
 ---@return boolean result Returns true if the row was deleted, false if it did not exist
 function LibP2PDB:Delete(db, table, key)
-    assert(IsTable(db), "db must be a valid database instance")
+    assert(IsTable(db), "db must be a table")
     assert(IsNonEmptyString(table), "table name must be a non-empty string")
     assert(IsNonEmptyStringOrNumber(key), "key must be a string or number")
 
     -- Validate db instance
     local dbi = Private.databases[db]
-    assert(IsNonEmptyTable(dbi), "db is not a recognized database instance")
+    assert(dbi, "db is not a recognized database instance")
 
     -- Validate table and key type
     local t = dbi.tables[table]
-    assert(IsTable(t), "table '" .. table .. "' is not defined in the database")
+    assert(t, "table '" .. table .. "' is not defined in the database")
     assert(type(key) == t.keyType, "expected key of type '" .. t.keyType .. "' for table '" .. table .. "', but was '" .. type(key) .. "'")
 
     -- Lookup the existing row
@@ -472,6 +391,11 @@ function LibP2PDB:Delete(db, table, key)
         dbi.onChange(table, key, nil)
     end
 
+    -- Fire subscribers
+    for callback in pairs(t.subscribers) do
+        callback(key, nil)
+    end
+
     return true
 end
 
@@ -479,12 +403,47 @@ end
 -- Public API: Subscriptions
 ------------------------------------------------------------------------------------------------------------------------
 
--- Subscribe to changes in a table
+---Subscribe to changes in a specific table.
+---The callback will be invoked as callback(key, row) for inserts/updates, and callback(key, nil) for deletions.
+---@param db LibP2PDB.DB Database instance
+---@param table string Name of the table to subscribe to
+---@param callback function Function(key, row) to invoke on changes
 function LibP2PDB:Subscribe(db, table, callback)
+    assert(IsTable(db), "db must be a table")
+    assert(IsNonEmptyString(table), "table name must be a non-empty string")
+    assert(IsFunction(callback), "callback must be a function")
+
+    -- Validate db instance
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database instance")
+
+    -- Validate table
+    local t = dbi.tables[table]
+    assert(t, "table '" .. table .. "' is not defined in the database")
+
+    -- Register subscriber (safe even if already present)
+    t.subscribers[callback] = true
 end
 
--- Unsubscribe from table changes
+---Unsubscribe a callback from a specific table.
+---@param db LibP2PDB.DB Database instance
+---@param table string Name of the table to unsubscribe from
+---@param callback function Function(key, row) to remove from subscriptions
 function LibP2PDB:Unsubscribe(db, table, callback)
+    assert(IsTable(db), "db must be a table")
+    assert(IsNonEmptyString(table), "table name must be a non-empty string")
+    assert(IsFunction(callback), "callback must be a function")
+
+    -- Validate db instance
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database instance")
+
+    -- Validate table
+    local t = dbi.tables[table]
+    assert(t, "table '" .. table .. "' is not defined in the database")
+
+    -- Remove subscriber (safe even if not present)
+    t.subscribers[callback] = nil
 end
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -541,6 +500,74 @@ end
 
 -- Set a write policy function(table, key, row, meta) -> true/false
 function LibP2PDB:SetWritePolicy(db, policyFn)
+end
+
+------------------------------------------------------------------------------------------------------------------------
+-- Private Functions
+------------------------------------------------------------------------------------------------------------------------
+
+function InternalSet(db, dbi, table, t, key, row)
+    -- If a schema is defined, clean the row to only include schema-defined fields
+    local cleanRow
+    if not t.schema then
+        cleanRow = row -- no schema, accept all fields
+    else
+        cleanRow = {}
+        for fieldName, allowedTypes in pairs(t.schema) do
+            local fieldValue = row[fieldName]
+            local fieldType = type(fieldValue)
+            if type(allowedTypes) == "table" then
+                -- Multiple allowed types
+                local allowed = false
+                for _, allowedType in ipairs(allowedTypes) do
+                    if fieldType == allowedType then
+                        allowed = true
+                        break
+                    end
+                end
+                assert(allowed, "expected field '" .. fieldName .. "' of type '" .. strjoin(", ", unpack(allowedTypes)) .. "' in table '" .. table .. "', but was '" .. fieldType .. "'")
+            elseif type(allowedTypes) == "string" then
+                assert(fieldType == allowedTypes, "expected field '" .. fieldName .. "' of type '" .. allowedTypes .. "' in table '" .. table .. "', but was '" .. fieldType .. "'")
+            else
+                error("invalid schema definition for field '" .. fieldName .. "' in table '" .. table .. "'")
+            end
+            cleanRow[fieldName] = fieldValue
+        end
+    end
+
+    -- Run custom validation if provided
+    if t.onValidate and not t.onValidate(key, cleanRow) then
+        return false
+    end
+
+    -- Versioning (Lamport clock)
+    dbi.clock = dbi.clock + 1
+
+    -- Store the row
+    t.rows[key] = {
+        data = cleanRow,
+        version = {
+            clock = dbi.clock,
+            peer = Private.peerId,
+        },
+    }
+
+    -- Fire table change callback
+    if t.onChange then
+        t.onChange(key, cleanRow)
+    end
+
+    -- Fire db change callback
+    if dbi.onChange then
+        dbi.onChange(table, key, cleanRow)
+    end
+
+    -- Fire subscribers
+    for callback in pairs(t.subscribers) do
+        callback(key, cleanRow)
+    end
+
+    return true
 end
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -652,6 +679,7 @@ if testing then
             Assert.AreEqual(t.schema.age, "number")
             Assert.IsFunction(t.onValidate)
             Assert.IsFunction(t.onChange)
+            Assert.IsTable(t.subscribers)
             Assert.IsEmptyTable(t.rows)
 
             -- Attempt to define the same table again
@@ -862,7 +890,10 @@ if testing then
             local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
             LibP2PDB:DefineTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             LibP2PDB:Insert(db, "Users", 1, { name = "Bob", age = 25 })
-            local updateFn = function(row) row.age = row.age + 1 return row end
+            local updateFn = function(row)
+                row.age = row.age + 1
+                return row
+            end
             Assert.IsTrue(LibP2PDB:Update(db, "Users", 1, updateFn))
             Assert.AreEqual(LibP2PDB:Get(db, "Users", 1), { name = "Bob", age = 26 })
             Assert.Throws(function() LibP2PDB:Update(db, "Users", 2, updateFn) end)
@@ -953,6 +984,104 @@ if testing then
             LibP2PDB:DefineTable(db, { name = "Users", keyType = "string" })
             Assert.Throws(function() LibP2PDB:Delete(db, "Users", nil) end)
             Assert.Throws(function() LibP2PDB:Delete(db, "Users", {}) end)
+        end,
+
+        Schema_IsOptional = function()
+            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
+            Assert.IsTrue(LibP2PDB:DefineTable(db, { name = "Logs", keyType = "number" }))
+            Assert.IsTrue(LibP2PDB:Insert(db, "Logs", 1, { message = "System started", timestamp = 1620000000 }))
+            Assert.AreEqual(LibP2PDB:Get(db, "Logs", 1), { message = "System started", timestamp = 1620000000 })
+            Assert.IsTrue(LibP2PDB:Insert(db, "Logs", 2, { message = "User logged in", timestamp = 1620003600, username = "Bob" }))
+            Assert.AreEqual(LibP2PDB:Get(db, "Logs", 2), { message = "User logged in", timestamp = 1620003600, username = "Bob" })
+        end,
+
+        Schema_MultipleTypesAllowed = function()
+            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
+            Assert.IsTrue(LibP2PDB:DefineTable(db, { name = "Metrics", keyType = "string", schema = { value = { "number", "string" }, timestamp = "number" } }))
+            Assert.IsTrue(LibP2PDB:Insert(db, "Metrics", "cpu_usage", { value = 75.5, timestamp = 1620000000 }))
+            Assert.AreEqual(LibP2PDB:Get(db, "Metrics", "cpu_usage"), { value = 75.5, timestamp = 1620000000 })
+            Assert.IsTrue(LibP2PDB:Insert(db, "Metrics", "status", { value = "OK", timestamp = 1620003600 }))
+            Assert.AreEqual(LibP2PDB:Get(db, "Metrics", "status"), { value = "OK", timestamp = 1620003600 })
+        end,
+
+        Schema_NilTypeAllowed = function()
+            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
+            Assert.IsTrue(LibP2PDB:DefineTable(db, { name = "Settings", keyType = "string", schema = { value = { "string", "nil" } } }))
+            Assert.IsTrue(LibP2PDB:Insert(db, "Settings", "theme", { value = "dark" }))
+            Assert.AreEqual(LibP2PDB:Get(db, "Settings", "theme"), { value = "dark" })
+            Assert.IsTrue(LibP2PDB:Insert(db, "Settings", "notifications", { value = nil }))
+            Assert.AreEqual(LibP2PDB:Get(db, "Settings", "notifications"), { value = nil })
+        end,
+
+        Subscribe = function()
+            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
+            LibP2PDB:DefineTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            local callbackInvoked = 0
+            local callback = function(key, row)
+                callbackInvoked = callbackInvoked + 1
+                Assert.AreEqual(key, 1)
+                Assert.AreEqual(row, { name = "Bob", age = 25 })
+            end
+            LibP2PDB:Subscribe(db, "Users", callback)
+            LibP2PDB:Subscribe(db, "Users", callback)
+            LibP2PDB:Insert(db, "Users", 1, { name = "Bob", age = 25 })
+            Assert.AreEqual(callbackInvoked, 1)
+        end,
+
+        Subscribe_DBIsInvalid_Throws = function()
+            Assert.Throws(function() LibP2PDB:Subscribe(nil, "Users", function() end) end)
+            Assert.Throws(function() LibP2PDB:Subscribe(123, "Users", function() end) end)
+            Assert.Throws(function() LibP2PDB:Subscribe("invalid", "Users", function() end) end)
+        end,
+
+        Subscribe_TableIsInvalid_Throws = function()
+            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
+            Assert.Throws(function() LibP2PDB:Subscribe(db, nil, function() end) end)
+            Assert.Throws(function() LibP2PDB:Subscribe(db, 123, function() end) end)
+            Assert.Throws(function() LibP2PDB:Subscribe(db, {}, function() end) end)
+        end,
+
+        Subscribe_CallbackIsInvalid_Throws = function()
+            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
+            LibP2PDB:DefineTable(db, { name = "Users", keyType = "string" })
+            Assert.Throws(function() LibP2PDB:Subscribe(db, "Users", nil) end)
+            Assert.Throws(function() LibP2PDB:Subscribe(db, "Users", 123) end)
+            Assert.Throws(function() LibP2PDB:Subscribe(db, "Users", "invalid") end)
+        end,
+
+        Unsubscribe = function()
+            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
+            LibP2PDB:DefineTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            local callbackInvoked = 0
+            local callback = function(key, row)
+                callbackInvoked = callbackInvoked + 1
+            end
+            LibP2PDB:Subscribe(db, "Users", callback)
+            LibP2PDB:Unsubscribe(db, "Users", callback)
+            LibP2PDB:Unsubscribe(db, "Users", callback)
+            LibP2PDB:Insert(db, "Users", 1, { name = "Bob", age = 25 })
+            Assert.AreEqual(callbackInvoked, 0)
+        end,
+
+        Unsubscribe_DBIsInvalid_Throws = function()
+            Assert.Throws(function() LibP2PDB:Unsubscribe(nil, "Users", function() end) end)
+            Assert.Throws(function() LibP2PDB:Unsubscribe(123, "Users", function() end) end)
+            Assert.Throws(function() LibP2PDB:Unsubscribe("invalid", "Users", function() end) end)
+        end,
+
+        Unsubscribe_TableIsInvalid_Throws = function()
+            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
+            Assert.Throws(function() LibP2PDB:Unsubscribe(db, nil, function() end) end)
+            Assert.Throws(function() LibP2PDB:Unsubscribe(db, 123, function() end) end)
+            Assert.Throws(function() LibP2PDB:Unsubscribe(db, {}, function() end) end)
+        end,
+
+        Unsubscribe_CallbackIsInvalid_Throws = function()
+            local db = LibP2PDB:New({ clusterId = "c", namespace = "n" })
+            LibP2PDB:DefineTable(db, { name = "Users", keyType = "string" })
+            Assert.Throws(function() LibP2PDB:Unsubscribe(db, "Users", nil) end)
+            Assert.Throws(function() LibP2PDB:Unsubscribe(db, "Users", 123) end)
+            Assert.Throws(function() LibP2PDB:Unsubscribe(db, "Users", "invalid") end)
         end,
     }
 
