@@ -6,10 +6,13 @@ local MAJOR, MINOR = "LibP2PDB", 1
 assert(LibStub, MAJOR .. " requires LibStub")
 
 local LibP2PDB = LibStub:NewLibrary(MAJOR, MINOR)
-if not LibP2PDB then return end            -- no upgrade needed
+if not LibP2PDB then return end -- no upgrade needed
 
-local ChatThrottleLib = _G.ChatThrottleLib -- ChatThrottleLib does not use LibStub
-assert(ChatThrottleLib, MAJOR .. " requires ChatThrottleLib")
+local AceComm = LibStub("AceComm-3.0")
+assert(AceComm, MAJOR .. " requires AceComm-3.0")
+
+local AceSerializer = LibStub("AceSerializer-3.0")
+assert(AceSerializer, MAJOR .. " requires AceSerializer-3.0")
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Local Lua References
@@ -43,6 +46,13 @@ local function dump(o)
         return '"' .. o .. '"'
     else
         return tostring(o)
+    end
+end
+
+local debugEnabled = false
+local function debug(...)
+    if debugEnabled then
+        print("LibP2PDB: |cff00ffff[DEBUG]|r", ...)
     end
 end
 
@@ -106,14 +116,29 @@ local function PlayerGUIDShort()
 end
 
 ------------------------------------------------------------------------------------------------------------------------
--- Private Variables
+-- Private Variables and Constants
 ------------------------------------------------------------------------------------------------------------------------
+
+local CommMessageType = {
+    RequestSnapshot = 1,
+    Snapshot = 2,
+    Digest = 3,
+    RequestRows = 4,
+    Rows = 5,
+}
+
+local CommPriority = {
+    Low = "BULK",
+    Normal = "NORMAL",
+    High = "ALERT",
+}
 
 local function NewPrivate()
     local private = {}
     private.clusters = {}
     private.databases = setmetatable({}, { __mode = "k" })
     private.peerId = PlayerGUIDShort()
+    private.OnCommReceived = function(self, ...) InternalOnCommReceived(...) end
     return private
 end
 local Private = NewPrivate()
@@ -125,17 +150,10 @@ local Private = NewPrivate()
 ---@class LibP2PDB.DBDesc Description for creating a new database instance
 ---@field clusterId string Unique identifier for the database cluster (max 16 chars)
 ---@field namespace string Namespace for this database instance
----@field channels table|nil List of chat channels to use for gossip (default: {"GUILD", "PARTY", "RAID", "YELL"})
+---@field channels table|nil List of chat channels to use for gossip (default: {"GUILD", "RAID", "PARTY", "YELL"})
 ---@field onChange function|nil Callback function(table, key, row) invoked on any row change
 
 ---@class LibP2PDB.DB Database instance
----@field clusterId string Unique identifier for the database cluster (max 16 chars)
----@field namespace string Namespace for this database instance
----@field clock number Lamport clock for versioning
----@field channels table List of chat channels used for gossip (default: {"GUILD", "PARTY", "RAID", "YELL"})
----@field tables table Registry of defined tables in the database
----@field onChange function|nil Callback function(table, key, row) invoked on any row change
----@field writePolicy function|nil Access control function(table, key, row) -> true/false
 
 ---Create a new database instance for peer-to-peer synchronization.
 ---Each database is identified by a unique clusterId and operates independently.
@@ -160,7 +178,7 @@ function LibP2PDB:NewDB(desc)
     assert(Private.clusters[desc.clusterId] == nil, "a database with clusterId '" .. desc.clusterId .. "' already exists")
 
     -- Default channels if none provided
-    local defaultChannels = { "GUILD", "PARTY", "RAID", "YELL" }
+    local defaultChannels = { "GUILD", "RAID", "PARTY", "YELL" }
 
     -- Create the DB instance
     local dbi = {
@@ -182,6 +200,9 @@ function LibP2PDB:NewDB(desc)
     local db = {}
     Private.clusters[desc.clusterId] = db
     Private.databases[db] = dbi
+
+    -- Register comm prefix
+    AceComm.RegisterComm(Private, desc.clusterId)
     return db
 end
 
@@ -559,89 +580,11 @@ function LibP2PDB:Import(db, state)
         local t = dbi.tables[incomingTableName]
         if t then
             for incomingKey, incomingRow in pairs(incomingTableData.rows or {}) do
-                local function processRow()
-                    -- Validate key type
-                    if type(incomingKey) ~= t.keyType then
-                        return false, format("skipping row with invalid key type '%s' in table '%s'", type(incomingKey), incomingTableName)
-                    end
-
-                    -- Validate row structure
-                    if not IsTable(incomingRow) then
-                        return false, format("skipping row with invalid structure for key '%s' in table '%s'", tostring(incomingKey), incomingTableName)
-                    end
-
-                    -- Validate version metadata
-                    local incomingVersion = incomingRow.version
-                    if not IsTable(incomingVersion) or not IsNumber(incomingVersion.clock) or not IsNonEmptyString(incomingVersion.peer) then
-                        return false, format("skipping row with invalid version metadata for key '%s' in table '%s'", tostring(incomingKey), incomingTableName)
-                    end
-
-                    local cleanVersion = {
-                        clock = incomingVersion.clock,
-                        peer = incomingVersion.peer,
-                    }
-                    if incomingVersion.tombstone == true then
-                        cleanVersion.tombstone = true
-                    end
-
-                    local existingRow = t.rows[incomingKey]
-
-                    -- Tombstone merge
-                    if cleanVersion.tombstone then
-                        if not existingRow or IsIncomingNewer(cleanVersion, existingRow.version) then
-                            t.rows[incomingKey] = {
-                                data = nil,
-                                version = cleanVersion,
-                            }
-                            return true
-                        else
-                            return false, format("skipping tombstone for key '%s' in table '%s' as existing row is newer", tostring(incomingKey), incomingTableName)
-                        end
-                    end
-
-                    -- Validate data
-                    local incomingData = incomingRow.data
-                    if not IsTable(incomingData) then
-                        return false, format("skipping row with invalid data for key '%s' in table '%s'", tostring(incomingKey), incomingTableName)
-                    end
-
-                    local cleanData = {}
-                    local result, msg = pcall(function() cleanData = InternalSchemaCopy(incomingTableName, t.schema, incomingData) end)
-                    if not result then
-                        return false, format("skipping row with schema validation failure for key '%s' in table '%s': %s", tostring(incomingKey), incomingTableName, tostring(msg))
-                    end
-
-                    -- Custom validation
-                    if t.onValidate and not t.onValidate(incomingKey, cleanData) then
-                        return false, format("skipping row that failed custom validation for key '%s' in table '%s'", tostring(incomingKey), incomingTableName)
-                    end
-
-                    -- Merge
-                    if existingRow then
-                        if IsIncomingNewer(cleanVersion, existingRow.version) then
-                            t.rows[incomingKey] = {
-                                data = cleanData,
-                                version = cleanVersion,
-                            }
-                            return true
-                        else
-                            return false, format("skipping row for key '%s' in table '%s' as existing row is newer", tostring(incomingKey), incomingTableName)
-                        end
-                    else
-                        t.rows[incomingKey] = {
-                            data = cleanData,
-                            version = cleanVersion,
-                        }
-                        return true
-                    end
-                end
-
-                -- Process with error handling
-                local processResult, processErrorMsg = processRow()
-                if not processResult then
+                local importResult, importError = InternalImportRow(incomingKey, incomingRow, incomingTableName, t)
+                if not importResult then
                     result = false
                     errors = errors or {}
-                    tinsert(errors, "error processing row with key '" .. tostring(incomingKey) .. "' in table '" .. incomingTableName .. "': " .. tostring(processErrorMsg))
+                    tinsert(errors, "error processing row with key '" .. tostring(incomingKey) .. "' in table '" .. incomingTableName .. "': " .. tostring(importError))
                 end
             end
         end
@@ -653,16 +596,62 @@ end
 -- Public API: Sync / Gossip Controls
 ------------------------------------------------------------------------------------------------------------------------
 
--- Request a full snapshot from a specific peer
+---Request a full snapshot from a specific peer
+---@param db LibP2PDB.DB Database instance
+---@param target string|nil Optional target peer ID to request the snapshot from; if nil, broadcasts to all peers
 function LibP2PDB:RequestSnapshot(db, target)
+    assert(IsTable(db), "db must be a table")
+    assert(target == nil or IsNonEmptyString(target), "target must be a non-empty string if provided")
+
+    -- Validate db instance
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database instance")
+
+    -- Send the request message
+    local obj = {
+        type = CommMessageType.RequestSnapshot,
+    }
+    local serialized = AceSerializer:Serialize(obj)
+    InternalSend(dbi.clusterId, serialized, "WHISPER", target, CommPriority.Normal)
 end
 
--- Force a digest broadcast
-function LibP2PDB:ForceDigest(db)
-end
+---Immediately initiate a gossip sync by sending the current digest to all peers.
+---@param db LibP2PDB.DB Database instance
+function LibP2PDB:SyncNow(db)
+    assert(IsTable(db), "db must be a table")
 
--- Force a full sync cycle
-function LibP2PDB:ForceSync(db)
+    -- Validate db instance
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database instance")
+
+    -- Build digest
+    local digest = {
+        clock = dbi.clock,
+        tables = {},
+    }
+    for tableName, t in pairs(dbi.tables) do
+        local tableDigest = {}
+        for key, row in pairs(t.rows) do
+            local v = row.version
+            local digest = {
+                clock = v.clock,
+                peer = v.peer,
+            }
+            if v.tombstone == true then
+                digest.tombstone = true
+            end
+            tableDigest[key] = digest
+        end
+        digest.tables[tableName] = tableDigest
+    end
+
+    -- Send the digest to all peers
+    local obj = {
+        type = CommMessageType.Digest,
+        data = digest,
+    }
+    local serialized = AceSerializer:Serialize(obj)
+    InternalSendToAllPeers(dbi.clusterId, serialized, dbi.channels, CommPriority.Normal)
 end
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -771,12 +760,292 @@ function InternalSet(db, dbi, table, t, key, row)
     return true
 end
 
+function InternalImportRow(incomingKey, incomingRow, incomingTableName, t)
+    -- Validate key type
+    if type(incomingKey) ~= t.keyType then
+        return false, format("skipping row with invalid key type '%s' in table '%s'", type(incomingKey), incomingTableName)
+    end
+
+    -- Validate row structure
+    if not IsTable(incomingRow) then
+        return false, format("skipping row with invalid structure for key '%s' in table '%s'", tostring(incomingKey), incomingTableName)
+    end
+
+    -- Validate version metadata
+    local incomingVersion = incomingRow.version
+    if not IsTable(incomingVersion) or not IsNumber(incomingVersion.clock) or not IsNonEmptyString(incomingVersion.peer) then
+        return false, format("skipping row with invalid version metadata for key '%s' in table '%s'", tostring(incomingKey), incomingTableName)
+    end
+
+    local cleanVersion = {
+        clock = incomingVersion.clock,
+        peer = incomingVersion.peer,
+    }
+    if incomingVersion.tombstone == true then
+        cleanVersion.tombstone = true
+    end
+
+    local existingRow = t.rows[incomingKey]
+
+    -- Tombstone merge
+    if cleanVersion.tombstone then
+        if not existingRow or IsIncomingNewer(cleanVersion, existingRow.version) then
+            t.rows[incomingKey] = {
+                data = nil,
+                version = cleanVersion,
+            }
+        end
+        return true
+    end
+
+    -- Validate data
+    local incomingData = incomingRow.data
+    if not IsTable(incomingData) then
+        return false, format("skipping row with invalid data for key '%s' in table '%s'", tostring(incomingKey), incomingTableName)
+    end
+
+    local cleanData = {}
+    local result, msg = pcall(function() cleanData = InternalSchemaCopy(incomingTableName, t.schema, incomingData) end)
+    if not result then
+        return false, format("skipping row with schema validation failure for key '%s' in table '%s': %s", tostring(incomingKey), incomingTableName, tostring(msg))
+    end
+
+    -- Custom validation
+    if t.onValidate and not t.onValidate(incomingKey, cleanData) then
+        return false, format("skipping row that failed custom validation for key '%s' in table '%s'", tostring(incomingKey), incomingTableName)
+    end
+
+    -- Merge
+    if existingRow then
+        if IsIncomingNewer(cleanVersion, existingRow.version) then
+            t.rows[incomingKey] = {
+                data = cleanData,
+                version = cleanVersion,
+            }
+        end
+    else
+        t.rows[incomingKey] = {
+            data = cleanData,
+            version = cleanVersion,
+        }
+    end
+
+    return true
+end
+
+function InternalSend(prefix, message, channel, target, priority)
+    debug(format("sending %d bytes, prefix=%s, channel=%s, target=%s", #message, tostring(prefix), tostring(channel), tostring(target)))
+    AceComm.SendCommMessage(Private, prefix, message, channel, target, priority)
+end
+
+function InternalSendToAllPeers(prefix, message, channels, priority)
+    for _, channel in ipairs(channels) do
+        if channel == "GUILD" and IsInGuild() then
+            InternalSend(prefix, message, "GUILD", nil, priority)
+        elseif channel == "RAID" and IsInRaid() then
+            InternalSend(prefix, message, "RAID", nil, priority)
+        elseif channel == "PARTY" and IsInGroup() then
+            InternalSend(prefix, message, "PARTY", nil, priority)
+        elseif channel == "YELL" and not IsInInstance() then
+            InternalSend(prefix, message, "YELL", nil, priority)
+        end
+    end
+end
+
+function InternalOnCommReceived(prefix, message, channel, sender)
+    local success, deserialized = AceSerializer:Deserialize(message)
+    if not success then
+        debug(format("failed to deserialize message from %s on channel %s: %s", tostring(sender), tostring(channel), dump(deserialized)))
+        return
+    end
+
+    if not IsTable(deserialized) or not IsNumber(deserialized.type) then
+        debug(format("received invalid message structure from %s on channel %s", tostring(sender), tostring(channel)))
+        return
+    end
+
+    if deserialized.type == CommMessageType.RequestSnapshot then
+        InternalRequestSnapshotMessageHandler(prefix, channel, sender)
+    elseif deserialized.type == CommMessageType.Snapshot then
+        InternalSnapshotMessageHandler(prefix, channel, sender, deserialized.data)
+    elseif deserialized.type == CommMessageType.Digest then
+        InternalDigestMessageHandler(prefix, channel, sender, deserialized.data)
+    elseif deserialized.type == CommMessageType.RequestRows then
+        InternalRequestRowsMessageHandler(prefix, channel, sender, deserialized.data)
+    elseif deserialized.type == CommMessageType.Rows then
+        InternalRowsMessageHandler(prefix, channel, sender, deserialized.data)
+    else
+        debug(format("received unknown message type %d from %s on channel %s", deserialized.type, tostring(sender), tostring(channel)))
+    end
+end
+
+function InternalRequestSnapshotMessageHandler(prefix, channel, sender)
+    -- Get the DB instance
+    local db = LibP2PDB:GetDB(prefix)
+    if not db then
+        debug(format("received request snapshot message for unknown clusterId '%s' from %s on channel %s", tostring(prefix), tostring(sender), tostring(channel)))
+        return
+    end
+
+    local obj = {
+        type = CommMessageType.Snapshot,
+        data = LibP2PDB:Export(db),
+    }
+    local serialized = AceSerializer:Serialize(obj)
+    InternalSend(prefix, serialized, "WHISPER", sender, CommPriority.Low)
+end
+
+function InternalSnapshotMessageHandler(prefix, channel, sender, data)
+    local db = LibP2PDB:GetDB(prefix)
+    if not db then
+        debug(format("received snapshot message for unknown clusterId '%s' from %s on channel %s", tostring(prefix), tostring(sender), tostring(channel)))
+        return
+    end
+
+    local success, errors = LibP2PDB:Import(db, data)
+    if not success then
+        debug(format("failed to import snapshot from %s on channel %s", tostring(sender), tostring(channel)))
+        if errors then
+            for i, err in ipairs(errors) do
+                debug(format("%d: %s", i, tostring(err)))
+            end
+        end
+    else
+        debug(format("successfully imported snapshot from %s on channel %s", tostring(sender), tostring(channel)))
+    end
+end
+
+function InternalDigestMessageHandler(prefix, channel, sender, data)
+    local db = LibP2PDB:GetDB(prefix)
+    if not db then
+        debug(format("received digest message for unknown clusterId '%s' from %s on channel %s", tostring(prefix), tostring(sender), tostring(channel)))
+        return
+    end
+
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database instance")
+
+    -- Compare digest and build missing table
+    local missingTables = {}
+    for tableName, incomingTable in pairs(data.tables or {}) do
+        local t = dbi.tables[tableName]
+        if t then
+            local missingRows = {}
+
+            -- Check keys present in digest
+            for key, incomingVersion in pairs(incomingTable) do
+                local localRow = t.rows[key]
+                if not localRow then
+                    -- We are missing this row, request it from sender
+                    missingRows[key] = true
+                else
+                    -- Compare versions
+                    if IsIncomingNewer(incomingVersion, localRow.version) then
+                        -- Our row is older, request it from sender
+                        missingRows[key] = true
+                    end
+                end
+            end
+
+            if next(missingRows) then
+                missingTables[tableName] = missingRows
+            end
+        end
+    end
+
+    -- If nothing is missing, no need to send request rows
+    if not next(missingTables) then
+        return
+    end
+
+    -- Send request rows message
+    local obj = {
+        type = CommMessageType.RequestRows,
+        data = missingTables,
+    }
+    local serialized = AceSerializer:Serialize(obj)
+    InternalSend(prefix, serialized, "WHISPER", sender, CommPriority.Normal)
+end
+
+function InternalRequestRowsMessageHandler(prefix, channel, sender, data)
+    local db = LibP2PDB:GetDB(prefix)
+    if not db then
+        debug(format("received request rows message for unknown clusterId '%s' from %s on channel %s", tostring(prefix), tostring(sender), tostring(channel)))
+        return
+    end
+
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database instance")
+
+    -- Build rows to send
+    local rowsToSend = {}
+    for tableName, requestedRows in pairs(data or {}) do
+        local t = dbi.tables[tableName]
+        if t then
+            local tableRows = {}
+            for key, _ in pairs(requestedRows) do
+                local row = t.rows[key]
+                if row then
+                    -- No need to copy here, we'll just be reading to serialize
+                    tableRows[key] = row
+                end
+            end
+
+            if next(tableRows) then
+                rowsToSend[tableName] = tableRows
+            end
+        end
+    end
+
+    -- If nothing to send, return
+    if not next(rowsToSend) then
+        return
+    end
+
+    -- Send requested rows
+    local obj = {
+        type = CommMessageType.Rows,
+        data = rowsToSend,
+    }
+    local serialized = AceSerializer:Serialize(obj)
+    InternalSend(prefix, serialized, "WHISPER", sender, CommPriority.Normal)
+end
+
+function InternalRowsMessageHandler(prefix, channel, sender, data)
+    local db = LibP2PDB:GetDB(prefix)
+    if not db then
+        debug(format("received rows message for unknown clusterId '%s' from %s on channel %s", tostring(prefix), tostring(sender), tostring(channel)))
+        return
+    end
+
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database instance")
+
+    -- Import received rows
+    local anyErrors = false
+    for incomingTableName, incomingTableData in pairs(data or {}) do
+        local t = dbi.tables[incomingTableName]
+        if t then
+            for incomingKey, incomingRow in pairs(incomingTableData or {}) do
+                local importResult, importError = InternalImportRow(incomingKey, incomingRow, incomingTableName, t)
+                if not importResult then
+                    anyErrors = true
+                    debug(format("failed to import row with key '%s' in table '%s' from %s on channel %s: %s", tostring(incomingKey), incomingTableName, tostring(sender), tostring(channel), tostring(importError)))
+                end
+            end
+        end
+    end
+
+    if not anyErrors then
+        debug(format("successfully imported rows from %s on channel %s", tostring(sender), tostring(channel)))
+    end
+end
+
 ------------------------------------------------------------------------------------------------------------------------
 -- Testing
 ------------------------------------------------------------------------------------------------------------------------
 
-local testing = false -- set to true to enable tests
-if testing then
+if debugEnabled then
     local function Equal(a, b)
         assert(a ~= nil, "first value is nil")
         assert(b ~= nil, "second value is nil")
@@ -811,7 +1080,10 @@ if testing then
         IsEmptyTable = function(value) assert(type(value) == "table" and next(value) == nil, "value is not an empty table") end,
         IsNotEmptyTable = function(value) assert(type(value) == "table" and next(value) ~= nil, "value is an empty table") end,
         Throws = function(fn) assert(pcall(fn) == false, "function did not throw") end,
-        DoesNotThrow = function(fn) assert(pcall(fn) == true, "function threw an error") end,
+        DoesNotThrow = function(fn)
+            local s, r = pcall(fn)
+            assert(s == true, format("function threw an error: %s", tostring(r)))
+        end,
     }
 
     local LibP2PDBTests = {
@@ -1408,6 +1680,13 @@ if testing then
             -- Valid row should still be imported
             Assert.AreEqual(LibP2PDB:Get(db2, "Users", 1), LibP2PDB:Get(db1, "Users", 1))
             Assert.IsNil(LibP2PDB:Get(db2, "Users", 2))
+        end,
+
+        RequestSnapshot = function()
+            -- This is a placeholder test since RequestSnapshot involves networking.
+            -- Here we just ensure that the function can be called without errors.
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            Assert.DoesNotThrow(function() LibP2PDB:RequestSnapshot(db, "Aramehtar") end)
         end,
     }
 
