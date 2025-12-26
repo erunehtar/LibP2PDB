@@ -90,6 +90,29 @@ local function Dump(o)
     end
 end
 
+local function ternary(c, a, b)
+    if c then return a else return b end
+end
+
+local function shallow_equal(a, b)
+    if a == b then return true end
+    if type(a) ~= "table" or type(b) ~= "table" then return false end
+    local count = 0
+    for k, v in pairs(a) do
+        if b[k] ~= v then
+            return false
+        end
+        count = count + 1
+    end
+    for _ in pairs(b) do
+        count = count - 1
+        if count < 0 then
+            return false
+        end
+    end
+    return count == 0
+end
+
 local function IsNotNil(v)
     return v ~= nil
 end
@@ -317,7 +340,10 @@ function LibP2PDB:Insert(db, table, key, row)
     assert(type(key) == t.keyType, "expected key of type '" .. t.keyType .. "' for table '" .. table .. "', but was '" .. type(key) .. "'")
 
     -- Ensure the key does not already exist
-    assert(t.rows[key] == nil, "key '" .. tostring(key) .. "' already exists in table '" .. table .. "'")
+    local existingRow = t.rows[key]
+    if existingRow and not existingRow.version.tombstone then
+        error("key '" .. tostring(key) .. "' already exists in table '" .. table .. "'")
+    end
 
     -- Set the row
     return InternalSet(db, dbi, table, t, key, row)
@@ -439,25 +465,16 @@ function LibP2PDB:HasKey(db, tableName, key)
 
     -- Lookup the row
     local row = t.rows[key]
-    if not row or not row.data or not row.version then
-        return false
-    end
-
-    -- Tombstone check
-    if row.version.tombstone then
-        return false
-    end
-
-    return true
+    return ternary(row ~= nil and not row.version.tombstone, true, false)
 end
 
 ---Delete a row.
 ---Validates the key type against the table definition.
 ---Marks the row as a tombstone for gossip synchronization.
+---Adds a deletion entry regardless of whether the row existed or not.
 ---@param db LibP2PDB.DB Database instance
 ---@param table string Name of the table to delete from
 ---@param key string|number Primary key value for the row (must match table's keyType)
----@return boolean result Returns true if the row was deleted, false if it did not exist
 function LibP2PDB:Delete(db, table, key)
     assert(IsTable(db), "db must be a table")
     assert(IsNonEmptyString(table), "table name must be a non-empty string")
@@ -473,8 +490,10 @@ function LibP2PDB:Delete(db, table, key)
     assert(type(key) == t.keyType, "expected key of type '" .. t.keyType .. "' for table '" .. table .. "', but was '" .. type(key) .. "'")
 
     -- Lookup the existing row
-    if t.rows[key] == nil then
-        return false -- nothing to delete
+    local changed = false
+    local existingRow = t.rows[key]
+    if existingRow and existingRow.data and existingRow.version and not existingRow.version.tombstone then
+        changed = true
     end
 
     -- Versioning (Lamport clock)
@@ -486,26 +505,14 @@ function LibP2PDB:Delete(db, table, key)
         version = {
             clock = dbi.clock,
             peer = Private.peerId,
-            tombstone = true, -- mark deletion for gossip
+            tombstone = true, -- mark as deleted
         },
     }
 
-    -- Fire table change callback
-    if t.onChange then
-        t.onChange(key, nil)
+    -- Fire callbacks
+    if changed then
+        InternalFireCallbacks(dbi, table, t, key, nil)
     end
-
-    -- Fire db change callback
-    if dbi.onChange then
-        dbi.onChange(table, key, nil)
-    end
-
-    -- Fire subscribers
-    for callback in pairs(t.subscribers) do
-        callback(key, nil)
-    end
-
-    return true
 end
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -620,6 +627,9 @@ function LibP2PDB:Import(db, state)
     local dbi = Private.databases[db]
     assert(dbi, "db is not a recognized database instance")
 
+    -- Begin import
+    Private.isImporting = true
+
     -- Merge Lamport clock
     dbi.clock = max(dbi.clock, state.clock)
 
@@ -629,7 +639,7 @@ function LibP2PDB:Import(db, state)
         local t = dbi.tables[incomingTableName]
         if t then
             for incomingKey, incomingRow in pairs(incomingTableData.rows or {}) do
-                local importResult, importError = InternalImportRow(incomingKey, incomingRow, incomingTableName, t)
+                local importResult, importError = InternalImportRow(incomingKey, incomingRow, dbi, incomingTableName, t)
                 if not importResult then
                     result = false
                     errors = errors or {}
@@ -638,6 +648,10 @@ function LibP2PDB:Import(db, state)
             end
         end
     end
+
+    -- End import
+    Private.isImporting = false
+
     return result, errors
 end
 
@@ -761,37 +775,72 @@ function InternalSet(db, dbi, table, t, key, row)
         return false
     end
 
-    -- Versioning (Lamport clock)
-    dbi.clock = dbi.clock + 1
+    -- Determine if the row will change
+    local changes = false
+    local existingRow = t.rows[key]
+    if not existingRow or (not existingRow.data and existingRow.version.tombstone == true) then
+        changes = true -- new row
+    else
+        -- Check for data changes
+        for fieldName, fieldValue in pairs(data) do
+            if existingRow.data[fieldName] ~= fieldValue then
+                changes = true
+                break
+            end
+        end
+        if not changes then
+            for fieldName, fieldValue in pairs(existingRow.data) do
+                if data[fieldName] ~= fieldValue then
+                    changes = true
+                    break
+                end
+            end
+        end
+    end
 
-    -- Store the row
-    t.rows[key] = {
-        data = data,
-        version = {
-            clock = dbi.clock,
-            peer = Private.peerId,
-        },
-    }
+    if changes then
+        -- Versioning (Lamport clock)
+        dbi.clock = dbi.clock + 1
+
+        -- Store the row
+        t.rows[key] = {
+            data = data,
+            version = {
+                clock = dbi.clock,
+                peer = Private.peerId,
+            },
+        }
+
+        -- Fire callbacks
+        InternalFireCallbacks(dbi, table, t, key, data)
+    end
+
+    return true
+end
+
+function InternalFireCallbacks(dbi, tableName, t, key, data)
+    -- Skip callbacks during import
+    if Private.isImporting then
+        return
+    end
+
+    -- Fire db change callback
+    if dbi.onChange then
+        dbi.onChange(tableName, key, data)
+    end
 
     -- Fire table change callback
     if t.onChange then
         t.onChange(key, data)
     end
 
-    -- Fire db change callback
-    if dbi.onChange then
-        dbi.onChange(table, key, data)
-    end
-
     -- Fire subscribers
     for callback in pairs(t.subscribers) do
         callback(key, data)
     end
-
-    return true
 end
 
-function InternalImportRow(incomingKey, incomingRow, incomingTableName, t)
+function InternalImportRow(incomingKey, incomingRow, dbi, incomingTableName, t)
     -- Validate key type
     if type(incomingKey) ~= t.keyType then
         return false, format("skipping row with invalid key type '%s' in table '%s'", type(incomingKey), incomingTableName)
@@ -846,19 +895,15 @@ function InternalImportRow(incomingKey, incomingRow, incomingTableName, t)
         return false, format("skipping row that failed custom validation for key '%s' in table '%s'", tostring(incomingKey), incomingTableName)
     end
 
-    -- Merge
-    if existingRow then
-        if IsIncomingNewer(cleanVersion, existingRow.version) then
-            t.rows[incomingKey] = {
-                data = cleanData,
-                version = cleanVersion,
-            }
-        end
-    else
+    -- Merge row if it doesn't exist or is newer
+    if not existingRow or IsIncomingNewer(cleanVersion, existingRow.version) then
         t.rows[incomingKey] = {
             data = cleanData,
             version = cleanVersion,
         }
+
+        -- Fire callbacks
+        InternalFireCallbacks(dbi, incomingTableName, t, incomingKey, cleanData)
     end
 
     return true
@@ -1093,7 +1138,7 @@ function InternalRowsMessageHandler(prefix, channel, sender, data)
         local t = dbi.tables[incomingTableName]
         if t then
             for incomingKey, incomingRow in pairs(incomingTableData or {}) do
-                local importResult, importError = InternalImportRow(incomingKey, incomingRow, incomingTableName, t)
+                local importResult, importError = InternalImportRow(incomingKey, incomingRow, dbi, incomingTableName, t)
                 if not importResult then
                     anyErrors = true
                     Debug(format("failed to import row with key '%s' in table '%s' from %s on channel %s: %s", tostring(incomingKey), incomingTableName, tostring(sender), tostring(channel), tostring(importError)))
@@ -1127,28 +1172,28 @@ if enableDebugging then
     end
 
     local Assert = {
-        IsNil = function(value) assert(value == nil, "value is not nil") end,
-        IsNotNil = function(value) assert(value ~= nil, "value is nil") end,
-        IsTrue = function(value) assert(type(value) == "boolean" and value == true, "value is not true") end,
-        IsFalse = function(value) assert(type(value) == "boolean" and value == false, "value is not false") end,
-        IsNumber = function(value) assert(type(value) == "number", "value is not a number") end,
-        IsNotNumber = function(value) assert(type(value) ~= "number", "value is a number") end,
-        IsString = function(value) assert(type(value) == "string", "value is not a string") end,
-        IsNotString = function(value) assert(type(value) ~= "string", "value is a string") end,
-        IsTable = function(value) assert(type(value) == "table", "value is not a table") end,
-        IsNotTable = function(value) assert(type(value) ~= "table", "value is a table") end,
-        IsFunction = function(value) assert(type(value) == "function", "value is not a function") end,
-        IsNotFunction = function(value) assert(type(value) ~= "function", "value is a function") end,
-        AreEqual = function(actual, expected) assert(Equal(actual, expected) == true, "values are not equal") end,
-        AreNotEqual = function(actual, expected) assert(Equal(actual, expected) == false, "values are equal") end,
-        IsEmptyString = function(value) assert(type(value) == "string" and #value == 0, "value is not an empty string") end,
-        IsNotEmptyString = function(value) assert(type(value) == "string" and #value > 0, "value is an empty string") end,
-        IsEmptyTable = function(value) assert(type(value) == "table" and next(value) == nil, "value is not an empty table") end,
-        IsNotEmptyTable = function(value) assert(type(value) == "table" and next(value) ~= nil, "value is an empty table") end,
-        Throws = function(fn) assert(pcall(fn) == false, "function did not throw") end,
-        DoesNotThrow = function(fn)
+        IsNil = function(value, msg) assert(value == nil, ternary(msg, msg, "value is not nil")) end,
+        IsNotNil = function(value, msg) assert(value ~= nil, ternary(msg, msg, "value is nil")) end,
+        IsTrue = function(value, msg) assert(type(value) == "boolean" and value == true, ternary(msg, msg, "value is not true")) end,
+        IsFalse = function(value, msg) assert(type(value) == "boolean" and value == false, ternary(msg, msg, "value is not false")) end,
+        IsNumber = function(value, msg) assert(type(value) == "number", ternary(msg, msg, "value is not a number")) end,
+        IsNotNumber = function(value, msg) assert(type(value) ~= "number", ternary(msg, msg, "value is a number")) end,
+        IsString = function(value, msg) assert(type(value) == "string", ternary(msg, msg, "value is not a string")) end,
+        IsNotString = function(value, msg) assert(type(value) ~= "string", ternary(msg, msg, "value is a string")) end,
+        IsTable = function(value, msg) assert(type(value) == "table", ternary(msg, msg, "value is not a table")) end,
+        IsNotTable = function(value, msg) assert(type(value) ~= "table", ternary(msg, msg, "value is a table")) end,
+        IsFunction = function(value, msg) assert(type(value) == "function", ternary(msg, msg, "value is not a function")) end,
+        IsNotFunction = function(value, msg) assert(type(value) ~= "function", ternary(msg, msg, "value is a function")) end,
+        AreEqual = function(actual, expected, msg) assert(Equal(actual, expected) == true, ternary(msg, msg, "values are not equal")) end,
+        AreNotEqual = function(actual, expected, msg) assert(Equal(actual, expected) == false, ternary(msg, msg, "values are equal")) end,
+        IsEmptyString = function(value, msg) assert(type(value) == "string" and #value == 0, ternary(msg, msg, "value is not an empty string")) end,
+        IsNotEmptyString = function(value, msg) assert(type(value) == "string" and #value > 0, ternary(msg, msg, "value is an empty string")) end,
+        IsEmptyTable = function(value, msg) assert(type(value) == "table" and next(value) == nil, ternary(msg, msg, "value is not an empty table")) end,
+        IsNotEmptyTable = function(value, msg) assert(type(value) == "table" and next(value) ~= nil, ternary(msg, msg, "value is an empty table")) end,
+        Throws = function(fn, msg) assert(pcall(fn) == false, ternary(msg, msg, "function did not throw")) end,
+        DoesNotThrow = function(fn, msg)
             local s, r = pcall(fn)
-            assert(s == true, format("function threw an error: %s", tostring(r)))
+            assert(s == true, ternary(msg, msg, format("function threw an error: %s", tostring(r))))
         end,
     }
 
@@ -1343,6 +1388,43 @@ if enableDebugging then
             Assert.IsNil(LibP2PDB:Get(db, "Users", 2))
         end,
 
+        Insert_FireCallbacks = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            local callbackFired = false
+            LibP2PDB:NewTable(db, {
+                name = "Users",
+                keyType = "number",
+                schema = {
+                    name = "string",
+                    age = "number",
+                },
+                onChange = function(key, row)
+                    callbackFired = true
+                end,
+            })
+            LibP2PDB:Insert(db, "Users", 1, { name = "Bob", age = 25 })
+            Assert.IsTrue(callbackFired, "onChange callback was not fired on Insert")
+        end,
+
+        Insert_AfterTombstone_Succeeds = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, {
+                name = "Users",
+                keyType = "number",
+                schema = {
+                    name = "string",
+                    age = "number",
+                },
+            })
+
+            LibP2PDB:Insert(db, "Users", 1, { name = "Bob", age = 25 })
+            LibP2PDB:Delete(db, "Users", 1)
+
+            -- Now insert a new row with the same key
+            Assert.IsTrue(LibP2PDB:Insert(db, "Users", 1, { name = "Alice", age = 30 }))
+            Assert.AreEqual(LibP2PDB:Get(db, "Users", 1), { name = "Alice", age = 30 })
+        end,
+
         Insert_DBIsInvalid_Throws = function()
             Assert.Throws(function() LibP2PDB:Insert(nil, "Users", 1, { name = "A" }) end)
             Assert.Throws(function() LibP2PDB:Insert(123, "Users", 1, { name = "A" }) end)
@@ -1415,6 +1497,32 @@ if enableDebugging then
             Assert.IsNil(LibP2PDB:Get(db, "Users", 2))
         end,
 
+        Set_WhenChanges_FireCallbacks = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            local callbackFired = false
+            LibP2PDB:NewTable(db, {
+                name = "Users",
+                keyType = "number",
+                schema = {
+                    name = "string",
+                    age = "number",
+                },
+                onChange = function(key, row)
+                    callbackFired = true
+                end,
+            })
+            LibP2PDB:Set(db, "Users", 1, { name = "Bob", age = 25 })
+            Assert.IsTrue(callbackFired, "onChange callback was not fired on Set when inserting new row")
+
+            callbackFired = false
+            LibP2PDB:Set(db, "Users", 1, { name = "Bob", age = 25 })
+            Assert.IsFalse(callbackFired, "onChange callback was fired on Set when setting identical row")
+
+            callbackFired = false
+            LibP2PDB:Set(db, "Users", 1, { name = "Bob", age = 30 })
+            Assert.IsTrue(callbackFired, "onChange callback was not fired on Set when updating row")
+        end,
+
         Set_DBIsInvalid_Throws = function()
             Assert.Throws(function() LibP2PDB:Set(nil, "Users", 1, { name = "A" }) end)
             Assert.Throws(function() LibP2PDB:Set(123, "Users", 1, { name = "A" }) end)
@@ -1468,6 +1576,34 @@ if enableDebugging then
             Assert.AreEqual(LibP2PDB:Get(db, "Users", 1), { name = "Bob", age = 26 })
             Assert.Throws(function() LibP2PDB:Update(db, "Users", 2, updateFn) end)
             Assert.IsNil(LibP2PDB:Get(db, "Users", 2))
+        end,
+
+        Update_WhenChanges_FireCallbacks = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            local callbackFired = false
+            LibP2PDB:NewTable(db, {
+                name = "Users",
+                keyType = "number",
+                schema = {
+                    name = "string",
+                    age = "number",
+                },
+                onChange = function(key, row)
+                    callbackFired = true
+                end,
+            })
+            LibP2PDB:Insert(db, "Users", 1, { name = "Bob", age = 25 })
+
+            callbackFired = false
+            LibP2PDB:Update(db, "Users", 1, function(row) return row end)
+            Assert.IsFalse(callbackFired, "onChange callback was fired on Update when setting identical row")
+
+            callbackFired = false
+            LibP2PDB:Update(db, "Users", 1, function(row)
+                row.age = row.age + 1
+                return row
+            end)
+            Assert.IsTrue(callbackFired, "onChange callback was not fired on Update when updating row")
         end,
 
         Update_DBIsInvalid_Throws = function()
@@ -1571,9 +1707,50 @@ if enableDebugging then
             local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             LibP2PDB:Insert(db, "Users", 1, { name = "Bob", age = 25 })
-            Assert.IsTrue(LibP2PDB:Delete(db, "Users", 1))
+            Assert.IsTable(Private.databases[db].tables["Users"].rows[1].data)
+            Assert.IsNil(Private.databases[db].tables["Users"].rows[1].version.tombstone)
+            Assert.IsTrue(LibP2PDB:HasKey(db, "Users", 1))
+
+            -- Delete existing key
+            LibP2PDB:Delete(db, "Users", 1)
+            Assert.IsNil(Private.databases[db].tables["Users"].rows[1].data)
+            Assert.IsTrue(Private.databases[db].tables["Users"].rows[1].version.tombstone)
             Assert.IsNil(LibP2PDB:Get(db, "Users", 1))
-            Assert.IsFalse(LibP2PDB:Delete(db, "Users", 2))
+
+            -- Delete non-existent key
+            Assert.DoesNotThrow(function() LibP2PDB:Delete(db, "Users", 2) end)
+            Assert.IsNil(Private.databases[db].tables["Users"].rows[2].data)
+            Assert.IsTrue(Private.databases[db].tables["Users"].rows[2].version.tombstone)
+            Assert.IsNil(LibP2PDB:Get(db, "Users", 2))
+        end,
+
+        Delete_WhenChanges_FireCallbacks = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            local callbackFired = false
+            LibP2PDB:NewTable(db, {
+                name = "Users",
+                keyType = "number",
+                schema = {
+                    name = "string",
+                    age = "number",
+                },
+                onChange = function(key, row)
+                    callbackFired = true
+                end,
+            })
+            LibP2PDB:Insert(db, "Users", 1, { name = "Bob", age = 25 })
+
+            callbackFired = false
+            LibP2PDB:Delete(db, "Users", 2)
+            Assert.IsFalse(callbackFired, "onChange callback was fired on Delete when deleting non-existent row")
+
+            callbackFired = false
+            LibP2PDB:Delete(db, "Users", 1)
+            Assert.IsTrue(callbackFired, "onChange callback was not fired on Delete when deleting existing row")
+
+            callbackFired = false
+            LibP2PDB:Delete(db, "Users", 1)
+            Assert.IsFalse(callbackFired, "onChange callback was fired on Delete when deleting already deleted row")
         end,
 
         Delete_DBIsInvalid_Throws = function()
