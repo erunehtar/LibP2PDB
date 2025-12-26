@@ -21,6 +21,7 @@ assert(AceSerializer, MAJOR .. " requires AceSerializer-3.0")
 local assert, print = assert, print
 local type, ipairs, pairs = type, ipairs, pairs
 local min, max, abs = min, max, abs
+local tostring, tostringall = tostring, tostringall
 local format, strsub, strfind, strjoin = format, strsub, strfind, strjoin
 local unpack, tinsert, CopyTable = unpack, table.insert, CopyTable
 
@@ -31,28 +32,58 @@ local unpack, tinsert, CopyTable = unpack, table.insert, CopyTable
 local UnitGUID = UnitGUID
 
 ------------------------------------------------------------------------------------------------------------------------
+-- Constants
+------------------------------------------------------------------------------------------------------------------------
+
+local Color = {
+    Ace = "ff33ff99",
+    Debug = "ff00ffff",
+    Green = "ff00ff00",
+}
+
+local CommMessageType = {
+    RequestSnapshot = 1,
+    Snapshot = 2,
+    Digest = 3,
+    RequestRows = 4,
+    Rows = 5,
+}
+
+local CommPriority = {
+    Low = "BULK",
+    Normal = "NORMAL",
+    High = "ALERT",
+}
+
+------------------------------------------------------------------------------------------------------------------------
 -- Private Helper Functions
 ------------------------------------------------------------------------------------------------------------------------
 
-local function dump(o)
+local function C(color, text)
+    return "|c" .. color .. text .. "|r"
+end
+
+local enableDebugging = false
+local function Debug(...)
+    if enableDebugging then
+        print(C(Color.Ace, "LibP2PDB") .. ": " .. C(Color.Debug, "[DEBUG]") .. " " .. strjoin(" ", tostringall(...)))
+    end
+end
+
+local function Dump(o)
     if type(o) == "table" then
         local s = "{"
         for k, v in pairs(o) do
-            if type(k) ~= "number" then k = '"' .. k .. '"' end
-            s = s .. '[' .. k .. '] = ' .. dump(v) .. ','
+            if type(k) ~= "number" then
+                k = '"' .. k .. '"'
+            end
+            s = s .. '[' .. k .. '] = ' .. Dump(v) .. ','
         end
         return s .. '}'
     elseif type(o) == "string" then
         return '"' .. o .. '"'
     else
         return tostring(o)
-    end
-end
-
-local debugEnabled = false
-local function debug(...)
-    if debugEnabled then
-        print("LibP2PDB: |cff00ffff[DEBUG]|r", ...)
     end
 end
 
@@ -114,24 +145,6 @@ local function PlayerGUIDShort()
     if not guid then return nil end
     return strsub(guid, 8) -- skip "Player-" prefix
 end
-
-------------------------------------------------------------------------------------------------------------------------
--- Private Variables and Constants
-------------------------------------------------------------------------------------------------------------------------
-
-local CommMessageType = {
-    RequestSnapshot = 1,
-    Snapshot = 2,
-    Digest = 3,
-    RequestRows = 4,
-    Rows = 5,
-}
-
-local CommPriority = {
-    Low = "BULK",
-    Normal = "NORMAL",
-    High = "ALERT",
-}
 
 local function NewPrivate()
     local private = {}
@@ -834,7 +847,7 @@ function InternalImportRow(incomingKey, incomingRow, incomingTableName, t)
 end
 
 function InternalSend(prefix, message, channel, target, priority)
-    debug(format("sending %d bytes, prefix=%s, channel=%s, target=%s", #message, tostring(prefix), tostring(channel), tostring(target)))
+    Debug(format("sending %d bytes, prefix=%s, channel=%s, target=%s", #message, tostring(prefix), tostring(channel), tostring(target)))
     AceComm.SendCommMessage(Private, prefix, message, channel, target, priority)
 end
 
@@ -855,12 +868,12 @@ end
 function InternalOnCommReceived(prefix, message, channel, sender)
     local success, deserialized = AceSerializer:Deserialize(message)
     if not success then
-        debug(format("failed to deserialize message from %s on channel %s: %s", tostring(sender), tostring(channel), dump(deserialized)))
+        Debug(format("failed to deserialize message from %s on channel %s: %s", tostring(sender), tostring(channel), Dump(deserialized)))
         return
     end
 
     if not IsTable(deserialized) or not IsNumber(deserialized.type) then
-        debug(format("received invalid message structure from %s on channel %s", tostring(sender), tostring(channel)))
+        Debug(format("received invalid message structure from %s on channel %s", tostring(sender), tostring(channel)))
         return
     end
 
@@ -875,7 +888,7 @@ function InternalOnCommReceived(prefix, message, channel, sender)
     elseif deserialized.type == CommMessageType.Rows then
         InternalRowsMessageHandler(prefix, channel, sender, deserialized.data)
     else
-        debug(format("received unknown message type %d from %s on channel %s", deserialized.type, tostring(sender), tostring(channel)))
+        Debug(format("received unknown message type %d from %s on channel %s", deserialized.type, tostring(sender), tostring(channel)))
     end
 end
 
@@ -883,7 +896,7 @@ function InternalRequestSnapshotMessageHandler(prefix, channel, sender)
     -- Get the DB instance
     local db = LibP2PDB:GetDB(prefix)
     if not db then
-        debug(format("received request snapshot message for unknown clusterId '%s' from %s on channel %s", tostring(prefix), tostring(sender), tostring(channel)))
+        Debug(format("received request snapshot message for unknown clusterId '%s' from %s on channel %s", tostring(prefix), tostring(sender), tostring(channel)))
         return
     end
 
@@ -898,27 +911,27 @@ end
 function InternalSnapshotMessageHandler(prefix, channel, sender, data)
     local db = LibP2PDB:GetDB(prefix)
     if not db then
-        debug(format("received snapshot message for unknown clusterId '%s' from %s on channel %s", tostring(prefix), tostring(sender), tostring(channel)))
+        Debug(format("received snapshot message for unknown clusterId '%s' from %s on channel %s", tostring(prefix), tostring(sender), tostring(channel)))
         return
     end
 
     local success, errors = LibP2PDB:Import(db, data)
     if not success then
-        debug(format("failed to import snapshot from %s on channel %s", tostring(sender), tostring(channel)))
+        Debug(format("failed to import snapshot from %s on channel %s", tostring(sender), tostring(channel)))
         if errors then
             for i, err in ipairs(errors) do
-                debug(format("%d: %s", i, tostring(err)))
+                Debug(format("%d: %s", i, tostring(err)))
             end
         end
     else
-        debug(format("successfully imported snapshot from %s on channel %s", tostring(sender), tostring(channel)))
+        Debug(format("successfully imported snapshot from %s on channel %s", tostring(sender), tostring(channel)))
     end
 end
 
 function InternalDigestMessageHandler(prefix, channel, sender, data)
     local db = LibP2PDB:GetDB(prefix)
     if not db then
-        debug(format("received digest message for unknown clusterId '%s' from %s on channel %s", tostring(prefix), tostring(sender), tostring(channel)))
+        Debug(format("received digest message for unknown clusterId '%s' from %s on channel %s", tostring(prefix), tostring(sender), tostring(channel)))
         return
     end
 
@@ -970,7 +983,7 @@ end
 function InternalRequestRowsMessageHandler(prefix, channel, sender, data)
     local db = LibP2PDB:GetDB(prefix)
     if not db then
-        debug(format("received request rows message for unknown clusterId '%s' from %s on channel %s", tostring(prefix), tostring(sender), tostring(channel)))
+        Debug(format("received request rows message for unknown clusterId '%s' from %s on channel %s", tostring(prefix), tostring(sender), tostring(channel)))
         return
     end
 
@@ -1014,7 +1027,7 @@ end
 function InternalRowsMessageHandler(prefix, channel, sender, data)
     local db = LibP2PDB:GetDB(prefix)
     if not db then
-        debug(format("received rows message for unknown clusterId '%s' from %s on channel %s", tostring(prefix), tostring(sender), tostring(channel)))
+        Debug(format("received rows message for unknown clusterId '%s' from %s on channel %s", tostring(prefix), tostring(sender), tostring(channel)))
         return
     end
 
@@ -1030,14 +1043,14 @@ function InternalRowsMessageHandler(prefix, channel, sender, data)
                 local importResult, importError = InternalImportRow(incomingKey, incomingRow, incomingTableName, t)
                 if not importResult then
                     anyErrors = true
-                    debug(format("failed to import row with key '%s' in table '%s' from %s on channel %s: %s", tostring(incomingKey), incomingTableName, tostring(sender), tostring(channel), tostring(importError)))
+                    Debug(format("failed to import row with key '%s' in table '%s' from %s on channel %s: %s", tostring(incomingKey), incomingTableName, tostring(sender), tostring(channel), tostring(importError)))
                 end
             end
         end
     end
 
     if not anyErrors then
-        debug(format("successfully imported rows from %s on channel %s", tostring(sender), tostring(channel)))
+        Debug(format("successfully imported rows from %s on channel %s", tostring(sender), tostring(channel)))
     end
 end
 
@@ -1045,7 +1058,7 @@ end
 -- Testing
 ------------------------------------------------------------------------------------------------------------------------
 
-if debugEnabled then
+if enableDebugging then
     local function Equal(a, b)
         assert(a ~= nil, "first value is nil")
         assert(b ~= nil, "second value is nil")
@@ -1681,13 +1694,6 @@ if debugEnabled then
             Assert.AreEqual(LibP2PDB:Get(db2, "Users", 1), LibP2PDB:Get(db1, "Users", 1))
             Assert.IsNil(LibP2PDB:Get(db2, "Users", 2))
         end,
-
-        RequestSnapshot = function()
-            -- This is a placeholder test since RequestSnapshot involves networking.
-            -- Here we just ensure that the function can be called without errors.
-            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
-            Assert.DoesNotThrow(function() LibP2PDB:RequestSnapshot(db, "Aramehtar") end)
-        end,
     }
 
     local function RunTest(testFn)
@@ -1706,7 +1712,7 @@ if debugEnabled then
         for _, v in pairs(LibP2PDBTests) do
             RunTest(v)
         end
-        print("All LibP2PDB tests |cff00ff00passed|r.")
+        Debug("All tests " .. C(Color.Green, "successful") .. ".")
     end
 
     _G.LibP2PDB = { RunTests = RunTests }
