@@ -38,7 +38,10 @@ local UnitGUID = UnitGUID
 local Color = {
     Ace = "ff33ff99",
     Debug = "ff00ffff",
-    Green = "ff00ff00",
+    White = "ffffffff",
+    Yellow = "ffffff00",
+    Red = "ffff4040",
+    Green = "ff00ff00"
 }
 
 local CommMessageType = {
@@ -177,7 +180,7 @@ function LibP2PDB:NewDB(desc)
     assert(IsNonEmptyTable(desc), "desc must be a non-empty table")
     assert(IsNonEmptyString(desc.clusterId, 16), "desc.clusterId must be a non-empty string (max 16 chars)")
     assert(IsNonEmptyString(desc.namespace), "desc.namespace must be a non-empty string")
-    assert(desc.channels == nil or IsNonEmptyTable(desc.channels), "desc.channels must be a non-empty table if provided")
+    assert(desc.channels == nil or IsTable(desc.channels), "desc.channels must be a table if provided")
     assert(desc.onChange == nil or IsFunction(desc.onChange), "desc.onChange must be a function if provided")
 
     -- Validate channels if provided
@@ -374,7 +377,7 @@ function LibP2PDB:Update(db, table, key, updateFn)
     assert(existingRow, "key '" .. tostring(key) .. "' does not exist in table '" .. table .. "'")
 
     -- Call the update function to get the new row data
-    local updatedRow = updateFn(existingRow.data)
+    local updatedRow = updateFn(CopyTable(existingRow.data))
     assert(IsTable(updatedRow), "updateFn must return a table")
 
     -- Use Set to apply the updated row (will handle validation, versioning, callbacks)
@@ -413,6 +416,39 @@ function LibP2PDB:Get(db, table, key)
         result[k] = v
     end
     return result
+end
+
+---Determine if a key exists in a table.
+---Validates the key type against the table definition.
+---@param db LibP2PDB.DB Database instance
+---@param tableName string Name of the table to check
+---@param key string|number Primary key value for the row (must match table's keyType)
+function LibP2PDB:HasKey(db, tableName, key)
+    assert(IsTable(db), "db must be a table")
+    assert(IsNonEmptyString(tableName), "table name must be a non-empty string")
+    assert(IsNonEmptyStringOrNumber(key), "key must be a string or number")
+
+    -- Validate db instance
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database instance")
+
+    -- Validate table and key type
+    local t = dbi.tables[tableName]
+    assert(t, "table '" .. tableName .. "' is not defined in the database")
+    assert(type(key) == t.keyType, "expected key of type '" .. t.keyType .. "' for table '" .. tableName .. "', but was '" .. type(key) .. "'")
+
+    -- Lookup the row
+    local row = t.rows[key]
+    if not row or not row.data or not row.version then
+        return false
+    end
+
+    -- Tombstone check
+    if row.version.tombstone then
+        return false
+    end
+
+    return true
 end
 
 ---Delete a row.
@@ -638,25 +674,7 @@ function LibP2PDB:SyncNow(db)
     assert(dbi, "db is not a recognized database instance")
 
     -- Build digest
-    local digest = {
-        clock = dbi.clock,
-        tables = {},
-    }
-    for tableName, t in pairs(dbi.tables) do
-        local tableDigest = {}
-        for key, row in pairs(t.rows) do
-            local v = row.version
-            local digest = {
-                clock = v.clock,
-                peer = v.peer,
-            }
-            if v.tombstone == true then
-                digest.tombstone = true
-            end
-            tableDigest[key] = digest
-        end
-        digest.tables[tableName] = tableDigest
-    end
+    local digest = InternalBuildDigest(dbi)
 
     -- Send the digest to all peers
     local obj = {
@@ -844,6 +862,41 @@ function InternalImportRow(incomingKey, incomingRow, incomingTableName, t)
     end
 
     return true
+end
+
+function InternalBuildDigest(dbi)
+    local digest = {
+        clock = dbi.clock,
+        tables = {},
+    }
+
+    -- Build table digests
+    for tableName, t in pairs(dbi.tables) do
+        local tableDigest = {}
+        for key, row in pairs(t.rows) do
+            -- Extract version metadata
+            local v = row.version
+            local rowDigest = {
+                clock = v.clock,
+                peer = v.peer,
+            }
+
+            -- Set tombstone only if true (nil otherwise)
+            if v.tombstone == true then
+                rowDigest.tombstone = true
+            end
+
+            -- Add to table digest
+            tableDigest[key] = rowDigest
+        end
+
+        -- Only include non-empty tables in the digest
+        if next(tableDigest) ~= nil then
+            digest.tables[tableName] = tableDigest
+        end
+    end
+
+    return digest
 end
 
 function InternalSend(prefix, message, channel, target, priority)
@@ -1446,6 +1499,18 @@ if enableDebugging then
             Assert.Throws(function() LibP2PDB:Update(db, "Users", "user1", "invalid") end)
         end,
 
+        Update_UpdateFunctionRowIsACopy = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            LibP2PDB:Insert(db, "Users", 1, { name = "Bob", age = 25 })
+            LibP2PDB:Update(db, "Users", 1, function(row)
+                row.additionalField = "abc"
+                return { name = "Eve", age = 30 }
+            end)
+            local fetchedRow = LibP2PDB:Get(db, "Users", 1)
+            Assert.AreEqual(fetchedRow, { name = "Eve", age = 30 })
+        end,
+
         Get = function()
             local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
@@ -1472,6 +1537,34 @@ if enableDebugging then
             LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
             Assert.Throws(function() LibP2PDB:Get(db, "Users", nil) end)
             Assert.Throws(function() LibP2PDB:Get(db, "Users", {}) end)
+        end,
+
+        HasKey = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            LibP2PDB:Insert(db, "Users", 1, { name = "Bob", age = 25 })
+            Assert.IsTrue(LibP2PDB:HasKey(db, "Users", 1))
+            Assert.IsFalse(LibP2PDB:HasKey(db, "Users", 2))
+        end,
+
+        HasKey_DBIsInvalid_Throws = function()
+            Assert.Throws(function() LibP2PDB:HasKey(nil, "Users", 1) end)
+            Assert.Throws(function() LibP2PDB:HasKey(123, "Users", 1) end)
+            Assert.Throws(function() LibP2PDB:HasKey("invalid", "Users", 1) end)
+        end,
+
+        HasKey_TableIsInvalid_Throws = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            Assert.Throws(function() LibP2PDB:HasKey(db, nil, 1) end)
+            Assert.Throws(function() LibP2PDB:HasKey(db, 123, 1) end)
+            Assert.Throws(function() LibP2PDB:HasKey(db, {}, 1) end)
+        end,
+
+        HasKey_KeyIsInvalid_Throws = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
+            Assert.Throws(function() LibP2PDB:HasKey(db, "Users", nil) end)
+            Assert.Throws(function() LibP2PDB:HasKey(db, "Users", {}) end)
         end,
 
         Delete = function()
