@@ -90,11 +90,7 @@ local function Dump(o)
     end
 end
 
-local function ternary(c, a, b)
-    if c then return a else return b end
-end
-
-local function shallow_equal(a, b)
+local function ShallowEqual(a, b)
     if a == b then return true end
     if type(a) ~= "table" or type(b) ~= "table" then return false end
     local count = 0
@@ -465,7 +461,11 @@ function LibP2PDB:HasKey(db, tableName, key)
 
     -- Lookup the row
     local row = t.rows[key]
-    return ternary(row ~= nil and not row.version.tombstone, true, false)
+    if row and not row.version.tombstone then
+        return true
+    else
+        return false
+    end
 end
 
 ---Delete a row.
@@ -489,28 +489,29 @@ function LibP2PDB:Delete(db, table, key)
     assert(t, "table '" .. table .. "' is not defined in the database")
     assert(type(key) == t.keyType, "expected key of type '" .. t.keyType .. "' for table '" .. table .. "', but was '" .. type(key) .. "'")
 
-    -- Lookup the existing row
-    local changed = false
+    -- Determine if the row will change
+    local changes = false
     local existingRow = t.rows[key]
-    if existingRow and existingRow.data and existingRow.version and not existingRow.version.tombstone then
-        changed = true
+    if not existingRow or (existingRow.data or not existingRow.version.tombstone) then
+        changes = true -- row exists or is not already a tombstone
     end
 
-    -- Versioning (Lamport clock)
-    dbi.clock = dbi.clock + 1
+    -- Apply deletion if needed
+    if changes then
+        -- Versioning (Lamport clock)
+        dbi.clock = dbi.clock + 1
 
-    -- Replace row with tombstone
-    t.rows[key] = {
-        data = nil, -- no row data
-        version = {
-            clock = dbi.clock,
-            peer = Private.peerId,
-            tombstone = true, -- mark as deleted
-        },
-    }
+        -- Replace row with tombstone
+        t.rows[key] = {
+            data = nil, -- no row data
+            version = {
+                clock = dbi.clock,
+                peer = Private.peerId,
+                tombstone = true, -- mark as deleted
+            },
+        }
 
-    -- Fire callbacks
-    if changed then
+        -- Fire callbacks
         InternalFireCallbacks(dbi, table, t, key, nil)
     end
 end
@@ -595,19 +596,44 @@ function LibP2PDB:Export(db)
     -- Build export state
     local state = {
         clock = dbi.clock,
-        tables = {},
     }
+    local tables = {}
     for tableName, tableData in pairs(dbi.tables) do
-        state.tables[tableName] = {
-            rows = {},
-        }
+        local rows = {}
         for key, row in pairs(tableData.rows) do
-            state.tables[tableName].rows[key] = {
-                data = CopyTable(row.data),
-                version = CopyTable(row.version),
+            local data
+            if row.data then
+                data = CopyTable(row.data)
+            else
+                data = nil
+            end
+
+            local tombstone
+            if row.version.tombstone == true then
+                tombstone = true
+            else
+                tombstone = nil
+            end
+
+            rows[key] = {
+                data = data,
+                version = {
+                    clock = row.version.clock,
+                    peer = row.version.peer,
+                    tombstone = tombstone,
+                },
+            }
+        end
+        if next(rows) ~= nil then
+            tables[tableName] = {
+                rows = rows
             }
         end
     end
+    if next(tables) ~= nil then
+        state.tables = tables
+    end
+
     return state
 end
 
@@ -778,26 +804,11 @@ function InternalSet(db, dbi, table, t, key, row)
     -- Determine if the row will change
     local changes = false
     local existingRow = t.rows[key]
-    if not existingRow or (not existingRow.data and existingRow.version.tombstone == true) then
-        changes = true -- new row
-    else
-        -- Check for data changes
-        for fieldName, fieldValue in pairs(data) do
-            if existingRow.data[fieldName] ~= fieldValue then
-                changes = true
-                break
-            end
-        end
-        if not changes then
-            for fieldName, fieldValue in pairs(existingRow.data) do
-                if data[fieldName] ~= fieldValue then
-                    changes = true
-                    break
-                end
-            end
-        end
+    if not existingRow or existingRow.version.tombstone == true or not ShallowEqual(existingRow.data, data) then
+        changes = true -- New row or data changes
     end
 
+    -- Apply changes if any
     if changes then
         -- Versioning (Lamport clock)
         dbi.clock = dbi.clock + 1
@@ -852,9 +863,15 @@ function InternalImportRow(incomingKey, incomingRow, dbi, incomingTableName, t)
     end
 
     -- Validate version metadata
+    if not IsTable(incomingRow.version) then
+        return false, format("skipping row with missing version metadata for key '%s' in table '%s'", tostring(incomingKey), incomingTableName)
+    end
     local incomingVersion = incomingRow.version
-    if not IsTable(incomingVersion) or not IsNumber(incomingVersion.clock) or not IsNonEmptyString(incomingVersion.peer) then
-        return false, format("skipping row with invalid version metadata for key '%s' in table '%s'", tostring(incomingKey), incomingTableName)
+    if not IsNumber(incomingVersion.clock) or incomingVersion.clock < 0 then
+        return false, format("skipping row with invalid version clock for key '%s' in table '%s'", tostring(incomingKey), incomingTableName)
+    end
+    if not IsNonEmptyString(incomingVersion.peer) then
+        return false, format("skipping row with invalid version peer for key '%s' in table '%s'", tostring(incomingKey), incomingTableName)
     end
 
     local cleanVersion = {
@@ -874,6 +891,9 @@ function InternalImportRow(incomingKey, incomingRow, dbi, incomingTableName, t)
                 data = nil,
                 version = cleanVersion,
             }
+
+            -- Fire callbacks
+            InternalFireCallbacks(dbi, incomingTableName, t, incomingKey, nil)
         end
         return true
     end
@@ -1172,28 +1192,28 @@ if enableDebugging then
     end
 
     local Assert = {
-        IsNil = function(value, msg) assert(value == nil, ternary(msg, msg, "value is not nil")) end,
-        IsNotNil = function(value, msg) assert(value ~= nil, ternary(msg, msg, "value is nil")) end,
-        IsTrue = function(value, msg) assert(type(value) == "boolean" and value == true, ternary(msg, msg, "value is not true")) end,
-        IsFalse = function(value, msg) assert(type(value) == "boolean" and value == false, ternary(msg, msg, "value is not false")) end,
-        IsNumber = function(value, msg) assert(type(value) == "number", ternary(msg, msg, "value is not a number")) end,
-        IsNotNumber = function(value, msg) assert(type(value) ~= "number", ternary(msg, msg, "value is a number")) end,
-        IsString = function(value, msg) assert(type(value) == "string", ternary(msg, msg, "value is not a string")) end,
-        IsNotString = function(value, msg) assert(type(value) ~= "string", ternary(msg, msg, "value is a string")) end,
-        IsTable = function(value, msg) assert(type(value) == "table", ternary(msg, msg, "value is not a table")) end,
-        IsNotTable = function(value, msg) assert(type(value) ~= "table", ternary(msg, msg, "value is a table")) end,
-        IsFunction = function(value, msg) assert(type(value) == "function", ternary(msg, msg, "value is not a function")) end,
-        IsNotFunction = function(value, msg) assert(type(value) ~= "function", ternary(msg, msg, "value is a function")) end,
-        AreEqual = function(actual, expected, msg) assert(Equal(actual, expected) == true, ternary(msg, msg, "values are not equal")) end,
-        AreNotEqual = function(actual, expected, msg) assert(Equal(actual, expected) == false, ternary(msg, msg, "values are equal")) end,
-        IsEmptyString = function(value, msg) assert(type(value) == "string" and #value == 0, ternary(msg, msg, "value is not an empty string")) end,
-        IsNotEmptyString = function(value, msg) assert(type(value) == "string" and #value > 0, ternary(msg, msg, "value is an empty string")) end,
-        IsEmptyTable = function(value, msg) assert(type(value) == "table" and next(value) == nil, ternary(msg, msg, "value is not an empty table")) end,
-        IsNotEmptyTable = function(value, msg) assert(type(value) == "table" and next(value) ~= nil, ternary(msg, msg, "value is an empty table")) end,
-        Throws = function(fn, msg) assert(pcall(fn) == false, ternary(msg, msg, "function did not throw")) end,
+        IsNil = function(value, msg) assert(value == nil, msg or "value is not nil") end,
+        IsNotNil = function(value, msg) assert(value ~= nil, msg or "value is nil") end,
+        IsTrue = function(value, msg) assert(type(value) == "boolean" and value == true, msg or "value is not true") end,
+        IsFalse = function(value, msg) assert(type(value) == "boolean" and value == false, msg or "value is not false") end,
+        IsNumber = function(value, msg) assert(type(value) == "number", msg or "value is not a number") end,
+        IsNotNumber = function(value, msg) assert(type(value) ~= "number", msg or "value is a number") end,
+        IsString = function(value, msg) assert(type(value) == "string", msg or "value is not a string") end,
+        IsNotString = function(value, msg) assert(type(value) ~= "string", msg or "value is a string") end,
+        IsTable = function(value, msg) assert(type(value) == "table", msg or "value is not a table") end,
+        IsNotTable = function(value, msg) assert(type(value) ~= "table", msg or "value is a table") end,
+        IsFunction = function(value, msg) assert(type(value) == "function", msg or "value is not a function") end,
+        IsNotFunction = function(value, msg) assert(type(value) ~= "function", msg or "value is a function") end,
+        AreEqual = function(actual, expected, msg) assert(Equal(actual, expected) == true, msg or "values are not equal") end,
+        AreNotEqual = function(actual, expected, msg) assert(Equal(actual, expected) == false, msg or "values are equal") end,
+        IsEmptyString = function(value, msg) assert(type(value) == "string" and #value == 0, msg or "value is not an empty string") end,
+        IsNotEmptyString = function(value, msg) assert(type(value) == "string" and #value > 0, msg or "value is an empty string") end,
+        IsEmptyTable = function(value, msg) assert(type(value) == "table" and next(value) == nil, msg or "value is not an empty table") end,
+        IsNotEmptyTable = function(value, msg) assert(type(value) == "table" and next(value) ~= nil, msg or "value is an empty table") end,
+        Throws = function(fn, msg) assert(pcall(fn) == false, msg or "function did not throw") end,
         DoesNotThrow = function(fn, msg)
             local s, r = pcall(fn)
-            assert(s == true, ternary(msg, msg, format("function threw an error: %s", tostring(r))))
+            assert(s == true, msg or format("function threw an error: %s", tostring(r)))
         end,
     }
 
@@ -1741,12 +1761,12 @@ if enableDebugging then
             LibP2PDB:Insert(db, "Users", 1, { name = "Bob", age = 25 })
 
             callbackFired = false
-            LibP2PDB:Delete(db, "Users", 2)
-            Assert.IsFalse(callbackFired, "onChange callback was fired on Delete when deleting non-existent row")
-
-            callbackFired = false
             LibP2PDB:Delete(db, "Users", 1)
             Assert.IsTrue(callbackFired, "onChange callback was not fired on Delete when deleting existing row")
+
+            callbackFired = false
+            LibP2PDB:Delete(db, "Users", 2)
+            Assert.IsTrue(callbackFired, "onChange callback was not fired on Delete when deleting non-existent row")
 
             callbackFired = false
             LibP2PDB:Delete(db, "Users", 1)
