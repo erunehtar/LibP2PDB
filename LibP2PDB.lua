@@ -23,13 +23,16 @@ local type, ipairs, pairs = type, ipairs, pairs
 local min, max, abs = min, max, abs
 local tostring, tostringall = tostring, tostringall
 local format, strsub, strfind, strjoin = format, strsub, strfind, strjoin
-local unpack, tinsert, CopyTable = unpack, table.insert, CopyTable
+local tinsert, tremove, tsort = table.insert, table.remove, table.sort
+local unpack, CopyTable = unpack, CopyTable
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Local WoW API References
 ------------------------------------------------------------------------------------------------------------------------
 
 local UnitGUID = UnitGUID
+local GetTime, GetServerTime = GetTime, GetServerTime
+local IsInGuild, IsInRaid, IsInGroup, IsInInstance = IsInGuild, IsInRaid, IsInGroup, IsInInstance
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Constants
@@ -45,11 +48,13 @@ local Color = {
 }
 
 local CommMessageType = {
-    RequestSnapshot = 1,
-    Snapshot = 2,
-    Digest = 3,
-    RequestRows = 4,
-    Rows = 5,
+    PeerDiscoveryRequest = 1,
+    PeerDiscoveryResponse = 2,
+    RequestSnapshot = 3,
+    Snapshot = 4,
+    Digest = 5,
+    RequestRows = 6,
+    Rows = 7,
 }
 
 local CommPriority = {
@@ -168,11 +173,16 @@ local function PlayerGUIDShort()
     return strsub(guid, 8) -- skip "Player-" prefix
 end
 
+------------------------------------------------------------------------------------------------------------------------
+-- Private State
+------------------------------------------------------------------------------------------------------------------------
+
 local function NewPrivate()
     local private = {}
-    private.clusters = {}
-    private.databases = setmetatable({}, { __mode = "k" })
+    private.playerName = UnitName("player")
     private.peerId = PlayerGUIDShort()
+    private.databases = setmetatable({}, { __mode = "k" })
+    private.clusters = {}
     private.OnCommReceived = function(self, ...) InternalOnCommReceived(...) end
     return private
 end
@@ -186,7 +196,10 @@ local Private = NewPrivate()
 ---@field clusterId string Unique identifier for the database cluster (max 16 chars)
 ---@field namespace string Namespace for this database instance
 ---@field channels table|nil List of chat channels to use for gossip (default: {"GUILD", "RAID", "PARTY", "YELL"})
+---@field discoveryQuietPeriod number|nil Seconds of quiet time with no new peers before considering discovery complete (default: 1.0)
+---@field discoveryMaxTime number|nil Maximum seconds to wait for peer discovery before considering it complete (default: 3.0)
 ---@field onChange function|nil Callback function(table, key, row) invoked on any row change
+---@field onDiscoveryComplete function|nil Callback function(isInitial) invoked when peers discovery completes
 
 ---@class LibP2PDB.DB Database instance
 
@@ -200,7 +213,10 @@ function LibP2PDB:NewDB(desc)
     assert(IsNonEmptyString(desc.clusterId, 16), "desc.clusterId must be a non-empty string (max 16 chars)")
     assert(IsNonEmptyString(desc.namespace), "desc.namespace must be a non-empty string")
     assert(desc.channels == nil or IsTable(desc.channels), "desc.channels must be a table if provided")
+    assert(desc.discoveryQuietPeriod == nil or IsNumber(desc.discoveryQuietPeriod), "desc.discoveryQuietPeriod must be a number if provided")
+    assert(desc.discoveryMaxTime == nil or IsNumber(desc.discoveryMaxTime), "desc.discoveryMaxTime must be a number if provided")
     assert(desc.onChange == nil or IsFunction(desc.onChange), "desc.onChange must be a function if provided")
+    assert(desc.onDiscoveryComplete == nil or IsFunction(desc.onDiscoveryComplete), "desc.onDiscoveryComplete must be a function if provided")
 
     -- Validate channels if provided
     if desc.channels then
@@ -222,22 +238,33 @@ function LibP2PDB:NewDB(desc)
         namespace = desc.namespace,
         clock = 0,
         -- Networking
+        peers = {},
         channels = desc.channels or defaultChannels,
+        discoveryQuietPeriod = desc.discoveryQuietPeriod or 1.0,
+        discoveryMaxTime = desc.discoveryMaxTime or 3.0,
         -- Data
         tables = {},
         -- Callbacks
         onChange = desc.onChange,
+        onDiscoveryComplete = desc.onDiscoveryComplete,
         -- Access control
         writePolicy = nil,
     }
 
     -- Internal registry
-    local db = {}
+    local db = {} -- db instance handle
     Private.clusters[desc.clusterId] = db
     Private.databases[db] = dbi
 
+    -- Set up OnUpdate handler
+    if dbi.onDiscoveryComplete then
+        dbi.frame = CreateFrame("Frame")
+        dbi.frame:SetScript("OnUpdate", function() InternalOnUpdate(dbi) end)
+    end
+
     -- Register comm prefix
     AceComm.RegisterComm(Private, desc.clusterId)
+
     return db
 end
 
@@ -685,9 +712,33 @@ end
 -- Public API: Sync / Gossip Controls
 ------------------------------------------------------------------------------------------------------------------------
 
----Request a full snapshot from a specific peer
+---Discover peers in the cluster by broadcasting a request message.
 ---@param db LibP2PDB.DB Database instance
----@param target string|nil Optional target peer ID to request the snapshot from; if nil, broadcasts to all peers
+function LibP2PDB:DiscoverPeers(db)
+    assert(IsTable(db), "db must be a table")
+
+    -- Validate db instance
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database instance")
+
+    -- Send the discover peers message
+    local obj = {
+        type = CommMessageType.PeerDiscoveryRequest,
+        peerId = Private.peerId,
+    }
+    local serialized = AceSerializer:Serialize(obj)
+    InternalBroadcast(dbi.clusterId, serialized, dbi.channels, CommPriority.Low)
+
+    -- Record the time of the peer discovery request
+    if dbi.onDiscoveryComplete then
+        dbi.discoveryStartTime = GetTime()
+        dbi.lastDiscoveryResponseTime = dbi.discoveryStartTime
+    end
+end
+
+---Request a full snapshot from a peer or broadcast to all peers.
+---@param db LibP2PDB.DB Database instance
+---@param target string|nil Optional target peer to request the snapshot from; if nil, broadcasts to all peers
 function LibP2PDB:RequestSnapshot(db, target)
     assert(IsTable(db), "db must be a table")
     assert(target == nil or IsNonEmptyString(target), "target must be a non-empty string if provided")
@@ -699,9 +750,14 @@ function LibP2PDB:RequestSnapshot(db, target)
     -- Send the request message
     local obj = {
         type = CommMessageType.RequestSnapshot,
+        peerId = Private.peerId,
     }
     local serialized = AceSerializer:Serialize(obj)
-    InternalSend(dbi.clusterId, serialized, "WHISPER", target, CommPriority.Normal)
+    if target then
+        InternalSend(dbi.clusterId, serialized, "WHISPER", target, CommPriority.Normal)
+    else
+        InternalBroadcast(dbi.clusterId, serialized, dbi.channels, CommPriority.Normal)
+    end
 end
 
 ---Immediately initiate a gossip sync by sending the current digest to all peers.
@@ -719,18 +775,49 @@ function LibP2PDB:SyncNow(db)
     -- Send the digest to all peers
     local obj = {
         type = CommMessageType.Digest,
+        peerId = Private.peerId,
         data = digest,
     }
     local serialized = AceSerializer:Serialize(obj)
-    InternalSendToAllPeers(dbi.clusterId, serialized, dbi.channels, CommPriority.Normal)
+    InternalBroadcast(dbi.clusterId, serialized, dbi.channels, CommPriority.Normal)
 end
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Public API: Utility / Metadata
 ------------------------------------------------------------------------------------------------------------------------
 
--- Return the local peer's unique ID
-function LibP2PDB:GetPeerId(db)
+---Return the local peer's unique ID
+---@return string peerId The local peer ID
+function LibP2PDB:GetPeerId()
+    return Private.peerId
+end
+
+---Return a remote peer's unique ID from its GUID
+---@param guid string Full GUID of the remote peer
+---@return string|nil peerId The remote peer ID if valid, or nil if not
+function LibP2PDB:GetPeerIdFromGUID(guid)
+    assert(IsNonEmptyString(guid), "guid must be a non-empty string")
+    if strsub(guid, 1, 7) ~= "Player-" then
+        return nil
+    end
+    return strsub(guid, 8) -- skip "Player-" prefix
+end
+
+---Return a list of discovered peers in the database cluster in this session.
+---This list is not persisted and is reset on logout/reload.
+---@param db LibP2PDB.DB Database instance
+---@return table<string, table> peers Table of peerId -> peer data
+function LibP2PDB:GetDiscoveredPeers(db)
+    assert(IsTable(db), "db must be a table")
+
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database instance")
+
+    local peers = {}
+    for peerId, data in pairs(dbi.peers) do
+        peers[peerId] = data
+    end
+    return peers
 end
 
 -- Return version metadata for a row
@@ -756,6 +843,27 @@ end
 ------------------------------------------------------------------------------------------------------------------------
 -- Private Functions
 ------------------------------------------------------------------------------------------------------------------------
+
+function InternalOnUpdate(dbi)
+    if not dbi.discoveryStartTime then
+        return
+    end
+
+    -- Handle peer discovery timeout
+    local now = GetTime()
+    local sinceStart = now - dbi.discoveryStartTime
+    local sinceLast = now - dbi.lastDiscoveryResponseTime
+
+    -- Discovery quiet period or max time reached
+    if sinceLast >= dbi.discoveryQuietPeriod or sinceStart >= dbi.discoveryMaxTime then
+        dbi.discoveryStartTime = nil
+        if dbi.onDiscoveryComplete then
+            local isInitial = not dbi.isInitialDiscoveryComplete
+            dbi.isInitialDiscoveryComplete = true
+            dbi.onDiscoveryComplete(isInitial)
+        end
+    end
+end
 
 function InternalSchemaCopy(table, schema, data)
     local result = {}
@@ -969,7 +1077,7 @@ function InternalSend(prefix, message, channel, target, priority)
     AceComm.SendCommMessage(Private, prefix, message, channel, target, priority)
 end
 
-function InternalSendToAllPeers(prefix, message, channels, priority)
+function InternalBroadcast(prefix, message, channels, priority)
     for _, channel in ipairs(channels) do
         if channel == "GUILD" and IsInGuild() then
             InternalSend(prefix, message, "GUILD", nil, priority)
@@ -984,72 +1092,147 @@ function InternalSendToAllPeers(prefix, message, channels, priority)
 end
 
 function InternalOnCommReceived(prefix, message, channel, sender)
+    -- Ignore messages from self
+    if sender == Private.playerName then
+        return
+    end
+
+    -- Deserialize message
     local success, deserialized = AceSerializer:Deserialize(message)
     if not success then
         Debug(format("failed to deserialize message from %s on channel %s: %s", tostring(sender), tostring(channel), Dump(deserialized)))
         return
     end
 
-    if not IsTable(deserialized) or not IsNumber(deserialized.type) then
+    -- Validate message structure
+    if not IsTable(deserialized) then
         Debug(format("received invalid message structure from %s on channel %s", tostring(sender), tostring(channel)))
         return
     end
 
-    if deserialized.type == CommMessageType.RequestSnapshot then
-        InternalRequestSnapshotMessageHandler(prefix, channel, sender)
+    if not IsNumber(deserialized.type) then
+        Debug(format("received message with missing or invalid type from %s on channel %s", tostring(sender), tostring(channel)))
+        return
+    end
+
+    if not IsNonEmptyString(deserialized.peerId) then
+        Debug(format("received message with missing or invalid peerId from %s on channel %s", tostring(sender), tostring(channel)))
+        return
+    end
+
+    -- Build context
+    local ctx = {
+        type = deserialized.type,
+        peerId = deserialized.peerId,
+        prefix = prefix,
+        message = message,
+        channel = channel,
+        sender = sender,
+        data = deserialized.data,
+    }
+
+    -- Dispatch based on message type
+    if deserialized.type == CommMessageType.PeerDiscoveryRequest then
+        InternalPeerDiscoveryRequestHandler(ctx)
+    elseif deserialized.type == CommMessageType.PeerDiscoveryResponse then
+        InternalPeerDiscoveryResponseHandler(ctx)
+    elseif deserialized.type == CommMessageType.RequestSnapshot then
+        InternalRequestSnapshotMessageHandler(ctx)
     elseif deserialized.type == CommMessageType.Snapshot then
-        InternalSnapshotMessageHandler(prefix, channel, sender, deserialized.data)
+        InternalSnapshotMessageHandler(ctx)
     elseif deserialized.type == CommMessageType.Digest then
-        InternalDigestMessageHandler(prefix, channel, sender, deserialized.data)
+        InternalDigestMessageHandler(ctx)
     elseif deserialized.type == CommMessageType.RequestRows then
-        InternalRequestRowsMessageHandler(prefix, channel, sender, deserialized.data)
+        InternalRequestRowsMessageHandler(ctx)
     elseif deserialized.type == CommMessageType.Rows then
-        InternalRowsMessageHandler(prefix, channel, sender, deserialized.data)
+        InternalRowsMessageHandler(ctx)
     else
         Debug(format("received unknown message type %d from %s on channel %s", deserialized.type, tostring(sender), tostring(channel)))
     end
 end
 
-function InternalRequestSnapshotMessageHandler(prefix, channel, sender)
+function InternalPeerDiscoveryRequestHandler(ctx)
     -- Get the DB instance
-    local db = LibP2PDB:GetDB(prefix)
+    local db = LibP2PDB:GetDB(ctx.prefix)
     if not db then
-        Debug(format("received request snapshot message for unknown clusterId '%s' from %s on channel %s", tostring(prefix), tostring(sender), tostring(channel)))
+        Debug(format("received peer discovery request for unknown clusterId '%s' from %s on channel %s", tostring(ctx.prefix), tostring(ctx.sender), tostring(ctx.channel)))
+        return
+    end
+
+    -- Send peer discovery response
+    local obj = {
+        type = CommMessageType.PeerDiscoveryResponse,
+        peerId = Private.peerId,
+        data = Private.databases[db].clock,
+    }
+    local serialized = AceSerializer:Serialize(obj)
+    InternalSend(ctx.prefix, serialized, "WHISPER", ctx.sender, CommPriority.Low)
+end
+
+function InternalPeerDiscoveryResponseHandler(ctx)
+    -- Get the DB instance
+    local db = LibP2PDB:GetDB(ctx.prefix)
+    if not db then
+        Debug(format("received peer discovery response for unknown clusterId '%s' from %s on channel %s", tostring(ctx.prefix), tostring(ctx.sender), tostring(ctx.channel)))
+        return
+    end
+
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database instance")
+
+    -- Update last discovery time
+    if dbi.onDiscoveryComplete then
+        dbi.lastDiscoveryResponseTime = GetTime()
+    end
+
+    -- Store peer info
+    if not dbi.peers[ctx.peerId] then
+        dbi.peers[ctx.peerId] = {
+            name = ctx.sender,
+        }
+    end
+    dbi.peers[ctx.peerId].clock = ctx.data
+end
+
+function InternalRequestSnapshotMessageHandler(ctx)
+    -- Get the DB instance
+    local db = LibP2PDB:GetDB(ctx.prefix)
+    if not db then
+        Debug(format("received request snapshot message for unknown clusterId '%s' from %s on channel %s", tostring(ctx.prefix), tostring(ctx.sender), tostring(ctx.channel)))
         return
     end
 
     local obj = {
         type = CommMessageType.Snapshot,
+        peerId = Private.peerId,
         data = LibP2PDB:Export(db),
     }
     local serialized = AceSerializer:Serialize(obj)
-    InternalSend(prefix, serialized, "WHISPER", sender, CommPriority.Low)
+    InternalSend(ctx.prefix, serialized, "WHISPER", ctx.sender, CommPriority.Low)
 end
 
-function InternalSnapshotMessageHandler(prefix, channel, sender, data)
-    local db = LibP2PDB:GetDB(prefix)
+function InternalSnapshotMessageHandler(ctx)
+    local db = LibP2PDB:GetDB(ctx.prefix)
     if not db then
-        Debug(format("received snapshot message for unknown clusterId '%s' from %s on channel %s", tostring(prefix), tostring(sender), tostring(channel)))
+        Debug(format("received snapshot message for unknown clusterId '%s' from %s on channel %s", tostring(ctx.prefix), tostring(ctx.sender), tostring(ctx.channel)))
         return
     end
 
-    local success, errors = LibP2PDB:Import(db, data)
+    local success, errors = LibP2PDB:Import(db, ctx.data)
     if not success then
-        Debug(format("failed to import snapshot from %s on channel %s", tostring(sender), tostring(channel)))
+        Debug(format("failed to import snapshot from %s on channel %s", tostring(ctx.sender), tostring(ctx.channel)))
         if errors then
             for i, err in ipairs(errors) do
                 Debug(format("%d: %s", i, tostring(err)))
             end
         end
-    else
-        Debug(format("successfully imported snapshot from %s on channel %s", tostring(sender), tostring(channel)))
     end
 end
 
-function InternalDigestMessageHandler(prefix, channel, sender, data)
-    local db = LibP2PDB:GetDB(prefix)
+function InternalDigestMessageHandler(ctx)
+    local db = LibP2PDB:GetDB(ctx.prefix)
     if not db then
-        Debug(format("received digest message for unknown clusterId '%s' from %s on channel %s", tostring(prefix), tostring(sender), tostring(channel)))
+        Debug(format("received digest message for unknown clusterId '%s' from %s on channel %s", tostring(ctx.prefix), tostring(ctx.sender), tostring(ctx.channel)))
         return
     end
 
@@ -1058,7 +1241,7 @@ function InternalDigestMessageHandler(prefix, channel, sender, data)
 
     -- Compare digest and build missing table
     local missingTables = {}
-    for tableName, incomingTable in pairs(data.tables or {}) do
+    for tableName, incomingTable in pairs(ctx.data.tables or {}) do
         local t = dbi.tables[tableName]
         if t then
             local missingRows = {}
@@ -1092,16 +1275,17 @@ function InternalDigestMessageHandler(prefix, channel, sender, data)
     -- Send request rows message
     local obj = {
         type = CommMessageType.RequestRows,
+        peerId = Private.peerId,
         data = missingTables,
     }
     local serialized = AceSerializer:Serialize(obj)
-    InternalSend(prefix, serialized, "WHISPER", sender, CommPriority.Normal)
+    InternalSend(ctx.prefix, serialized, "WHISPER", ctx.sender, CommPriority.Normal)
 end
 
-function InternalRequestRowsMessageHandler(prefix, channel, sender, data)
-    local db = LibP2PDB:GetDB(prefix)
+function InternalRequestRowsMessageHandler(ctx)
+    local db = LibP2PDB:GetDB(ctx.prefix)
     if not db then
-        Debug(format("received request rows message for unknown clusterId '%s' from %s on channel %s", tostring(prefix), tostring(sender), tostring(channel)))
+        Debug(format("received request rows message for unknown clusterId '%s' from %s on channel %s", tostring(ctx.prefix), tostring(ctx.sender), tostring(ctx.channel)))
         return
     end
 
@@ -1110,7 +1294,7 @@ function InternalRequestRowsMessageHandler(prefix, channel, sender, data)
 
     -- Build rows to send
     local rowsToSend = {}
-    for tableName, requestedRows in pairs(data or {}) do
+    for tableName, requestedRows in pairs(ctx.data or {}) do
         local t = dbi.tables[tableName]
         if t then
             local tableRows = {}
@@ -1136,16 +1320,17 @@ function InternalRequestRowsMessageHandler(prefix, channel, sender, data)
     -- Send requested rows
     local obj = {
         type = CommMessageType.Rows,
+        peerId = Private.peerId,
         data = rowsToSend,
     }
     local serialized = AceSerializer:Serialize(obj)
-    InternalSend(prefix, serialized, "WHISPER", sender, CommPriority.Normal)
+    InternalSend(ctx.prefix, serialized, "WHISPER", ctx.sender, CommPriority.Normal)
 end
 
-function InternalRowsMessageHandler(prefix, channel, sender, data)
-    local db = LibP2PDB:GetDB(prefix)
+function InternalRowsMessageHandler(ctx)
+    local db = LibP2PDB:GetDB(ctx.prefix)
     if not db then
-        Debug(format("received rows message for unknown clusterId '%s' from %s on channel %s", tostring(prefix), tostring(sender), tostring(channel)))
+        Debug(format("received rows message for unknown clusterId '%s' from %s on channel %s", tostring(ctx.prefix), tostring(ctx.sender), tostring(ctx.channel)))
         return
     end
 
@@ -1154,21 +1339,17 @@ function InternalRowsMessageHandler(prefix, channel, sender, data)
 
     -- Import received rows
     local anyErrors = false
-    for incomingTableName, incomingTableData in pairs(data or {}) do
+    for incomingTableName, incomingTableData in pairs(ctx.data or {}) do
         local t = dbi.tables[incomingTableName]
         if t then
             for incomingKey, incomingRow in pairs(incomingTableData or {}) do
                 local importResult, importError = InternalImportRow(incomingKey, incomingRow, dbi, incomingTableName, t)
                 if not importResult then
                     anyErrors = true
-                    Debug(format("failed to import row with key '%s' in table '%s' from %s on channel %s: %s", tostring(incomingKey), incomingTableName, tostring(sender), tostring(channel), tostring(importError)))
+                    Debug(format("failed to import row with key '%s' in table '%s' from %s on channel %s: %s", tostring(incomingKey), incomingTableName, tostring(ctx.sender), tostring(ctx.channel), tostring(importError)))
                 end
             end
         end
-    end
-
-    if not anyErrors then
-        Debug(format("successfully imported rows from %s on channel %s", tostring(sender), tostring(channel)))
     end
 end
 
@@ -1223,7 +1404,10 @@ if enableDebugging then
                 clusterId = "TestCluster12345",
                 namespace = "MyNamespace",
                 channels = { "GUILD" },
+                discoveryQuietPeriod = 5,
+                discoveryMaxTime = 30,
                 onChange = function(table, key, row) end,
+                onDiscoveryComplete = function(isInitial) end,
             })
             Assert.IsTable(db)
 
@@ -1232,9 +1416,14 @@ if enableDebugging then
             Assert.AreEqual(dbi.clusterId, "TestCluster12345")
             Assert.AreEqual(dbi.namespace, "MyNamespace")
             Assert.AreEqual(dbi.clock, 0)
+            Assert.IsTable(dbi.peers)
             Assert.AreEqual(dbi.channels, { "GUILD" })
+            Assert.AreEqual(dbi.discoveryQuietPeriod, 5)
+            Assert.AreEqual(dbi.discoveryMaxTime, 30)
             Assert.IsEmptyTable(dbi.tables)
             Assert.IsFunction(dbi.onChange)
+            Assert.IsFunction(dbi.onDiscoveryComplete)
+            Assert.IsNotNil(dbi.frame)
             --Assert.IsNil(dbi.writePolicy)
 
             Assert.Throws(function()
