@@ -583,12 +583,18 @@ function LibP2PDB:Delete(db, table, key)
         -- Versioning (Lamport clock)
         dbi.clock = dbi.clock + 1
 
+        -- Determine peer value (use "=" if keyType is string and peer equals key, to save memory)
+        local peerValue = Private.peerId
+        if t.keyType == "string" and tostring(Private.peerId) == tostring(key) then
+            peerValue = "="
+        end
+
         -- Replace row with tombstone
         t.rows[key] = {
             data = nil, -- no row data
             version = {
                 clock = dbi.clock,
-                peer = Private.peerId,
+                peer = peerValue,
                 tombstone = true, -- mark as deleted
             },
         }
@@ -1002,12 +1008,18 @@ function InternalSet(db, dbi, table, t, key, row)
         -- Versioning (Lamport clock)
         dbi.clock = dbi.clock + 1
 
+        -- Determine peer value (use "=" if keyType is string and peer equals key, to save memory)
+        local peerValue = Private.peerId
+        if t.keyType == "string" and tostring(Private.peerId) == tostring(key) then
+            peerValue = "="
+        end
+
         -- Store the row
         t.rows[key] = {
             data = data,
             version = {
                 clock = dbi.clock,
-                peer = Private.peerId,
+                peer = peerValue,
             },
         }
 
@@ -1464,8 +1476,8 @@ if enableDebugging then
         IsNotTable = function(value, msg) assert(type(value) ~= "table", msg or "value is a table") end,
         IsFunction = function(value, msg) assert(type(value) == "function", msg or "value is not a function") end,
         IsNotFunction = function(value, msg) assert(type(value) ~= "function", msg or "value is a function") end,
-        AreEqual = function(actual, expected, msg) assert(Equal(actual, expected) == true, msg or "values are not equal") end,
-        AreNotEqual = function(actual, expected, msg) assert(Equal(actual, expected) == false, msg or "values are equal") end,
+        AreEqual = function(actual, expected, msg) assert(Equal(actual, expected) == true, msg or format("values are not equal, expected '%s' but got '%s'", tostring(expected), tostring(actual))) end,
+        AreNotEqual = function(actual, expected, msg) assert(Equal(actual, expected) == false, msg or format("values are equal, both are '%s'", tostring(actual))) end,
         IsEmptyString = function(value, msg) assert(type(value) == "string" and #value == 0, msg or "value is not an empty string") end,
         IsNotEmptyString = function(value, msg) assert(type(value) == "string" and #value > 0, msg or "value is an empty string") end,
         IsEmptyTable = function(value, msg) assert(type(value) == "table" and next(value) == nil, msg or "value is not an empty table") end,
@@ -2059,6 +2071,65 @@ if enableDebugging then
             LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
             Assert.Throws(function() LibP2PDB:Delete(db, "Users", nil) end)
             Assert.Throws(function() LibP2PDB:Delete(db, "Users", {}) end)
+        end,
+
+        Version = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string" } })
+            LibP2PDB:Insert(db, "Users", 1, { name = "Bob" })
+
+            local version = Private.databases[db].tables["Users"].rows[1].version
+            Assert.IsTable(version)
+            Assert.AreEqual(version.clock, 1)
+            Assert.AreEqual(version.peer, Private.peerId)
+            Assert.IsNil(version.tombstone)
+
+            LibP2PDB:Update(db, "Users", 1, function(row) row.name = "Robert" return row end)
+            version = Private.databases[db].tables["Users"].rows[1].version
+            Assert.IsTable(version)
+            Assert.AreEqual(version.clock, 2)
+            Assert.AreEqual(version.peer, Private.peerId)
+            Assert.IsNil(version.tombstone)
+
+            LibP2PDB:Delete(db, "Users", 1)
+            version = Private.databases[db].tables["Users"].rows[1].version
+            Assert.IsTable(version)
+            Assert.AreEqual(version.clock, 3)
+            Assert.AreEqual(version.peer, Private.peerId)
+            Assert.IsTrue(version.tombstone)
+        end,
+
+        Version_WhenPeerEqualsKey_PeerValueIsEqualChar = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { name = "string" } })
+
+            LibP2PDB:Insert(db, "Users", Private.peerId, { name = "Bob" })
+            local version = Private.databases[db].tables["Users"].rows[Private.peerId].version
+            Assert.IsTable(version)
+            Assert.AreEqual(version.clock, 1)
+            Assert.AreEqual(version.peer, "=")
+            Assert.IsNil(version.tombstone)
+
+            LibP2PDB:Set(db, "Users", Private.peerId, { name = "Robert" })
+            version = Private.databases[db].tables["Users"].rows[Private.peerId].version
+            Assert.IsTable(version)
+            Assert.AreEqual(version.clock, 2)
+            Assert.AreEqual(version.peer, "=")
+            Assert.IsNil(version.tombstone)
+
+            LibP2PDB:Update(db, "Users", Private.peerId, function(row) row.name = "Alice" return row end)
+            version = Private.databases[db].tables["Users"].rows[Private.peerId].version
+            Assert.IsTable(version)
+            Assert.AreEqual(version.clock, 3)
+            Assert.AreEqual(version.peer, "=")
+            Assert.IsNil(version.tombstone)
+
+            LibP2PDB:Delete(db, "Users", Private.peerId)
+            version = Private.databases[db].tables["Users"].rows[Private.peerId].version
+            Assert.IsTable(version)
+            Assert.AreEqual(version.clock, 4)
+            Assert.AreEqual(version.peer, "=")
+            Assert.IsTrue(version.tombstone)
         end,
 
         Schema_OnlyPrimitiveTypesAllowed = function()
