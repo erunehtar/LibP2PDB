@@ -1642,6 +1642,7 @@ if enableDebugging then
         end,
     }
 
+    ---@diagnostic disable: param-type-mismatch, assign-type-mismatch, missing-fields
     local LibP2PDBTests = {
         New = function()
             local db = LibP2PDB:NewDB({
@@ -1770,7 +1771,8 @@ if enableDebugging then
         NewTable_DBIsInvalid_Throws = function()
             Assert.Throws(function() LibP2PDB:NewTable(nil, { name = "Users", keyType = "string" }) end)
             Assert.Throws(function() LibP2PDB:NewTable(123, { name = "Users", keyType = "string" }) end)
-            Assert.Throws(function() LibP2PDB:NewTable("invalid", { name = "Users", keyType = "string" }) end)
+            Assert.Throws(function() LibP2PDB:NewTable("", { name = "Users", keyType = "string" }) end)
+            Assert.Throws(function() LibP2PDB:NewTable({}, { name = "Users", keyType = "string" }) end)
         end,
 
         NewTable_DescIsInvalid_Throws = function()
@@ -1925,7 +1927,8 @@ if enableDebugging then
         Insert_DBIsInvalid_Throws = function()
             Assert.Throws(function() LibP2PDB:Insert(nil, "Users", 1, { name = "A" }) end)
             Assert.Throws(function() LibP2PDB:Insert(123, "Users", 1, { name = "A" }) end)
-            Assert.Throws(function() LibP2PDB:Insert("invalid", "Users", 1, { name = "A" }) end)
+            Assert.Throws(function() LibP2PDB:Insert("", "Users", 1, { name = "A" }) end)
+            Assert.Throws(function() LibP2PDB:Insert({}, "Users", 1, { name = "A" }) end)
         end,
 
         Insert_TableIsInvalid_Throws = function()
@@ -2023,7 +2026,8 @@ if enableDebugging then
         Set_DBIsInvalid_Throws = function()
             Assert.Throws(function() LibP2PDB:Set(nil, "Users", 1, { name = "A" }) end)
             Assert.Throws(function() LibP2PDB:Set(123, "Users", 1, { name = "A" }) end)
-            Assert.Throws(function() LibP2PDB:Set("invalid", "Users", 1, { name = "A" }) end)
+            Assert.Throws(function() LibP2PDB:Set("", "Users", 1, { name = "A" }) end)
+            Assert.Throws(function() LibP2PDB:Set({}, "Users", 1, { name = "A" }) end)
         end,
 
         Set_TableIsInvalid_Throws = function()
@@ -2106,7 +2110,8 @@ if enableDebugging then
         Update_DBIsInvalid_Throws = function()
             Assert.Throws(function() LibP2PDB:Update(nil, "Users", 1, function() end) end)
             Assert.Throws(function() LibP2PDB:Update(123, "Users", 1, function() end) end)
-            Assert.Throws(function() LibP2PDB:Update("invalid", "Users", 1, function() end) end)
+            Assert.Throws(function() LibP2PDB:Update("", "Users", 1, function() end) end)
+            Assert.Throws(function() LibP2PDB:Update({}, "Users", 1, function() end) end)
         end,
 
         Update_TableIsInvalid_Throws = function()
@@ -2155,7 +2160,8 @@ if enableDebugging then
         Get_DBIsInvalid_Throws = function()
             Assert.Throws(function() LibP2PDB:Get(nil, "Users", 1) end)
             Assert.Throws(function() LibP2PDB:Get(123, "Users", 1) end)
-            Assert.Throws(function() LibP2PDB:Get("invalid", "Users", 1) end)
+            Assert.Throws(function() LibP2PDB:Get("", "Users", 1) end)
+            Assert.Throws(function() LibP2PDB:Get({}, "Users", 1) end)
         end,
 
         Get_TableIsInvalid_Throws = function()
@@ -2183,7 +2189,8 @@ if enableDebugging then
         HasKey_DBIsInvalid_Throws = function()
             Assert.Throws(function() LibP2PDB:HasKey(nil, "Users", 1) end)
             Assert.Throws(function() LibP2PDB:HasKey(123, "Users", 1) end)
-            Assert.Throws(function() LibP2PDB:HasKey("invalid", "Users", 1) end)
+            Assert.Throws(function() LibP2PDB:HasKey("", "Users", 1) end)
+            Assert.Throws(function() LibP2PDB:HasKey({}, "Users", 1) end)
         end,
 
         HasKey_TableIsInvalid_Throws = function()
@@ -2253,7 +2260,8 @@ if enableDebugging then
         Delete_DBIsInvalid_Throws = function()
             Assert.Throws(function() LibP2PDB:Delete(nil, "Users", 1) end)
             Assert.Throws(function() LibP2PDB:Delete(123, "Users", 1) end)
-            Assert.Throws(function() LibP2PDB:Delete("invalid", "Users", 1) end)
+            Assert.Throws(function() LibP2PDB:Delete("", "Users", 1) end)
+            Assert.Throws(function() LibP2PDB:Delete({}, "Users", 1) end)
         end,
 
         Delete_TableIsInvalid_Throws = function()
@@ -2353,7 +2361,8 @@ if enableDebugging then
         Subscribe_DBIsInvalid_Throws = function()
             Assert.Throws(function() LibP2PDB:Subscribe(nil, "Users", function() end) end)
             Assert.Throws(function() LibP2PDB:Subscribe(123, "Users", function() end) end)
-            Assert.Throws(function() LibP2PDB:Subscribe("invalid", "Users", function() end) end)
+            Assert.Throws(function() LibP2PDB:Subscribe("", "Users", function() end) end)
+            Assert.Throws(function() LibP2PDB:Subscribe({}, "Users", function() end) end)
         end,
 
         Subscribe_TableIsInvalid_Throws = function()
@@ -2388,7 +2397,8 @@ if enableDebugging then
         Unsubscribe_DBIsInvalid_Throws = function()
             Assert.Throws(function() LibP2PDB:Unsubscribe(nil, "Users", function() end) end)
             Assert.Throws(function() LibP2PDB:Unsubscribe(123, "Users", function() end) end)
-            Assert.Throws(function() LibP2PDB:Unsubscribe("invalid", "Users", function() end) end)
+            Assert.Throws(function() LibP2PDB:Unsubscribe("", "Users", function() end) end)
+            Assert.Throws(function() LibP2PDB:Unsubscribe({}, "Users", function() end) end)
         end,
 
         Unsubscribe_TableIsInvalid_Throws = function()
@@ -2412,21 +2422,22 @@ if enableDebugging then
             LibP2PDB:Insert(db, "Users", 1, { name = "Bob", age = 25 })
             LibP2PDB:Insert(db, "Users", 2, { name = "Alice", age = 30 })
 
-            local state = LibP2PDB:Export(db)
-            Assert.IsTable(state)
-            Assert.IsTable(state.tables)
-            Assert.IsTable(state.tables["Users"])
-            Assert.IsTable(state.tables["Users"].rows)
-            Assert.AreEqual(state.tables["Users"].rows[1].data, { name = "Bob", age = 25 })
-            Assert.AreEqual(state.tables["Users"].rows[1].version, { clock = 1, peer = Private.peerId })
-            Assert.AreEqual(state.tables["Users"].rows[2].data, { name = "Alice", age = 30 })
-            Assert.AreEqual(state.tables["Users"].rows[2].version, { clock = 2, peer = Private.peerId })
+            local exported = LibP2PDB:Export(db)
+            Assert.IsTable(exported)
+            Assert.IsTable(exported.tables)
+            Assert.IsTable(exported.tables["Users"])
+            Assert.IsTable(exported.tables["Users"].rows)
+            Assert.AreEqual(exported.tables["Users"].rows[1].data, { name = "Bob", age = 25 })
+            Assert.AreEqual(exported.tables["Users"].rows[1].version, { clock = 1, peer = Private.peerId })
+            Assert.AreEqual(exported.tables["Users"].rows[2].data, { name = "Alice", age = 30 })
+            Assert.AreEqual(exported.tables["Users"].rows[2].version, { clock = 2, peer = Private.peerId })
         end,
 
         Export_DBIsInvalid_Throws = function()
             Assert.Throws(function() LibP2PDB:Export(nil) end)
             Assert.Throws(function() LibP2PDB:Export(123) end)
-            Assert.Throws(function() LibP2PDB:Export("invalid") end)
+            Assert.Throws(function() LibP2PDB:Export("") end)
+            Assert.Throws(function() LibP2PDB:Export({}) end)
         end,
 
         Import = function()
@@ -2435,11 +2446,11 @@ if enableDebugging then
             LibP2PDB:Insert(db1, "Users", 1, { name = "Bob", age = 25 })
             LibP2PDB:Insert(db1, "Users", 2, { name = "Alice", age = 30 })
 
-            local state = LibP2PDB:Export(db1)
+            local exported = LibP2PDB:Export(db1)
             local db2 = LibP2PDB:NewDB({ clusterId = "c2", namespace = "n2" })
             LibP2PDB:NewTable(db2, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
 
-            local result, errors = LibP2PDB:Import(db2, state)
+            local result, errors = LibP2PDB:Import(db2, exported)
             Assert.IsTrue(result)
             Assert.IsNil(errors)
 
@@ -2448,12 +2459,15 @@ if enableDebugging then
         end,
 
         Import_DBIsInvalid_Throws = function()
-            Assert.Throws(function() LibP2PDB:Import(nil, {}) end)
-            Assert.Throws(function() LibP2PDB:Import(123, {}) end)
-            Assert.Throws(function() LibP2PDB:Import("invalid", {}) end)
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            local exported = LibP2PDB:Export(db)
+            Assert.Throws(function() LibP2PDB:Import(nil, exported) end)
+            Assert.Throws(function() LibP2PDB:Import(123, exported) end)
+            Assert.Throws(function() LibP2PDB:Import("", exported) end)
+            Assert.Throws(function() LibP2PDB:Import({}, exported) end)
         end,
 
-        Import_ExportIsInvalid_Throws = function()
+        Import_ExportedIsInvalid_Throws = function()
             local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
             Assert.Throws(function() LibP2PDB:Import(db, nil) end)
             Assert.Throws(function() LibP2PDB:Import(db, 123) end)
@@ -2465,15 +2479,15 @@ if enableDebugging then
             LibP2PDB:NewTable(db1, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             LibP2PDB:Insert(db1, "Users", 1, { name = "Bob", age = 25 })
 
-            local state = LibP2PDB:Export(db1)
+            local exported = LibP2PDB:Export(db1)
 
             -- Corrupt the exported state by adding a row with invalid schema
-            state.tables["Users"].rows[2] = { data = { name = "Alice" }, version = { clock = 2, peer = Private.peerId } }
+            exported.tables["Users"].rows[2] = { data = { name = "Alice" }, version = { clock = 2, peer = Private.peerId } }
 
             local db2 = LibP2PDB:NewDB({ clusterId = "c2", namespace = "n2" })
             LibP2PDB:NewTable(db2, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
 
-            local result, errors = LibP2PDB:Import(db2, state)
+            local result, errors = LibP2PDB:Import(db2, exported)
             Assert.IsFalse(result)
             Assert.IsTable(errors)
             Assert.IsNotEmptyTable(errors)
@@ -2510,10 +2524,11 @@ if enableDebugging then
         Serialize_DBIsInvalid_Throws = function()
             Assert.Throws(function() LibP2PDB:Serialize(nil) end)
             Assert.Throws(function() LibP2PDB:Serialize(123) end)
-            Assert.Throws(function() LibP2PDB:Serialize("invalid") end)
+            Assert.Throws(function() LibP2PDB:Serialize("") end)
+            Assert.Throws(function() LibP2PDB:Serialize({}) end)
         end,
-
     }
+    ---@diagnostic enable: param-type-mismatch, assign-type-mismatch, missing-fields
 
     local function RunTest(testFn)
         -- Make a temporary private instance for isolation
