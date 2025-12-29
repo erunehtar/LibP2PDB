@@ -22,7 +22,7 @@ local assert, print = assert, print
 local type, ipairs, pairs = type, ipairs, pairs
 local min, max, abs = min, max, abs
 local tonumber, tostring, tostringall = tonumber, tostring, tostringall
-local format, strsub, strfind, strjoin = format, strsub, strfind, strjoin
+local format, strsub, strfind, strjoin, strmatch, strbyte, strchar = format, strsub, strfind, strjoin, strmatch, strbyte, strchar
 local tinsert, tremove, tconcat, tsort = table.insert, table.remove, table.concat, table.sort
 local unpack, select = unpack, select
 local setmetatable, getmetatable = setmetatable, getmetatable
@@ -723,7 +723,7 @@ end
 ---Validates incoming data against table definitions, skipping invalid entries.
 ---@param db LibP2PDB.DB Database instance
 ---@param exported LibP2PDB.DBExport The exported database to import
----@return boolean,table<string>|nil result Returns true on success, false otherwise. On failure, the second return value is a table of error messages.
+---@return boolean,nil|table<string> result Returns true if the import is succesful, false otherwise. On failure, the second return value is a table of warnings/errors.
 function LibP2PDB:Import(db, exported)
     assert(IsTable(db), "db must be a table")
     assert(IsTable(exported), "exported db must be a table")
@@ -741,16 +741,16 @@ function LibP2PDB:Import(db, exported)
     dbi.clock = max(dbi.clock, exported.clock)
 
     -- Import DB
-    local success, result = true, nil
+    local results = nil
     for incomingTableName, incomingTableData in pairs(exported.tables or {}) do
         local ti = dbi.tables[incomingTableName]
         if ti then
             for incomingKey, incomingRow in pairs(incomingTableData.rows or {}) do
                 local rowSuccess, rowResult = InternalImportRow(incomingKey, incomingRow, dbi, incomingTableName, ti)
                 if not rowSuccess then
-                    success = false
-                    result = result or {}
-                    tinsert(result, "error processing row with key '" .. tostring(incomingKey) .. "' in table '" .. incomingTableName .. "': " .. tostring(rowResult))
+                    -- Collect warnings for skipped rows (partial success)
+                    results = results or {}
+                    tinsert(results, tostring(rowResult))
                 end
             end
         end
@@ -759,7 +759,8 @@ function LibP2PDB:Import(db, exported)
     -- End import
     Private.isImporting = false
 
-    return success, result
+    -- Return results
+    return true, results
 end
 
 ---Serialize the entire database to a compact string format for storage or transmission.
@@ -808,6 +809,50 @@ function LibP2PDB:Serialize(db)
 
     -- Serialize the database
     return InternalSerialize(dbi)
+end
+
+---Deserialize a database from a compact string format.
+---Merges the deserialized data with existing data based on version metadata.
+---Validates incoming data against table definitions, skipping invalid entries.
+---@param db LibP2PDB.DB Database instance
+---@param str string The serialized database string to deserialize
+---@return boolean,nil|table<string> result Returns true if the deserialization is succesful, false otherwise. On failure, the second return value is a table of warnings/errors.
+function LibP2PDB:Deserialize(db, str)
+    assert(IsTable(db), "db must be a table")
+    assert(IsNonEmptyString(str), "str must be a non-empty string")
+
+    -- Validate db instance
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database instance")
+
+    -- Deserialize the serialized database
+    local deserialized, deserializeResults = InternalDeserialize(dbi, str)
+    if not deserialized then
+        return false, deserializeResults
+    end
+
+    -- Import the deserialized data
+    local imported, importResults = self:Import(db, deserialized)
+    if not imported then
+        return false, importResults
+    end
+
+    -- Combine results
+    if deserializeResults or importResults then
+        local combinedResults = {}
+        if deserializeResults then
+            for _, msg in ipairs(deserializeResults) do
+                tinsert(combinedResults, msg)
+            end
+        end
+        if importResults then
+            for _, msg in ipairs(importResults) do
+                tinsert(combinedResults, msg)
+            end
+        end
+        return true, combinedResults
+    end
+    return true
 end
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -1281,6 +1326,226 @@ function InternalSerialize(dbi)
     tinsert(parts, "}")
 
     return tconcat(parts)
+end
+
+function InternalDeserialize(dbi, str)
+    -- First, parse the string into a nested array structure
+    local rootArray = nil
+    local currentArray = nil
+    local arrayStack = {}
+    local currentToken = nil
+    local len = #str
+    for i = 1, len do
+        local b = strbyte(str, i)
+        local c = strchar(b)
+        if c == "{" then -- start new array
+            if currentToken ~= nil then
+                if currentArray then
+                    tinsert(currentArray, currentToken)
+                end
+                currentToken = nil
+            end
+            local newArray = {}
+            if currentArray then
+                tinsert(currentArray, newArray)
+            else
+                rootArray = newArray
+            end
+            tinsert(arrayStack, newArray)
+            currentArray = newArray
+        elseif c == "}" then -- end current array
+            if #arrayStack == 0 then
+                return nil, { "malformed structure: extra closing brace" }
+            end
+            if currentToken ~= nil then
+                if currentArray then
+                    tinsert(currentArray, currentToken)
+                end
+                currentToken = nil
+            end
+            tremove(arrayStack, #arrayStack)
+            currentArray = arrayStack[#arrayStack]
+        elseif c == ";" then -- token separator
+            if currentToken ~= nil then
+                if currentArray then
+                    tinsert(currentArray, currentToken)
+                end
+                currentToken = nil
+            end
+        else -- part of a token
+            if currentToken == nil then
+                currentToken = c
+            else
+                currentToken = currentToken .. c
+            end
+        end
+    end
+
+    -- Validate that all braces were properly matched
+    if #arrayStack > 0 then
+        return nil, { "malformed structure: unclosed braces" }
+    end
+
+    if not rootArray then
+        return nil, { "malformed structure: no root array found" }
+    end
+
+    -- Second, process the parsed structure into a state that can be imported later
+    local state = {}
+    local cluster = rootArray
+    if not cluster or not IsNonEmptyTable(cluster) then
+        return nil, { "invalid database structure: missing cluster data" }
+    end
+
+    -- Parse clock
+    local clockHex = tostring(cluster[1])
+    local clock = HexToNumber("0x" .. clockHex)
+    if not IsNumber(clock) then
+        return nil, { format("invalid database structure: invalid cluster clock: '%s'", tostring(clockHex)) }
+    end
+    state.clock = clock
+
+    -- Parse tables (format is flat: clock;tableName{data};tableName{data};...)
+    local results = {}
+    state.tables = {}
+    local i = 2
+    while i <= #cluster do
+        local tableName = tostring(cluster[i])
+        local tableData = cluster[i + 1]
+
+        if not IsTable(tableData) then
+            -- Invalid table structure is a catastrophic failure
+            return nil, { format("invalid table structure for table '%s'", tostring(tableName)) }
+        end
+
+        local ti = dbi.tables[tableName]
+        if not ti then
+            -- Undefined table is a catastrophic failure
+            return nil, { format("table '%s' is not defined in the database", tostring(tableName)) }
+        end
+
+        local tableExport = {
+            rows = {},
+        }
+
+        -- Get sorted schema once for this table
+        local sortedSchema = InternalGetSchema(ti, true)
+
+        -- Parse rows (format is flat: key{data};key{data};...)
+        local rowIndex = 1
+        while rowIndex <= #tableData do
+            local keyToken = tableData[rowIndex]
+            local rowEntry = tableData[rowIndex + 1]
+
+            local shouldProcessRow = true
+
+            if not IsTable(rowEntry) or #rowEntry < 2 then
+                -- Skip this row and continue
+                tinsert(results, format("skipping row with invalid structure in table '%s'", tostring(tableName)))
+                shouldProcessRow = false
+            end
+
+            if shouldProcessRow then
+                local key
+                if ti.keyType == "number" then
+                    key = HexToNumber("0x" .. tostring(keyToken))
+                    if not IsNumber(key) then
+                        -- Invalid hex number for key
+                        tinsert(results, format("skipping row with invalid key in table '%s'", tostring(tableName)))
+                        shouldProcessRow = false
+                    end
+                else
+                    key = tostring(keyToken)
+                end
+
+                if shouldProcessRow then
+                    local dataEntry = rowEntry[1]
+                    local data = {}
+                    if IsTable(dataEntry) and #dataEntry > 0 then
+                        -- Map array indices back to field names using sorted schema
+                        if sortedSchema then
+                            for fieldIndex = 1, #dataEntry do
+                                local fieldToken = dataEntry[fieldIndex]
+                                local fieldValue
+                                if strmatch(tostring(fieldToken), "^[0-9a-fA-F]+$") then
+                                    fieldValue = HexToNumber("0x" .. tostring(fieldToken))
+                                elseif tostring(fieldToken) == "1" then
+                                    fieldValue = true
+                                elseif tostring(fieldToken) == "0" then
+                                    fieldValue = false
+                                else
+                                    fieldValue = tostring(fieldToken)
+                                end
+                                -- Map back to field name using sorted schema
+                                if sortedSchema[fieldIndex] then
+                                    local fieldName = sortedSchema[fieldIndex][1]
+                                    data[fieldName] = fieldValue
+                                end
+                            end
+                        end
+                    end
+
+                    local versionClockHex = tostring(rowEntry[2])
+                    local versionClock = HexToNumber("0x" .. versionClockHex)
+                    if not IsNumber(versionClock) then
+                        -- Skip this row and continue
+                        tinsert(results, format("skipping row with invalid version clock in table '%s'", tostring(tableName)))
+                        shouldProcessRow = false
+                    end
+
+                    if shouldProcessRow then
+                        local versionPeerToken = rowEntry[3]
+                        if not versionPeerToken or not IsNonEmptyString(tostring(versionPeerToken)) then
+                            -- Skip this row and continue
+                            tinsert(results, format("skipping row with invalid version peer in table '%s'", tostring(tableName)))
+                            shouldProcessRow = false
+                        end
+
+                        if shouldProcessRow then
+                            local versionPeer
+                            if tostring(versionPeerToken) == "=" then
+                                versionPeer = tostring(key)
+                            else
+                                versionPeer = tostring(versionPeerToken)
+                            end
+
+                            local versionTombstone = false
+                            if #rowEntry >= 4 then
+                                local tombstoneToken = tostring(rowEntry[4])
+                                if tombstoneToken == "1" then
+                                    versionTombstone = true
+                                end
+                            end
+                            local version = {
+                                clock = versionClock,
+                                peer = versionPeer,
+                            }
+                            if versionTombstone then
+                                version.tombstone = true
+                            end
+                            tableExport.rows[key] = {
+                                data = versionTombstone and nil or data,
+                                version = version,
+                            }
+                        end
+                    end
+                end
+            end
+
+            rowIndex = rowIndex + 2
+        end
+
+        state.tables[tableName] = tableExport
+
+        -- Next table
+        i = i + 2
+    end
+
+    -- Return results only if there are any
+    if next(results) == nil then
+        results = nil
+    end
+    return state, results
 end
 
 function InternalBuildDigest(dbi)
@@ -2445,11 +2710,10 @@ if enableDebugging then
             LibP2PDB:NewTable(db1, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             LibP2PDB:Insert(db1, "Users", 1, { name = "Bob", age = 25 })
             LibP2PDB:Insert(db1, "Users", 2, { name = "Alice", age = 30 })
-
-            local exported = LibP2PDB:Export(db1)
             local db2 = LibP2PDB:NewDB({ clusterId = "c2", namespace = "n2" })
             LibP2PDB:NewTable(db2, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
 
+            local exported = LibP2PDB:Export(db1)
             local result, errors = LibP2PDB:Import(db2, exported)
             Assert.IsTrue(result)
             Assert.IsNil(errors)
@@ -2487,12 +2751,9 @@ if enableDebugging then
             local db2 = LibP2PDB:NewDB({ clusterId = "c2", namespace = "n2" })
             LibP2PDB:NewTable(db2, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
 
-            local result, errors = LibP2PDB:Import(db2, exported)
-            Assert.IsFalse(result)
-            Assert.IsTable(errors)
-            Assert.IsNotEmptyTable(errors)
-
-            -- Valid row should still be imported
+            local success, results = LibP2PDB:Import(db2, exported)
+            Assert.IsTrue(success)
+            Assert.IsNotEmptyTable(results)
             Assert.AreEqual(LibP2PDB:Get(db2, "Users", 1), LibP2PDB:Get(db1, "Users", 1))
             Assert.IsNil(LibP2PDB:Get(db2, "Users", 2))
         end,
@@ -2518,7 +2779,7 @@ if enableDebugging then
             local expected5 = "{4;Users{" .. thirdRow .. ";" .. firstRow .. ";" .. secondRow .. "}}"
             local expected6 = "{4;Users{" .. thirdRow .. ";" .. secondRow .. ";" .. firstRow .. "}}"
             Assert.IsTrue(serialized == expected1 or serialized == expected2 or serialized == expected3 or
-                          serialized == expected4 or serialized == expected5 or serialized == expected6)
+                serialized == expected4 or serialized == expected5 or serialized == expected6)
         end,
 
         Serialize_DBIsInvalid_Throws = function()
@@ -2526,6 +2787,215 @@ if enableDebugging then
             Assert.Throws(function() LibP2PDB:Serialize(123) end)
             Assert.Throws(function() LibP2PDB:Serialize("") end)
             Assert.Throws(function() LibP2PDB:Serialize({}) end)
+        end,
+
+        Deserialize = function()
+            local db1 = LibP2PDB:NewDB({ clusterId = "c1", namespace = "n1" })
+            LibP2PDB:NewTable(db1, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
+            LibP2PDB:Insert(db1, "Users", "1", { name = "Bob", age = 25 })
+            LibP2PDB:Insert(db1, "Users", "2", { name = "Alice", age = 30 })
+            LibP2PDB:Delete(db1, "Users", "2")
+            LibP2PDB:Insert(db1, "Users", Private.peerId, { name = "Eve", age = 35 })
+            local db2 = LibP2PDB:NewDB({ clusterId = "c2", namespace = "n2" })
+            LibP2PDB:NewTable(db2, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
+
+            local serialized = LibP2PDB:Serialize(db1)
+            local success, results = LibP2PDB:Deserialize(db2, serialized)
+            Assert.IsTrue(success)
+            Assert.IsNil(results)
+            Assert.AreEqual(LibP2PDB:Get(db2, "Users", "1"), { name = "Bob", age = 25 })
+            Assert.IsNil(LibP2PDB:Get(db2, "Users", "2"))
+            Assert.AreEqual(LibP2PDB:Get(db2, "Users", Private.peerId), { name = "Eve", age = 35 })
+        end,
+
+        Deserialize_InvalidClock_Fails = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
+
+            -- Missing clock
+            local success, results = LibP2PDB:Deserialize(db, "{}")
+            Assert.IsFalse(success)
+            Assert.IsTable(results)
+
+            -- Invalid clock (not hex)
+            success, results = LibP2PDB:Deserialize(db, "{xyz}")
+            Assert.IsFalse(success)
+            Assert.IsTable(results)
+
+            -- Negative clock
+            local success, results = LibP2PDB:Deserialize(db, "{-1}")
+            Assert.IsFalse(success)
+            Assert.IsTable(results)
+        end,
+
+        Deserialize_InvalidTableStructure_Fails = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
+
+            -- Table data is not a table (missing braces)
+            local success, results = LibP2PDB:Deserialize(db, "{5;Users;invalid}")
+            Assert.IsFalse(success)
+            Assert.IsTable(results)
+
+            -- Table name without data
+            local success, results = LibP2PDB:Deserialize(db, "{5;Users}")
+            Assert.IsFalse(success)
+            Assert.IsTable(results)
+        end,
+
+        Deserialize_UndefinedTable_Fails = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
+
+            -- Table "Products" doesn't exist
+            local success, results = LibP2PDB:Deserialize(db, "{5;Products{{1}1;peer}}")
+            Assert.IsFalse(success)
+            Assert.IsTable(results)
+        end,
+
+        Deserialize_InvalidKeyType_SkipsRow = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+
+            -- Key should be number but is string (xyz contains non-hex chars)
+            local serialized = "{3;Users{xyz{{1e;Alice}1;peer};5{{1e;Alice}2;peer}}}"
+            local success, results = LibP2PDB:Deserialize(db, serialized)
+            Assert.IsTrue(success)
+            Assert.IsTable(results)
+
+            -- First row with string key should be skipped
+            Assert.IsNil(Private.databases[db].tables["Users"].rows["xyz"])
+
+            -- Second row with number key should be imported
+            Assert.AreEqual(LibP2PDB:Get(db, "Users", 5), { name = "Alice", age = 30 })
+        end,
+
+        Deserialize_InvalidRowStructure_SkipsRow = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
+
+            -- Row missing version data (needs at least data + clock + peer)
+            local serialized = "{2;Users{key1{{19;Bob}};key2{{1e;Alice}5;peer}}}"
+            local success, results = LibP2PDB:Deserialize(db, serialized)
+            Assert.IsTrue(success)
+            Assert.IsTable(results)
+
+            -- First row should be skipped
+            Assert.IsNil(LibP2PDB:Get(db, "Users", "key1"))
+
+            -- Second row should be imported
+            Assert.AreEqual(LibP2PDB:Get(db, "Users", "key2"), { name = "Alice", age = 30 })
+        end,
+
+        Deserialize_InvalidVersionClock_SkipsRow = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
+
+            -- Invalid version clock (not hex)
+            local serialized = "{3;Users{key1{{19;Bob}xyz;peer};key2{{1e;Alice}5;peer}}}"
+            local success, results = LibP2PDB:Deserialize(db, serialized)
+            Assert.IsTrue(success)
+            Assert.IsTable(results)
+
+            -- First row should be skipped
+            Assert.IsNil(LibP2PDB:Get(db, "Users", "key1"))
+
+            -- Second row should be imported
+            Assert.AreEqual(LibP2PDB:Get(db, "Users", "key2"), { name = "Alice", age = 30 })
+        end,
+
+        Deserialize_InvalidVersionPeer_SkipsRow = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
+
+            -- Empty peer
+            local serialized = "{3;Users{key1{{19;Bob}5;};key2{{1e;Alice}5;peer-456}}}"
+            local success, results = LibP2PDB:Deserialize(db, serialized)
+            Assert.IsTrue(success)
+            Assert.IsTable(results)
+
+            -- First row should be skipped
+            Assert.IsNil(LibP2PDB:Get(db, "Users", "key1"))
+
+            -- Second row should be imported
+            Assert.AreEqual(LibP2PDB:Get(db, "Users", "key2"), { name = "Alice", age = 30 })
+        end,
+
+        Deserialize_InvalidFieldType_SkipsRow = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
+
+            -- Age field should be number but age is first in alphabetical order so: {age;name}
+            -- Providing string for age (first field)
+            local serialized = "{3;Users{key1{{notanumber;Bob}5;peer};key2{{1e;Alice}5;peer}}}"
+            local success, results = LibP2PDB:Deserialize(db, serialized)
+            Assert.IsTrue(success)
+            Assert.IsTable(results)
+
+            -- First row should be skipped (age is not a number)
+            Assert.IsNil(LibP2PDB:Get(db, "Users", "key1"))
+
+            -- Second row should be imported
+            Assert.AreEqual(LibP2PDB:Get(db, "Users", "key2"), { name = "Alice", age = 30 })
+        end,
+
+        Deserialize_TombstoneWithoutData_Imports = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
+
+            -- Insert then receive tombstone
+            LibP2PDB:Insert(db, "Users", "deleted", { name = "Bob", age = 25 })
+            local serialized = "{5;Users{deleted{{}3;peer;1}}}"
+            local success, results = LibP2PDB:Deserialize(db, serialized)
+            Assert.IsTrue(success)
+            Assert.IsNil(results)
+
+            -- Row should be deleted
+            Assert.IsFalse(LibP2PDB:HasKey(db, "Users", "deleted"))
+        end,
+
+        Deserialize_MalformedNestedStructure_Fails = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
+
+            -- Unmatched braces
+            local success, results = LibP2PDB:Deserialize(db, "{5;Users{key{{data}1;peer}")
+            Assert.IsFalse(success)
+            Assert.IsTable(results)
+
+            -- Extra closing brace
+            success, results = LibP2PDB:Deserialize(db, "{5;Users{key{{data}1;peer}}}}}")
+            Assert.IsFalse(success)
+            Assert.IsTable(results)
+        end,
+
+        Deserialize_EmptyData_ImportsCorrectly = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
+
+            -- Row with empty data array (all nil fields)
+            local serialized = "{2;Users{key{{;}5;peer}}}"
+            local success, results = LibP2PDB:Deserialize(db, serialized)
+            Assert.IsTrue(success)
+            Assert.IsTable(results)
+
+            -- Row should be skipped
+            Assert.IsNil(Private.databases[db].tables["Users"].rows["key"])
+        end,
+
+        Deserialize_DBIsInvalid_Throws = function()
+            Assert.Throws(function() LibP2PDB:Deserialize(nil, "") end)
+            Assert.Throws(function() LibP2PDB:Deserialize(123, "") end)
+            Assert.Throws(function() LibP2PDB:Deserialize("", "") end)
+            Assert.Throws(function() LibP2PDB:Deserialize({}, "") end)
+        end,
+
+        Deserialize_SerializedIsInvalid_Throws = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            Assert.Throws(function() LibP2PDB:Deserialize(db, nil) end)
+            Assert.Throws(function() LibP2PDB:Deserialize(db, 123) end)
+            Assert.Throws(function() LibP2PDB:Deserialize(db, "") end)
+            Assert.Throws(function() LibP2PDB:Deserialize(db, {}) end)
         end,
     }
     ---@diagnostic enable: param-type-mismatch, assign-type-mismatch, missing-fields
