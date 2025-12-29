@@ -201,6 +201,14 @@ local function ShallowEqual(a, b)
     return count == 0
 end
 
+local function NumberToHex(n)
+    return format("%x", n)
+end
+
+local function HexToNumber(s)
+    return tonumber(s)
+end
+
 local function IsIncomingNewer(incoming, existing)
     if not existing then
         return true
@@ -754,6 +762,54 @@ function LibP2PDB:Import(db, exported)
     return success, result
 end
 
+---Serialize the entire database to a compact string format for storage or transmission.
+---
+---Format: {clock;table{key{{value;...}clock;peer[;1]};...};...}
+---
+---Structure:
+---  - Numbers encoded as hex (lowercase, no leading zeros) to save space
+---  - Braces {} delimit nested structures
+---  - Semicolons ; separate fields, tables, and rows (no trailing semicolons)
+---  - Field values only (no names) in alphabetical schema order
+---
+---Layout:
+---  Database level:
+---    {clock;...tables...}
+---
+---  Table level (repeating, separated by ';'):
+---    tableName{...rows...};...
+---
+---  Row level (repeating, separated by ';'):
+---    key{{...data...}clock;peer[;tombstone]};...
+---
+---  Data level:
+---    {value1;value2;...}  - Field values in alphabetical schema order
+---
+---  Version metadata:
+---    clock                - Row version clock (hex number)
+---    peer                 - Peer ID (or "=" if same as key)
+---    [;1]                 - Tombstone flag (only if row is deleted)
+---
+---Example: {1a;Users{alice{{Alice,1e}14;peer-123};bob{{Bob,19}15;peer-456;1};peer-789{{Roger,2a}16;=}}}
+---  - Database with clock=26 (0x1a)
+---  - Table "Users" with 3 rows
+---  - Row key="alice", data={name="Alice", age=30 (0x1e)}, version={clock=20 (0x14), peer="peer-123"}
+---  - Row key="bob", data={name="Bob", age=25 (0x19)}, version={clock=21 (0x15), peer="peer-456", tombstone=true}
+---  - Row key="peer-789", data={name="Roger", age=42 (0x2a)}, version={clock=22 (0x16), peer="=" (same as key)}
+---
+---@param db LibP2PDB.DB Database instance
+---@return string serialized The serialized database string
+function LibP2PDB:Serialize(db)
+    assert(IsTable(db), "db must be a table")
+
+    -- Validate db instance
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database instance")
+
+    -- Serialize the database
+    return InternalSerialize(dbi)
+end
+
 ------------------------------------------------------------------------------------------------------------------------
 -- Public API: Sync / Gossip Controls
 ------------------------------------------------------------------------------------------------------------------------
@@ -1128,6 +1184,103 @@ function InternalImportRow(incomingKey, incomingRow, dbi, incomingTableName, t)
     end
 
     return true
+end
+
+function InternalSerialize(dbi)
+    local parts = {}
+
+    -- Start cluster
+    tinsert(parts, "{")
+
+    -- Add clock (in hex)
+    tinsert(parts, tostring(NumberToHex(dbi.clock)))
+
+    -- Add each table
+    for tableName, t in pairs(dbi.tables) do
+        -- Only include table if it has rows
+        if next(t.rows) then
+            -- Separator
+            tinsert(parts, ";")
+
+            -- Add table name
+            tinsert(parts, tostring(tableName))
+
+            -- Start table
+            tinsert(parts, "{")
+
+            -- Add each row
+            local first = true
+            for key, row in pairs(t.rows) do
+                -- Separator
+                if not first then
+                    tinsert(parts, ";")
+                end
+                first = false
+
+                -- Add key (convert to hex if number)
+                local keyStr
+                if type(key) == "number" then
+                    keyStr = tostring(NumberToHex(key))
+                else
+                    keyStr = tostring(key)
+                end
+                tinsert(parts, keyStr)
+
+                -- Start row
+                tinsert(parts, "{")
+
+                -- Add data fields
+                tinsert(parts, "{")
+                if row.data then
+                    if t.schema then
+                        local sortedSchema = InternalGetSchema(t, true)
+                        for _, fieldInfo in ipairs(sortedSchema or {}) do
+                            local fieldName = fieldInfo[1]
+                            local fieldValue = row.data[fieldName]
+                            if fieldValue ~= nil then
+                                if #parts > 0 and parts[#parts] ~= "{" then
+                                    tinsert(parts, ";")
+                                end
+                                -- Skip field name, just add value
+                                if type(fieldValue) == "number" then
+                                    tinsert(parts, tostring(NumberToHex(fieldValue)))
+                                elseif type(fieldValue) == "boolean" then
+                                    tinsert(parts, fieldValue and "1" or "0")
+                                elseif type(fieldValue) == "string" then
+                                    tinsert(parts, fieldValue)
+                                else
+                                    assert(false, "unsupported field value type: " .. type(fieldValue))
+                                end
+                            end
+                        end
+                    else
+                        -- not supported
+                        error("serialization without schema is not supported")
+                    end
+                end
+                tinsert(parts, "}")
+
+                -- Add version
+                tinsert(parts, tostring(NumberToHex(row.version.clock)))
+                tinsert(parts, ";")
+                tinsert(parts, tostring(row.version.peer))
+                if row.version.tombstone then
+                    tinsert(parts, ";1")
+                end
+
+                -- End row
+                tinsert(parts, "}")
+            end
+
+            -- End table
+            tinsert(parts, "}")
+        end
+    end
+
+    -- End cluster
+    tinsert(parts, "}")
+
+    return tconcat(parts)
 end
 
 function InternalBuildDigest(dbi)
@@ -1657,6 +1810,50 @@ if enableDebugging then
             Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", onChange = 123 }) end)
         end,
 
+        Schema_OnlyPrimitiveTypesAllowed = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Products", keyType = "number", schema = { a = "function" } }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Products", keyType = "number", schema = { a = "table" } }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Products", keyType = "number", schema = { a = "userdata" } }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Products", keyType = "number", schema = { a = "thread" } }) end)
+        end,
+
+        Schema_IsOptional = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            Assert.IsTrue(LibP2PDB:NewTable(db, { name = "Logs", keyType = "number" }))
+            Assert.IsTrue(LibP2PDB:Insert(db, "Logs", 1, { message = "System started", timestamp = 1620000000 }))
+            Assert.AreEqual(LibP2PDB:Get(db, "Logs", 1), { message = "System started", timestamp = 1620000000 })
+            Assert.IsTrue(LibP2PDB:Insert(db, "Logs", 2, { message = "User logged in", timestamp = 1620003600, username = "Bob" }))
+            Assert.AreEqual(LibP2PDB:Get(db, "Logs", 2), { message = "User logged in", timestamp = 1620003600, username = "Bob" })
+        end,
+
+        Schema_CopySkipNonPrimitiveTypes = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            Assert.IsTrue(LibP2PDB:NewTable(db, { name = "Config", keyType = "string" }))
+            Assert.IsTrue(LibP2PDB:Insert(db, "Config", "settings", { maxUsers = 100, someFunction = function() end, nestedTable = { a = 1 } }))
+
+            local row = LibP2PDB:Get(db, "Config", "settings")
+            Assert.AreEqual(row, { maxUsers = 100 })
+        end,
+
+        Schema_MultipleTypesAllowed = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            Assert.IsTrue(LibP2PDB:NewTable(db, { name = "Metrics", keyType = "string", schema = { value = { "number", "string" }, timestamp = "number" } }))
+            Assert.IsTrue(LibP2PDB:Insert(db, "Metrics", "cpu_usage", { value = 75.5, timestamp = 1620000000 }))
+            Assert.AreEqual(LibP2PDB:Get(db, "Metrics", "cpu_usage"), { value = 75.5, timestamp = 1620000000 })
+            Assert.IsTrue(LibP2PDB:Insert(db, "Metrics", "status", { value = "OK", timestamp = 1620003600 }))
+            Assert.AreEqual(LibP2PDB:Get(db, "Metrics", "status"), { value = "OK", timestamp = 1620003600 })
+        end,
+
+        Schema_NilTypeAllowed = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            Assert.IsTrue(LibP2PDB:NewTable(db, { name = "Settings", keyType = "string", schema = { value = { "string", "nil" } } }))
+            Assert.IsTrue(LibP2PDB:Insert(db, "Settings", "theme", { value = "dark" }))
+            Assert.AreEqual(LibP2PDB:Get(db, "Settings", "theme"), { value = "dark" })
+            Assert.IsTrue(LibP2PDB:Insert(db, "Settings", "notifications", { value = nil }))
+            Assert.AreEqual(LibP2PDB:Get(db, "Settings", "notifications"), { value = nil })
+        end,
+
         Insert = function()
             local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
             LibP2PDB:NewTable(db, {
@@ -2084,7 +2281,10 @@ if enableDebugging then
             Assert.AreEqual(version.peer, Private.peerId)
             Assert.IsNil(version.tombstone)
 
-            LibP2PDB:Update(db, "Users", 1, function(row) row.name = "Robert" return row end)
+            LibP2PDB:Update(db, "Users", 1, function(row)
+                row.name = "Robert"
+                return row
+            end)
             version = Private.databases[db].tables["Users"].rows[1].version
             Assert.IsTable(version)
             Assert.AreEqual(version.clock, 2)
@@ -2117,7 +2317,10 @@ if enableDebugging then
             Assert.AreEqual(version.peer, "=")
             Assert.IsNil(version.tombstone)
 
-            LibP2PDB:Update(db, "Users", Private.peerId, function(row) row.name = "Alice" return row end)
+            LibP2PDB:Update(db, "Users", Private.peerId, function(row)
+                row.name = "Alice"
+                return row
+            end)
             version = Private.databases[db].tables["Users"].rows[Private.peerId].version
             Assert.IsTable(version)
             Assert.AreEqual(version.clock, 3)
@@ -2130,50 +2333,6 @@ if enableDebugging then
             Assert.AreEqual(version.clock, 4)
             Assert.AreEqual(version.peer, "=")
             Assert.IsTrue(version.tombstone)
-        end,
-
-        Schema_OnlyPrimitiveTypesAllowed = function()
-            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
-            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Products", keyType = "number", schema = { a = "function" } }) end)
-            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Products", keyType = "number", schema = { a = "table" } }) end)
-            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Products", keyType = "number", schema = { a = "userdata" } }) end)
-            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Products", keyType = "number", schema = { a = "thread" } }) end)
-        end,
-
-        Schema_IsOptional = function()
-            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
-            Assert.IsTrue(LibP2PDB:NewTable(db, { name = "Logs", keyType = "number" }))
-            Assert.IsTrue(LibP2PDB:Insert(db, "Logs", 1, { message = "System started", timestamp = 1620000000 }))
-            Assert.AreEqual(LibP2PDB:Get(db, "Logs", 1), { message = "System started", timestamp = 1620000000 })
-            Assert.IsTrue(LibP2PDB:Insert(db, "Logs", 2, { message = "User logged in", timestamp = 1620003600, username = "Bob" }))
-            Assert.AreEqual(LibP2PDB:Get(db, "Logs", 2), { message = "User logged in", timestamp = 1620003600, username = "Bob" })
-        end,
-
-        Schema_CopySkipNonPrimitiveTypes = function()
-            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
-            Assert.IsTrue(LibP2PDB:NewTable(db, { name = "Config", keyType = "string" }))
-            Assert.IsTrue(LibP2PDB:Insert(db, "Config", "settings", { maxUsers = 100, someFunction = function() end, nestedTable = { a = 1 } }))
-
-            local row = LibP2PDB:Get(db, "Config", "settings")
-            Assert.AreEqual(row, { maxUsers = 100 })
-        end,
-
-        Schema_MultipleTypesAllowed = function()
-            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
-            Assert.IsTrue(LibP2PDB:NewTable(db, { name = "Metrics", keyType = "string", schema = { value = { "number", "string" }, timestamp = "number" } }))
-            Assert.IsTrue(LibP2PDB:Insert(db, "Metrics", "cpu_usage", { value = 75.5, timestamp = 1620000000 }))
-            Assert.AreEqual(LibP2PDB:Get(db, "Metrics", "cpu_usage"), { value = 75.5, timestamp = 1620000000 })
-            Assert.IsTrue(LibP2PDB:Insert(db, "Metrics", "status", { value = "OK", timestamp = 1620003600 }))
-            Assert.AreEqual(LibP2PDB:Get(db, "Metrics", "status"), { value = "OK", timestamp = 1620003600 })
-        end,
-
-        Schema_NilTypeAllowed = function()
-            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
-            Assert.IsTrue(LibP2PDB:NewTable(db, { name = "Settings", keyType = "string", schema = { value = { "string", "nil" } } }))
-            Assert.IsTrue(LibP2PDB:Insert(db, "Settings", "theme", { value = "dark" }))
-            Assert.AreEqual(LibP2PDB:Get(db, "Settings", "theme"), { value = "dark" })
-            Assert.IsTrue(LibP2PDB:Insert(db, "Settings", "notifications", { value = nil }))
-            Assert.AreEqual(LibP2PDB:Get(db, "Settings", "notifications"), { value = nil })
         end,
 
         Subscribe = function()
@@ -2323,6 +2482,37 @@ if enableDebugging then
             Assert.AreEqual(LibP2PDB:Get(db2, "Users", 1), LibP2PDB:Get(db1, "Users", 1))
             Assert.IsNil(LibP2PDB:Get(db2, "Users", 2))
         end,
+
+        Serialize = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
+            LibP2PDB:Insert(db, "Users", "1", { name = "Bob", age = 25 })
+            LibP2PDB:Insert(db, "Users", "2", { name = "Alice", age = 30 })
+            LibP2PDB:Delete(db, "Users", "2")
+            LibP2PDB:Insert(db, "Users", Private.peerId, { name = "Eve", age = 35 })
+
+            local serialized = LibP2PDB:Serialize(db)
+            local firstRow = "1{{19;Bob}1;" .. Private.peerId .. "}"
+            local secondRow = "2{{}3;" .. Private.peerId .. ";1}"
+            local thirdRow = Private.peerId .. "{{23;Eve}4;=}"
+
+            -- Rows may be in any order, so we check all possibilities
+            local expected1 = "{4;Users{" .. firstRow .. ";" .. secondRow .. ";" .. thirdRow .. "}}"
+            local expected2 = "{4;Users{" .. firstRow .. ";" .. thirdRow .. ";" .. secondRow .. "}}"
+            local expected3 = "{4;Users{" .. secondRow .. ";" .. firstRow .. ";" .. thirdRow .. "}}"
+            local expected4 = "{4;Users{" .. secondRow .. ";" .. thirdRow .. ";" .. firstRow .. "}}"
+            local expected5 = "{4;Users{" .. thirdRow .. ";" .. firstRow .. ";" .. secondRow .. "}}"
+            local expected6 = "{4;Users{" .. thirdRow .. ";" .. secondRow .. ";" .. firstRow .. "}}"
+            Assert.IsTrue(serialized == expected1 or serialized == expected2 or serialized == expected3 or
+                          serialized == expected4 or serialized == expected5 or serialized == expected6)
+        end,
+
+        Serialize_DBIsInvalid_Throws = function()
+            Assert.Throws(function() LibP2PDB:Serialize(nil) end)
+            Assert.Throws(function() LibP2PDB:Serialize(123) end)
+            Assert.Throws(function() LibP2PDB:Serialize("invalid") end)
+        end,
+
     }
 
     local function RunTest(testFn)
