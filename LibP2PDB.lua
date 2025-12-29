@@ -21,16 +21,18 @@ assert(AceSerializer, MAJOR .. " requires AceSerializer-3.0")
 local assert, print = assert, print
 local type, ipairs, pairs = type, ipairs, pairs
 local min, max, abs = min, max, abs
-local tostring, tostringall = tostring, tostringall
+local tonumber, tostring, tostringall = tonumber, tostring, tostringall
 local format, strsub, strfind, strjoin = format, strsub, strfind, strjoin
-local tinsert, tremove, tsort = table.insert, table.remove, table.sort
-local unpack, CopyTable = unpack, CopyTable
+local tinsert, tremove, tconcat, tsort = table.insert, table.remove, table.concat, table.sort
+local unpack, select = unpack, select
+local setmetatable, getmetatable = setmetatable, getmetatable
+local securecallfunction = securecallfunction
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Local WoW API References
 ------------------------------------------------------------------------------------------------------------------------
 
-local UnitGUID = UnitGUID
+local UnitName, UnitGUID = UnitName, UnitGUID
 local GetTime, GetServerTime = GetTime, GetServerTime
 local IsInGuild, IsInRaid, IsInGroup, IsInInstance = IsInGuild, IsInRaid, IsInGroup, IsInInstance
 
@@ -95,29 +97,6 @@ local function Dump(o)
     end
 end
 
-local function ShallowEqual(a, b)
-    if a == b then return true end
-    if type(a) ~= "table" or type(b) ~= "table" then return false end
-    local count = 0
-    for k, v in pairs(a) do
-        if b[k] ~= v then
-            return false
-        end
-        count = count + 1
-    end
-    for _ in pairs(b) do
-        count = count - 1
-        if count < 0 then
-            return false
-        end
-    end
-    return count == 0
-end
-
-local function IsNotNil(v)
-    return v ~= nil
-end
-
 local function IsNumber(n)
     return type(n) == "number" and n == n -- n == n checks for NaN
 end
@@ -152,6 +131,74 @@ end
 
 local function IsPrimitiveType(t)
     return t == "string" or t == "number" or t == "boolean" or t == "nil"
+end
+
+local function DeepCopy(o)
+    if type(o) ~= "table" then
+        return o
+    end
+    local copy = {}
+    for k, v in pairs(o) do
+        copy[k] = DeepCopy(v)
+    end
+    return copy
+end
+
+local function DeepEqual(a, b)
+    if a == b then
+        return true
+    end
+    if type(a) ~= "table" or type(b) ~= "table" then
+        return false
+    end
+    local count = 0
+    for k, v in pairs(a) do
+        if not DeepEqual(v, b[k]) then
+            return false
+        end
+        count = count + 1
+    end
+    for _ in pairs(b) do
+        count = count - 1
+        if count < 0 then
+            return false
+        end
+    end
+    return count == 0
+end
+
+local function ShallowCopy(o)
+    if type(o) ~= "table" then
+        return o
+    end
+    local copy = {}
+    for k, v in pairs(o) do
+        copy[k] = v
+    end
+    return copy
+end
+
+local function ShallowEqual(a, b)
+    if a == b then
+        return true
+    end
+    if type(a) ~= "table" or type(b) ~= "table" then
+        return false
+    end
+    local count = 0
+    for k, v in pairs(a) do
+        if b[k] ~= v then
+            return false
+        end
+        count = count + 1
+    end
+    for _ in pairs(b) do
+        count = count - 1
+        if count < 0 then
+            return false
+        end
+    end
+    return count == 0
 end
 
 local function IsIncomingNewer(incoming, existing)
@@ -280,10 +327,18 @@ end
 -- Public API: Table Definition (Schema)
 ------------------------------------------------------------------------------------------------------------------------
 
+---@alias LibP2PDB.SchemaFieldName string Field name in a schema
+---@alias LibP2PDB.SchemaFieldTypes string|table<string> Allowed data type(s) for a field in a schema. Only primitive types are allowed: "string", "number", "boolean", "nil".
+
+---@class LibP2PDB.Schema Table schema definition
+---@field [LibP2PDB.SchemaFieldName] LibP2PDB.SchemaFieldTypes Field name mapped to allowed data type(s) ("string", "number", "boolean", "nil")
+
+---@alias LibP2PDB.SortedSchema table<LibP2PDB.SchemaFieldName,LibP2PDB.SchemaFieldTypes> Array of {fieldName, fieldType} pairs sorted by fieldName
+
 ---@class LibP2PDB.TableDesc Description for defining a table in the database
 ---@field name string Name of the table to define
 ---@field keyType string Data type of the primary key ("string" or "number")
----@field schema table<string, string|table<string>>|nil Optional table schema defining field names and their allowed data types
+---@field schema LibP2PDB.Schema|nil Optional table schema defining field names and their allowed data types
 ---@field onValidate function|nil Optional validation function(key, row) -> true/false
 ---@field onChange function|nil Optional callback function(key, row) on row changes
 
@@ -426,7 +481,7 @@ function LibP2PDB:Update(db, table, key, updateFn)
     assert(existingRow, "key '" .. tostring(key) .. "' does not exist in table '" .. table .. "'")
 
     -- Call the update function to get the new row data
-    local updatedRow = updateFn(CopyTable(existingRow.data))
+    local updatedRow = updateFn(ShallowCopy(existingRow.data))
     assert(IsTable(updatedRow), "updateFn must return a table")
 
     -- Use Set to apply the updated row (will handle validation, versioning, callbacks)
@@ -594,25 +649,25 @@ end
 -- Public API: Persistence
 ------------------------------------------------------------------------------------------------------------------------
 
----@class LibP2PDB.VersionState Exported version metadata
+---@class LibP2PDB.VersionExport Exported version metadata
 ---@field clock number Lamport clock value
 ---@field peer string Peer ID that last modified the row
 ---@field tombstone boolean|nil Optional tombstone flag indicating deletion
 
----@class LibP2PDB.RowState Exported row state
+---@class LibP2PDB.RowExport Exported row
 ---@field data table Row data
----@field version LibP2PDB.VersionState Version metadata
+---@field version LibP2PDB.VersionExport Version metadata
 
----@class LibP2PDB.TableState Exported table state
----@field rows table<LibP2PDB.RowState> Registry of rows in the exported table
+---@class LibP2PDB.TableExport Exported table
+---@field rows table<LibP2PDB.RowExport> Registry of rows in the exported table
 
----@class LibP2PDB.DBState Exported database state
+---@class LibP2PDB.DBExport Exported database
 ---@field clock number Lamport clock of the exported database
----@field tables table<LibP2PDB.TableState> Registry of tables and their rows
+---@field tables table<LibP2PDB.TableExport> Registry of tables and their rows
 
----Export the entire DB state as a serializable table.
+---Export the entire database to a table.
 ---@param db LibP2PDB.DB Database instance
----@return LibP2PDB.DBState state The exported database state
+---@return LibP2PDB.DBExport export The exported database
 function LibP2PDB:Export(db)
     assert(IsTable(db), "db must be a table")
 
@@ -620,34 +675,20 @@ function LibP2PDB:Export(db)
     local dbi = Private.databases[db]
     assert(dbi, "db is not a recognized database instance")
 
-    -- Build export state
-    local state = {
+    -- Build export
+    local export = {
         clock = dbi.clock,
     }
     local tables = {}
     for tableName, tableData in pairs(dbi.tables) do
         local rows = {}
         for key, row in pairs(tableData.rows) do
-            local data
-            if row.data then
-                data = CopyTable(row.data)
-            else
-                data = nil
-            end
-
-            local tombstone
-            if row.version.tombstone == true then
-                tombstone = true
-            else
-                tombstone = nil
-            end
-
             rows[key] = {
-                data = data,
+                data = ShallowCopy(row.data),
                 version = {
                     clock = row.version.clock,
                     peer = row.version.peer,
-                    tombstone = tombstone,
+                    tombstone = row.version.tombstone,
                 },
             }
         end
@@ -658,23 +699,22 @@ function LibP2PDB:Export(db)
         end
     end
     if next(tables) ~= nil then
-        state.tables = tables
+        export.tables = tables
     end
-
-    return state
+    return export
 end
 
----Import the DB state from an exported table.
+---Import the database from an exported table.
 ---Merges the imported state with existing data based on version metadata.
 ---Validates incoming data against table definitions, skipping invalid entries.
 ---@param db LibP2PDB.DB Database instance
----@param state LibP2PDB.DBState The exported database state to import
----@return boolean,table<string>|nil result Returns true on success, false otherwise. On failure, a table of error messages is returned as the second value.
-function LibP2PDB:Import(db, state)
+---@param exported LibP2PDB.DBExport The exported database to import
+---@return boolean,table<string>|nil result Returns true on success, false otherwise. On failure, the second return value is a table of error messages.
+function LibP2PDB:Import(db, exported)
     assert(IsTable(db), "db must be a table")
-    assert(IsTable(state), "exportedDB must be a table")
-    assert(IsNumber(state.clock), "invalid exportedDB clock")
-    assert(IsTable(state.tables), "invalid exportedDB tables")
+    assert(IsTable(exported), "exported db must be a table")
+    assert(IsNumber(exported.clock), "invalid exported db clock")
+    assert(IsTable(exported.tables), "invalid exported db tables")
 
     -- Validate db instance
     local dbi = Private.databases[db]
@@ -684,19 +724,19 @@ function LibP2PDB:Import(db, state)
     Private.isImporting = true
 
     -- Merge Lamport clock
-    dbi.clock = max(dbi.clock, state.clock)
+    dbi.clock = max(dbi.clock, exported.clock)
 
-    -- Import DB state
-    local result, errors = true, nil
-    for incomingTableName, incomingTableData in pairs(state.tables or {}) do
-        local t = dbi.tables[incomingTableName]
-        if t then
+    -- Import DB
+    local success, result = true, nil
+    for incomingTableName, incomingTableData in pairs(exported.tables or {}) do
+        local ti = dbi.tables[incomingTableName]
+        if ti then
             for incomingKey, incomingRow in pairs(incomingTableData.rows or {}) do
-                local importResult, importError = InternalImportRow(incomingKey, incomingRow, dbi, incomingTableName, t)
-                if not importResult then
-                    result = false
-                    errors = errors or {}
-                    tinsert(errors, "error processing row with key '" .. tostring(incomingKey) .. "' in table '" .. incomingTableName .. "': " .. tostring(importError))
+                local rowSuccess, rowResult = InternalImportRow(incomingKey, incomingRow, dbi, incomingTableName, ti)
+                if not rowSuccess then
+                    success = false
+                    result = result or {}
+                    tinsert(result, "error processing row with key '" .. tostring(incomingKey) .. "' in table '" .. incomingTableName .. "': " .. tostring(rowResult))
                 end
             end
         end
@@ -705,7 +745,7 @@ function LibP2PDB:Import(db, state)
     -- End import
     Private.isImporting = false
 
-    return result, errors
+    return success, result
 end
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -803,6 +843,27 @@ function LibP2PDB:GetPeerIdFromGUID(guid)
     return strsub(guid, 8) -- skip "Player-" prefix
 end
 
+---Retrieve the schema definition for a specific table.
+---@param db LibP2PDB.DB Database instance
+---@param tableName string Name of the table to get the schema for
+---@param sorted boolean|nil Optional flag to return the schema with sorted field names (default: false)
+---@return LibP2PDB.Schema|LibP2PDB.SortedSchema|nil schema The table schema, or nil if no schema is defined. If sorted is true, returns an array of {fieldName, fieldType} pairs sorted by fieldName.
+function LibP2PDB:GetSchema(db, tableName, sorted)
+    assert(IsTable(db), "db must be a table")
+    assert(IsNonEmptyString(tableName), "tableName must be a non-empty string")
+
+    -- Validate db instance
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database instance")
+
+    -- Validate table
+    local ti = dbi.tables[tableName]
+    assert(ti, "table '" .. tableName .. "' is not defined in the database")
+
+    -- Return a copy of the schema
+    return DeepCopy(InternalGetSchema(ti, sorted))
+end
+
 ---Return a list of discovered peers in the database cluster in this session.
 ---This list is not persisted and is reset on logout/reload.
 ---@param db LibP2PDB.DB Database instance
@@ -844,6 +905,26 @@ end
 -- Private Functions
 ------------------------------------------------------------------------------------------------------------------------
 
+function InternalGetSchema(ti, sorted)
+    if not ti.schema then
+        return nil
+    end
+    if sorted then
+        local sortedSchema = {}
+        local fieldNames = {}
+        for fieldName in pairs(ti.schema) do
+            tinsert(fieldNames, fieldName)
+        end
+        tsort(fieldNames)
+        for _, fieldName in ipairs(fieldNames) do
+            tinsert(sortedSchema, { fieldName, ti.schema[fieldName] })
+        end
+        return sortedSchema
+    else
+        return ti.schema
+    end
+end
+
 function InternalOnUpdate(dbi)
     if not dbi.discoveryStartTime then
         return
@@ -868,7 +949,7 @@ end
 function InternalSchemaCopy(table, schema, data)
     local result = {}
     if not schema then
-        -- No schema: shallow copy only primitives
+        -- No schema: shallow copy only primitive types
         for fieldName, fieldValue in pairs(data) do
             local fieldType = type(fieldValue)
             if IsPrimitiveType(fieldType) then
@@ -1338,14 +1419,12 @@ function InternalRowsMessageHandler(ctx)
     assert(dbi, "db is not a recognized database instance")
 
     -- Import received rows
-    local anyErrors = false
     for incomingTableName, incomingTableData in pairs(ctx.data or {}) do
         local t = dbi.tables[incomingTableName]
         if t then
             for incomingKey, incomingRow in pairs(incomingTableData or {}) do
                 local importResult, importError = InternalImportRow(incomingKey, incomingRow, dbi, incomingTableName, t)
                 if not importResult then
-                    anyErrors = true
                     Debug(format("failed to import row with key '%s' in table '%s' from %s on channel %s: %s", tostring(incomingKey), incomingTableName, tostring(ctx.sender), tostring(ctx.channel), tostring(importError)))
                 end
             end
@@ -2144,7 +2223,7 @@ if enableDebugging then
             Assert.Throws(function() LibP2PDB:Import("invalid", {}) end)
         end,
 
-        Import_StateIsInvalid_Throws = function()
+        Import_ExportIsInvalid_Throws = function()
             local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
             Assert.Throws(function() LibP2PDB:Import(db, nil) end)
             Assert.Throws(function() LibP2PDB:Import(db, 123) end)
@@ -2194,5 +2273,13 @@ if enableDebugging then
         Debug("All tests " .. C(Color.Green, "successful") .. ".")
     end
 
-    _G.LibP2PDB = { RunTests = RunTests }
+    -- add slash command
+    SLASH_LIBP2PDB1 = "/libp2pdb"
+    SlashCmdList["LIBP2PDB"] = function(arg)
+        if arg == "runtests" then
+            RunTests()
+        else
+            print("Usage: /libp2pdb runtests - Runs the LibP2PDB tests.")
+        end
+    end
 end
