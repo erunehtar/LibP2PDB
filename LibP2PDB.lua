@@ -941,7 +941,7 @@ function InternalOnUpdate(dbi)
         if dbi.onDiscoveryComplete then
             local isInitial = not dbi.isInitialDiscoveryComplete
             dbi.isInitialDiscoveryComplete = true
-            dbi.onDiscoveryComplete(isInitial)
+            securecallfunction(dbi.onDiscoveryComplete, isInitial)
         end
     end
 end
@@ -986,7 +986,7 @@ function InternalSet(db, dbi, table, t, key, row)
     local data = InternalSchemaCopy(table, t.schema, row)
 
     -- Run custom validation if provided
-    if t.onValidate and not t.onValidate(key, data) then
+    if t.onValidate and not securecallfunction(t.onValidate, key, data) then
         return false
     end
 
@@ -1026,17 +1026,17 @@ function InternalFireCallbacks(dbi, tableName, t, key, data)
 
     -- Fire db change callback
     if dbi.onChange then
-        dbi.onChange(tableName, key, data)
+        securecallfunction(dbi.onChange, tableName, key, data)
     end
 
     -- Fire table change callback
     if t.onChange then
-        t.onChange(key, data)
+        securecallfunction(t.onChange, key, data)
     end
 
     -- Fire subscribers
     for callback in pairs(t.subscribers) do
-        callback(key, data)
+        securecallfunction(callback, key, data)
     end
 end
 
@@ -1100,7 +1100,7 @@ function InternalImportRow(incomingKey, incomingRow, dbi, incomingTableName, t)
     end
 
     -- Custom validation
-    if t.onValidate and not t.onValidate(incomingKey, cleanData) then
+    if t.onValidate and not securecallfunction(t.onValidate, incomingKey, cleanData) then
         return false, format("skipping row that failed custom validation for key '%s' in table '%s'", tostring(incomingKey), incomingTableName)
     end
 
