@@ -911,6 +911,48 @@ function LibP2PDB:GetPeerIdFromGUID(guid)
     return strsub(guid, 8) -- skip "Player-" prefix
 end
 
+---List all defined tables in the database.
+---@param db LibP2PDB.DB Database instance
+---@return table<string> tables Array of table names defined in the database
+function LibP2PDB:ListTables(db)
+    assert(IsTable(db), "db must be a table")
+
+    -- Validate db instance
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database instance")
+
+    local tableNames = {}
+    for tableName in pairs(dbi.tables) do
+        tinsert(tableNames, tableName)
+    end
+    return tableNames
+end
+
+---List all keys of a specific table in the database.
+---@param db LibP2PDB.DB Database instance
+---@param tableName string Name of the table to list keys from
+---@return table<string|number> keys Array of keys in the specified table
+function LibP2PDB:ListKeys(db, tableName)
+    assert(IsTable(db), "db must be a table")
+    assert(IsNonEmptyString(tableName), "tableName must be a non-empty string")
+
+    -- Validate db instance
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database instance")
+
+    -- Validate table
+    local ti = dbi.tables[tableName]
+    assert(ti, "table '" .. tableName .. "' is not defined in the database")
+
+    local keys = {}
+    for key, row in pairs(ti.rows) do
+        if row and row.data and not row.version.tombstone then
+            tinsert(keys, key)
+        end
+    end
+    return keys
+end
+
 ---Retrieve the schema definition for a specific table.
 ---@param db LibP2PDB.DB Database instance
 ---@param tableName string Name of the table to get the schema for
@@ -953,12 +995,23 @@ end
 function LibP2PDB:GetVersion(db, table, key)
 end
 
--- List all defined tables
-function LibP2PDB:ListTables(db)
-end
-
--- List all keys in a table
-function LibP2PDB:ListKeys(db, table)
+---Sanitize a string for printing in WoW chat channels.
+---Replaces non-printable characters with their numeric byte values prefixed by a backslash.
+---@param s string Input string
+---@return string sanitized The sanitized string safe for printing
+function LibP2PDB:SanitizeForPrint(s)
+    local parts = {}
+    local len = #s
+    for i = 1, len do
+        local byte = strbyte(s, i)
+        if byte >= 32 and byte <= 126 then
+            tinsert(parts, strchar(byte))
+        else
+            tinsert(parts, "\\")
+            tinsert(parts, tostring(byte))
+        end
+    end
+    return tconcat(parts)
 end
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -3072,6 +3125,77 @@ if enableDebugging then
             Assert.Throws(function() LibP2PDB:Deserialize(db, 123) end)
             Assert.Throws(function() LibP2PDB:Deserialize(db, "") end)
             Assert.Throws(function() LibP2PDB:Deserialize(db, {}) end)
+        end,
+
+        GetSchema = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            local schema = LibP2PDB:GetSchema(db, "Users")
+            Assert.IsTable(schema)
+            Assert.AreEqual(schema.name, "string")
+            Assert.AreEqual(schema.age, "number")
+        end,
+
+        GetSchema_DBIsInvalid_Throws = function()
+            Assert.Throws(function() LibP2PDB:GetSchema(nil, "Users") end)
+            Assert.Throws(function() LibP2PDB:GetSchema(123, "Users") end)
+            Assert.Throws(function() LibP2PDB:GetSchema("", "Users") end)
+            Assert.Throws(function() LibP2PDB:GetSchema({}, "Users") end)
+        end,
+
+        GetSchema_TableIsInvalid_Throws = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            Assert.Throws(function() LibP2PDB:GetSchema(db, nil) end)
+            Assert.Throws(function() LibP2PDB:GetSchema(db, 123) end)
+            Assert.Throws(function() LibP2PDB:GetSchema(db, {}) end)
+        end,
+
+        ListTables = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number" })
+            LibP2PDB:NewTable(db, { name = "Posts", keyType = "string" })
+            local tables = LibP2PDB:ListTables(db)
+            Assert.IsTable(tables)
+            Assert.AreEqual(#tables, 2)
+            Assert.IsTrue(tables[1] == "Users" or tables[1] == "Posts")
+            Assert.IsTrue(tables[2] == "Users" or tables[2] == "Posts")
+            Assert.AreNotEqual(tables[1], tables[2])
+        end,
+
+        ListTables_DBIsInvalid_Throws = function()
+            Assert.Throws(function() LibP2PDB:ListTables(nil) end)
+            Assert.Throws(function() LibP2PDB:ListTables(123) end)
+            Assert.Throws(function() LibP2PDB:ListTables("") end)
+            Assert.Throws(function() LibP2PDB:ListTables({}) end)
+        end,
+
+        ListKeys = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            LibP2PDB:Insert(db, "Users", 1, { name = "Bob", age = 25 })
+            LibP2PDB:Insert(db, "Users", 2, { name = "Alice", age = 30 })
+            LibP2PDB:Insert(db, "Users", 3, { name = "Eve", age = 35 })
+            LibP2PDB:Delete(db, "Users", 2)
+            local keys = LibP2PDB:ListKeys(db, "Users")
+            Assert.IsTable(keys)
+            Assert.AreEqual(#keys, 2)
+            Assert.IsTrue(keys[1] == 1 or keys[1] == 3)
+            Assert.IsTrue(keys[2] == 1 or keys[2] == 3)
+            Assert.AreNotEqual(keys[1], keys[2])
+        end,
+
+        ListKeys_DBIsInvalid_Throws = function()
+            Assert.Throws(function() LibP2PDB:ListKeys(nil, "Users") end)
+            Assert.Throws(function() LibP2PDB:ListKeys(123, "Users") end)
+            Assert.Throws(function() LibP2PDB:ListKeys("", "Users") end)
+            Assert.Throws(function() LibP2PDB:ListKeys({}, "Users") end)
+        end,
+
+        ListKeys_TableIsInvalid_Throws = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            Assert.Throws(function() LibP2PDB:ListKeys(db, nil) end)
+            Assert.Throws(function() LibP2PDB:ListKeys(db, 123) end)
+            Assert.Throws(function() LibP2PDB:ListKeys(db, {}) end)
         end,
     }
     ---@diagnostic enable: param-type-mismatch, assign-type-mismatch, missing-fields
