@@ -8,11 +8,19 @@ assert(LibStub, MAJOR .. " requires LibStub")
 local LibP2PDB = LibStub:NewLibrary(MAJOR, MINOR)
 if not LibP2PDB then return end -- no upgrade needed
 
-local AceComm = LibStub("AceComm-3.0")
-assert(AceComm, MAJOR .. " requires AceComm-3.0")
+------------------------------------------------------------------------------------------------------------------------
+-- Dependencies
+------------------------------------------------------------------------------------------------------------------------
 
-local AceSerializer = LibStub("AceSerializer-3.0")
-assert(AceSerializer, MAJOR .. " requires AceSerializer-3.0")
+local AceComm = LibStub("AceComm-3.0")
+
+------------------------------------------------------------------------------------------------------------------------
+-- Optional Dependencies
+------------------------------------------------------------------------------------------------------------------------
+
+local AceSerializer = LibStub("AceSerializer-3.0", true)
+local LibSerialize = LibStub("LibSerialize", true)
+local LibDeflate = LibStub("LibDeflate", true)
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Local Lua References
@@ -248,16 +256,26 @@ local Private = NewPrivate()
 -- Public API: Database Instance Creation
 ------------------------------------------------------------------------------------------------------------------------
 
+---@class LibP2PDB.Serializer Serializer interface for encoding/decoding data
+---@field Serialize fun(self: LibP2PDB.Serializer, value: any): string Serializes a value to a string
+---@field Deserialize fun(self: LibP2PDB.Serializer, str: string): boolean, any? Deserializes a string back to a value
+
+---@class LibP2PDB.Compressor Compressor interface for compressing/decompressing data
+---@field Compress fun(self: LibP2PDB.Compressor, str: string): string Compresses a string
+---@field Decompress fun(self: LibP2PDB.Compressor, str: string): string? Decompresses a string
+
 ---@class LibP2PDB.DBDesc Description for creating a new database instance
 ---@field clusterId string Unique identifier for the database cluster (max 16 chars)
 ---@field namespace string Namespace for this database instance
----@field channels table|nil List of chat channels to use for gossip (default: {"GUILD", "RAID", "PARTY", "YELL"})
----@field discoveryQuietPeriod number|nil Seconds of quiet time with no new peers before considering discovery complete (default: 1.0)
----@field discoveryMaxTime number|nil Maximum seconds to wait for peer discovery before considering it complete (default: 3.0)
----@field onChange function|nil Callback function(table, key, row) invoked on any row change
----@field onDiscoveryComplete function|nil Callback function(isInitial) invoked when peers discovery completes
+---@field channels table? List of chat channels to use for gossip (default: {"GUILD", "RAID", "PARTY", "YELL"})
+---@field serializer LibP2PDB.Serializer? Custom serializer for encoding/decoding data (default: LibSerialize or AceSerializer if available)
+---@field compressor LibP2PDB.Compressor? Custom compressor for compressing/decompressing data (default: LibDeflate if available)
+---@field onChange function? Callback function(table, key, row) invoked on any row change
+---@field discoveryQuietPeriod number? Seconds of quiet time with no new peers before considering discovery complete (default: 1.0)
+---@field discoveryMaxTime number? Maximum seconds to wait for peer discovery before considering it complete (default: 3.0)
+---@field onDiscoveryComplete function? Callback function(isInitial) invoked when peers discovery completes
 
----@class LibP2PDB.DB Database instance
+---@class LibP2PDB.DB Database instance (opaque handle)
 
 ---Create a new database instance for peer-to-peer synchronization.
 ---Each database is identified by a unique clusterId and operates independently.
@@ -269,9 +287,11 @@ function LibP2PDB:NewDB(desc)
     assert(IsNonEmptyString(desc.clusterId, 16), "desc.clusterId must be a non-empty string (max 16 chars)")
     assert(IsNonEmptyString(desc.namespace), "desc.namespace must be a non-empty string")
     assert(desc.channels == nil or IsTable(desc.channels), "desc.channels must be a table if provided")
+    assert(desc.serializer == nil or (IsTable(desc.serializer) and IsFunction(desc.serializer.Serialize) and IsFunction(desc.serializer.Deserialize)), "desc.serializer must be a serializer interface if provided")
+    assert(desc.compressor == nil or (IsTable(desc.compressor) and IsFunction(desc.compressor.Compress) and IsFunction(desc.compressor.Decompress)), "desc.compressor must be a compressor interface if provided")
+    assert(desc.onChange == nil or IsFunction(desc.onChange), "desc.onChange must be a function if provided")
     assert(desc.discoveryQuietPeriod == nil or IsNumber(desc.discoveryQuietPeriod), "desc.discoveryQuietPeriod must be a number if provided")
     assert(desc.discoveryMaxTime == nil or IsNumber(desc.discoveryMaxTime), "desc.discoveryMaxTime must be a number if provided")
-    assert(desc.onChange == nil or IsFunction(desc.onChange), "desc.onChange must be a function if provided")
     assert(desc.onDiscoveryComplete == nil or IsFunction(desc.onDiscoveryComplete), "desc.onDiscoveryComplete must be a function if provided")
 
     -- Validate channels if provided
@@ -293,12 +313,15 @@ function LibP2PDB:NewDB(desc)
         clusterId = desc.clusterId,
         namespace = desc.namespace,
         clock = 0,
-        -- Networking
-        peers = {},
-        buckets = {},
+        -- Configuration
         channels = desc.channels or defaultChannels,
         discoveryQuietPeriod = desc.discoveryQuietPeriod or 1.0,
         discoveryMaxTime = desc.discoveryMaxTime or 3.0,
+        serializer = desc.serializer,
+        compressor = desc.compressor,
+        -- Networking
+        peers = {},
+        buckets = {},
         -- Data
         tables = {},
         -- Callbacks
@@ -312,6 +335,49 @@ function LibP2PDB:NewDB(desc)
     local db = {} -- db instance handle
     Private.clusters[desc.clusterId] = db
     Private.databases[db] = dbi
+
+    -- Setup default serializer if none provided
+    if not dbi.serializer then
+        if LibSerialize then
+            dbi.serializer = LibSerialize
+        elseif AceSerializer then
+            dbi.serializer = AceSerializer
+        else
+            error("serializer required but none found; provide custom serializer via desc.serializer")
+        end
+    end
+
+    -- Validate serialization works
+    do
+        local testValue = { a = "value", b = 42, c = true, d = nil, nested = { e = "nested", f = 100, g = false, h = nil } }
+        local serialized = dbi.serializer:Serialize(testValue)
+        local success, deserialized = dbi.serializer:Deserialize(serialized)
+        assert(success and DeepEqual(testValue, deserialized), "serializer provided in desc.serializer is invalid")
+    end
+
+    -- Setup default compressor if none provided
+    if not dbi.compressor then
+        if LibDeflate then
+            dbi.compressor = {
+                Compress = function(self, str)
+                    return (LibDeflate:CompressDeflate(str))
+                end,
+                Decompress = function(self, str)
+                    return (LibDeflate:DecompressDeflate(str))
+                end,
+            }
+        else
+            error("compressor required but none found; provide custom compressor via desc.compressor")
+        end
+    end
+
+    -- Validate compression works
+    do
+        local testString = "This is a test string for compression."
+        local compressed = dbi.compressor:Compress(testString)
+        local decompressed = dbi.compressor:Decompress(compressed)
+        assert(decompressed == testString, "compressor provided in desc.compressor is invalid")
+    end
 
     -- Set up OnUpdate handler
     if dbi.onDiscoveryComplete then
@@ -327,7 +393,7 @@ end
 
 ---Retrieve a database instance by its clusterId.
 ---@param clusterId string Unique identifier for the database cluster (max 16 chars)
----@return LibP2PDB.DB|nil db The database instance if found, or nil if not found
+---@return LibP2PDB.DB? db The database instance if found, or nil if not found
 function LibP2PDB:GetDB(clusterId)
     assert(IsNonEmptyString(clusterId, 16), "clusterId must be a non-empty string (max 16 chars)")
     return Private.clusters[clusterId]
@@ -348,9 +414,9 @@ end
 ---@class LibP2PDB.TableDesc Description for defining a table in the database
 ---@field name string Name of the table to define
 ---@field keyType string Data type of the primary key ("string" or "number")
----@field schema LibP2PDB.Schema|nil Optional table schema defining field names and their allowed data types
----@field onValidate function|nil Optional validation function(key, row) -> true/false
----@field onChange function|nil Optional callback function(key, row) on row changes
+---@field schema LibP2PDB.Schema? Optional table schema defining field names and their allowed data types
+---@field onValidate function? Optional validation function(key, row) -> true/false
+---@field onChange function? Optional callback function(key, row) on row changes
 
 ---Create a new table in the database with an optional schema.
 ---If no schema is provided, the table accepts any fields.
@@ -504,7 +570,7 @@ end
 ---@param db LibP2PDB.DB Database instance
 ---@param table string Name of the table to get from
 ---@param key string|number Primary key value for the row (must match table's keyType)
----@return table|nil row The row data if found, or nil if not found
+---@return table? row The row data if found, or nil if not found
 function LibP2PDB:Get(db, table, key)
     assert(IsTable(db), "db must be a table")
     assert(IsNonEmptyString(table), "table name must be a non-empty string")
@@ -669,7 +735,7 @@ end
 ---@class LibP2PDB.VersionExport Exported version metadata
 ---@field clock number Lamport clock value
 ---@field peer string Peer ID that last modified the row
----@field tombstone boolean|nil Optional tombstone flag indicating deletion
+---@field tombstone boolean? Optional tombstone flag indicating deletion
 
 ---@class LibP2PDB.RowExport Exported row
 ---@field data table Row data
@@ -701,7 +767,7 @@ end
 ---Validates incoming data against table definitions, skipping invalid entries.
 ---@param db LibP2PDB.DB Database instance
 ---@param exported LibP2PDB.DBExport The exported database to import
----@return boolean,nil|table<string> result Returns true if the import is succesful, false otherwise. On failure, the second return value is a table of warnings/errors.
+---@return boolean,table<string>? result Returns true if the import is succesful, false otherwise. On failure, the second return value is a table of warnings/errors.
 function LibP2PDB:Import(db, exported)
     assert(IsTable(db), "db must be a table")
     assert(IsTable(exported), "exported db must be a table")
@@ -769,7 +835,7 @@ end
 ---Validates incoming data against table definitions, skipping invalid entries.
 ---@param db LibP2PDB.DB Database instance
 ---@param str string The serialized database string to deserialize
----@return boolean,nil|table<string> result Returns true if the deserialization is succesful, false otherwise. On failure, the second return value is a table of warnings/errors.
+---@return boolean,table<string>? result Returns true if the deserialization is succesful, false otherwise. On failure, the second return value is a table of warnings/errors.
 function LibP2PDB:Deserialize(db, str)
     assert(IsTable(db), "db must be a table")
     assert(IsNonEmptyString(str), "str must be a non-empty string")
@@ -826,7 +892,7 @@ function LibP2PDB:DiscoverPeers(db)
         type = CommMessageType.PeerDiscoveryRequest,
         peerId = Private.peerId,
     }
-    local serialized = AceSerializer:Serialize(obj)
+    local serialized = dbi.serializer:Serialize(obj)
     InternalBroadcast(dbi.clusterId, serialized, dbi.channels, CommPriority.Low)
 
     -- Record the time of the peer discovery request
@@ -838,7 +904,7 @@ end
 
 ---Request a full snapshot from a peer or broadcast to all peers.
 ---@param db LibP2PDB.DB Database instance
----@param target string|nil Optional target peer to request the snapshot from; if nil, broadcasts to all peers
+---@param target string? Optional target peer to request the snapshot from; if nil, broadcasts to all peers
 function LibP2PDB:RequestSnapshot(db, target)
     assert(IsTable(db), "db must be a table")
     assert(target == nil or IsNonEmptyString(target), "target must be a non-empty string if provided")
@@ -852,7 +918,7 @@ function LibP2PDB:RequestSnapshot(db, target)
         type = CommMessageType.SnapshotRequest,
         peerId = Private.peerId,
     }
-    local serialized = AceSerializer:Serialize(obj)
+    local serialized = dbi.serializer:Serialize(obj)
     if target then
         InternalSend(dbi.clusterId, serialized, "WHISPER", target, CommPriority.Normal)
     else
@@ -886,7 +952,7 @@ function LibP2PDB:SyncNow(db)
         peerId = Private.peerId,
         data = digest,
     }
-    local serialized = AceSerializer:Serialize(obj)
+    local serialized = dbi.serializer:Serialize(obj)
     InternalBroadcast(dbi.clusterId, serialized, dbi.channels, CommPriority.Normal)
 end
 
@@ -902,7 +968,7 @@ end
 
 ---Return a remote peer's unique ID from its GUID
 ---@param guid string Full GUID of the remote peer
----@return string|nil peerId The remote peer ID if valid, or nil if not
+---@return string? peerId The remote peer ID if valid, or nil if not
 function LibP2PDB:GetPeerIdFromGUID(guid)
     assert(IsNonEmptyString(guid), "guid must be a non-empty string")
     if strsub(guid, 1, 7) ~= "Player-" then
@@ -956,8 +1022,8 @@ end
 ---Retrieve the schema definition for a specific table.
 ---@param db LibP2PDB.DB Database instance
 ---@param tableName string Name of the table to get the schema for
----@param sorted boolean|nil Optional flag to return the schema with sorted field names (default: false)
----@return LibP2PDB.Schema|LibP2PDB.SortedSchema|nil schema The table schema, or nil if no schema is defined. If sorted is true, returns an array of {fieldName, fieldType} pairs sorted by fieldName.
+---@param sorted boolean? Optional flag to return the schema with sorted field names (default: false)
+---@return LibP2PDB.Schema|LibP2PDB.SortedSchema? schema The table schema, or nil if no schema is defined. If sorted is true, returns an array of {fieldName, fieldType} pairs sorted by fieldName.
 function LibP2PDB:GetSchema(db, tableName, sorted)
     assert(IsTable(db), "db must be a table")
     assert(IsNonEmptyString(tableName), "tableName must be a non-empty string")
@@ -1706,8 +1772,20 @@ function InternalOnCommReceived(prefix, message, channel, sender)
         return
     end
 
+    -- Get the database instance for this clusterId
+    local db = LibP2PDB:GetDB(prefix)
+    if not db then
+        Debug(format("received message for unknown clusterId '%s' from %s on channel %s", tostring(prefix), tostring(sender), tostring(channel)))
+        return
+    end
+
+    local dbi = Private.databases[db]
+    if not dbi then
+        return
+    end
+
     -- Deserialize message
-    local success, deserialized = AceSerializer:Deserialize(message)
+    local success, deserialized = dbi.serializer:Deserialize(message)
     if not success then
         Debug(format("failed to deserialize message from %s on channel %s: %s", tostring(sender), tostring(channel), Dump(deserialized)))
         return
@@ -1726,18 +1804,6 @@ function InternalOnCommReceived(prefix, message, channel, sender)
 
     if not IsNonEmptyString(deserialized.peerId) then
         Debug(format("received message with missing or invalid peerId from %s on channel %s", tostring(sender), tostring(channel)))
-        return
-    end
-
-    -- Get the database instance for this clusterId
-    local db = LibP2PDB:GetDB(prefix)
-    if not db then
-        Debug(format("received message for unknown clusterId '%s' from %s on channel %s", tostring(prefix), tostring(sender), tostring(channel)))
-        return
-    end
-
-    local dbi = Private.databases[db]
-    if not dbi then
         return
     end
 
@@ -1807,7 +1873,7 @@ function InternalPeerDiscoveryRequestHandler(event)
         peerId = Private.peerId,
         data = event.dbi.clock,
     }
-    local serialized = AceSerializer:Serialize(obj)
+    local serialized = event.dbi.serializer:Serialize(obj)
     InternalSend(event.prefix, serialized, "WHISPER", event.sender, CommPriority.Low)
 end
 
@@ -1833,7 +1899,7 @@ function InternalRequestSnapshotMessageHandler(event)
         peerId = Private.peerId,
         data = InternalExport(event.dbi),
     }
-    local serialized = AceSerializer:Serialize(obj)
+    local serialized = event.dbi.serializer:Serialize(obj)
     InternalSend(event.prefix, serialized, "WHISPER", event.sender, CommPriority.Low)
 end
 
@@ -1889,7 +1955,7 @@ function InternalDigestMessageHandler(event)
         peerId = Private.peerId,
         data = missingTables,
     }
-    local serialized = AceSerializer:Serialize(obj)
+    local serialized = event.dbi.serializer:Serialize(obj)
     InternalSend(event.prefix, serialized, "WHISPER", event.sender, CommPriority.Normal)
 end
 
@@ -1925,7 +1991,7 @@ function InternalRequestRowsMessageHandler(event)
         peerId = Private.peerId,
         data = rowsToSend,
     }
-    local serialized = AceSerializer:Serialize(obj)
+    local serialized = event.dbi.serializer:Serialize(obj)
     InternalSend(event.prefix, serialized, "WHISPER", event.sender, CommPriority.Normal)
 end
 
@@ -1996,9 +2062,9 @@ if enableDebugging then
                 clusterId = "TestCluster12345",
                 namespace = "MyNamespace",
                 channels = { "GUILD" },
+                onChange = function(table, key, row) end,
                 discoveryQuietPeriod = 5,
                 discoveryMaxTime = 30,
-                onChange = function(table, key, row) end,
                 onDiscoveryComplete = function(isInitial) end,
             })
             Assert.IsTable(db)
