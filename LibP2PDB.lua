@@ -54,8 +54,8 @@ local Color = {
 local CommMessageType = {
     PeerDiscoveryRequest = 1,
     PeerDiscoveryResponse = 2,
-    RequestSnapshot = 3,
-    Snapshot = 4,
+    SnapshotRequest = 3,
+    SnapshotResponse = 4,
     Digest = 5,
     RequestRows = 6,
     Rows = 7,
@@ -295,6 +295,7 @@ function LibP2PDB:NewDB(desc)
         clock = 0,
         -- Networking
         peers = {},
+        buckets = {},
         channels = desc.channels or defaultChannels,
         discoveryQuietPeriod = desc.discoveryQuietPeriod or 1.0,
         discoveryMaxTime = desc.discoveryMaxTime or 3.0,
@@ -443,7 +444,7 @@ end
 ---@param table string Name of the table to set into
 ---@param key string|number Primary key value for the row (must match table's keyType)
 ---@param row table Row data containing fields defined in the table schema
----@return boolean result Returns true on success, false otherwise
+---@return boolean success Returns true on success, false otherwise
 function LibP2PDB:Set(db, table, key, row)
     assert(IsTable(db), "db must be a table")
     assert(IsNonEmptyString(table), "table name must be a non-empty string")
@@ -469,7 +470,8 @@ end
 ---@param db LibP2PDB.DB Database instance
 ---@param table string Name of the table to update
 ---@param key string|number Primary key value for the row (must match table's keyType)
----@param updateFn function Function(currentRow) -> updatedRow
+---@param updateFn function Function(currentRow) invoked to produce the updated row data
+---@return boolean success Returns true on success, false otherwise
 function LibP2PDB:Update(db, table, key, updateFn)
     assert(IsTable(db), "db must be a table")
     assert(IsNonEmptyString(table), "table name must be a non-empty string")
@@ -490,7 +492,7 @@ function LibP2PDB:Update(db, table, key, updateFn)
     assert(existingRow, "key '" .. tostring(key) .. "' does not exist in table '" .. table .. "'")
 
     -- Call the update function to get the new row data
-    local updatedRow = updateFn(ShallowCopy(existingRow.data))
+    local updatedRow = securecallfunction(updateFn, ShallowCopy(existingRow.data))
     assert(IsTable(updatedRow), "updateFn must return a table")
 
     -- Use Set to apply the updated row (will handle validation, versioning, callbacks)
@@ -690,33 +692,8 @@ function LibP2PDB:Export(db)
     local dbi = Private.databases[db]
     assert(dbi, "db is not a recognized database instance")
 
-    -- Build export
-    local export = {
-        clock = dbi.clock,
-    }
-    local tables = {}
-    for tableName, tableData in pairs(dbi.tables) do
-        local rows = {}
-        for key, row in pairs(tableData.rows) do
-            rows[key] = {
-                data = ShallowCopy(row.data),
-                version = {
-                    clock = row.version.clock,
-                    peer = row.version.peer,
-                    tombstone = row.version.tombstone,
-                },
-            }
-        end
-        if next(rows) ~= nil then
-            tables[tableName] = {
-                rows = rows
-            }
-        end
-    end
-    if next(tables) ~= nil then
-        export.tables = tables
-    end
-    return export
+    -- Export
+    return InternalExport(dbi)
 end
 
 ---Import the database from an exported table.
@@ -735,33 +712,8 @@ function LibP2PDB:Import(db, exported)
     local dbi = Private.databases[db]
     assert(dbi, "db is not a recognized database instance")
 
-    -- Begin import
-    Private.isImporting = true
-
-    -- Merge Lamport clock
-    dbi.clock = max(dbi.clock, exported.clock)
-
-    -- Import DB
-    local results = nil
-    for incomingTableName, incomingTableData in pairs(exported.tables or {}) do
-        local ti = dbi.tables[incomingTableName]
-        if ti then
-            for incomingKey, incomingRow in pairs(incomingTableData.rows or {}) do
-                local rowSuccess, rowResult = InternalImportRow(incomingKey, incomingRow, dbi, incomingTableName, ti)
-                if not rowSuccess then
-                    -- Collect warnings for skipped rows (partial success)
-                    results = results or {}
-                    tinsert(results, tostring(rowResult))
-                end
-            end
-        end
-    end
-
-    -- End import
-    Private.isImporting = false
-
-    -- Return results
-    return true, results
+    -- Import
+    return InternalImport(dbi, exported)
 end
 
 ---Serialize the entire database to a compact string format for storage or transmission.
@@ -897,14 +849,22 @@ function LibP2PDB:RequestSnapshot(db, target)
 
     -- Send the request message
     local obj = {
-        type = CommMessageType.RequestSnapshot,
+        type = CommMessageType.SnapshotRequest,
         peerId = Private.peerId,
     }
     local serialized = AceSerializer:Serialize(obj)
     if target then
         InternalSend(dbi.clusterId, serialized, "WHISPER", target, CommPriority.Normal)
     else
-        InternalBroadcast(dbi.clusterId, serialized, dbi.channels, CommPriority.Normal)
+        -- Request snapshot from discovered peers
+        for _, peerData in pairs(dbi.peers) do
+            if peerData.isNew then
+                peerData.isNew = nil
+                InternalSend(dbi.clusterId, serialized, "WHISPER", peerData.name, CommPriority.Normal)
+            elseif peerData.clock > dbi.clock then
+                InternalSend(dbi.clusterId, serialized, "WHISPER", peerData.name, CommPriority.Normal)
+            end
+        end
     end
 end
 
@@ -1152,6 +1112,68 @@ function InternalFireCallbacks(dbi, tableName, t, key, data)
     for callback in pairs(t.subscribers) do
         securecallfunction(callback, key, data)
     end
+end
+
+function InternalExport(dbi)
+    local export = {
+        clock = dbi.clock,
+    }
+
+    local tables = {}
+    for tableName, tableData in pairs(dbi.tables) do
+        local rows = {}
+        for key, row in pairs(tableData.rows) do
+            rows[key] = {
+                data = ShallowCopy(row.data),
+                version = {
+                    clock = row.version.clock,
+                    peer = row.version.peer,
+                    tombstone = row.version.tombstone,
+                },
+            }
+        end
+        if next(rows) ~= nil then
+            tables[tableName] = {
+                rows = rows
+            }
+        end
+    end
+
+    if next(tables) ~= nil then
+        export.tables = tables
+    end
+
+    return export
+end
+
+function InternalImport(dbi, exported)
+    -- Begin import
+    Private.isImporting = true
+
+    -- Merge Lamport clock
+    dbi.clock = max(dbi.clock, exported.clock)
+
+    -- Import DB
+    local results = nil
+    for incomingTableName, incomingTableData in pairs(exported.tables or {}) do
+        local ti = dbi.tables[incomingTableName]
+        if ti then
+            for incomingKey, incomingRow in pairs(incomingTableData.rows or {}) do
+                local rowSuccess, rowResult = InternalImportRow(incomingKey, incomingRow, dbi, incomingTableName, ti)
+                if not rowSuccess then
+                    -- Collect warnings for skipped rows (partial success)
+                    results = results or {}
+                    tinsert(results, tostring(rowResult))
+                end
+            end
+        end
+    end
+
+    -- End import
+    Private.isImporting = false
+
+    -- Return results
+    return true, results
 end
 
 function InternalImportRow(incomingKey, incomingRow, dbi, incomingTableName, t)
@@ -1632,8 +1654,21 @@ function InternalOnCommReceived(prefix, message, channel, sender)
         return
     end
 
-    -- Build context
-    local ctx = {
+    -- Get the database instance for this clusterId
+    local db = LibP2PDB:GetDB(prefix)
+    if not db then
+        Debug(format("received message for unknown clusterId '%s' from %s on channel %s", tostring(prefix), tostring(sender), tostring(channel)))
+        return
+    end
+
+    local dbi = Private.databases[db]
+    if not dbi then
+        return
+    end
+
+    -- Create communication event
+    local event = {
+        dbi = dbi,
         type = deserialized.type,
         peerId = deserialized.peerId,
         prefix = prefix,
@@ -1643,96 +1678,94 @@ function InternalOnCommReceived(prefix, message, channel, sender)
         data = deserialized.data,
     }
 
-    -- Dispatch based on message type
-    if deserialized.type == CommMessageType.PeerDiscoveryRequest then
-        InternalPeerDiscoveryRequestHandler(ctx)
-    elseif deserialized.type == CommMessageType.PeerDiscoveryResponse then
-        InternalPeerDiscoveryResponseHandler(ctx)
-    elseif deserialized.type == CommMessageType.RequestSnapshot then
-        InternalRequestSnapshotMessageHandler(ctx)
-    elseif deserialized.type == CommMessageType.Snapshot then
-        InternalSnapshotMessageHandler(ctx)
-    elseif deserialized.type == CommMessageType.Digest then
-        InternalDigestMessageHandler(ctx)
-    elseif deserialized.type == CommMessageType.RequestRows then
-        InternalRequestRowsMessageHandler(ctx)
-    elseif deserialized.type == CommMessageType.Rows then
-        InternalRowsMessageHandler(ctx)
-    else
-        Debug(format("received unknown message type %d from %s on channel %s", deserialized.type, tostring(sender), tostring(channel)))
+    -- Get or create bucket
+    local bucket = dbi.buckets[event.type]
+    if not bucket then
+        bucket = {}
+        dbi.buckets[event.type] = bucket
     end
-end
 
-function InternalPeerDiscoveryRequestHandler(ctx)
-    -- Get the DB instance
-    local db = LibP2PDB:GetDB(ctx.prefix)
-    if not db then
-        Debug(format("received peer discovery request for unknown clusterId '%s' from %s on channel %s", tostring(ctx.prefix), tostring(ctx.sender), tostring(ctx.channel)))
+    -- If we already have a timer running for this peer, ignore it
+    if bucket[event.peerId] then
         return
     end
 
+    -- Create a timer to process this message after 1 second
+    bucket[event.peerId] = C_Timer.NewTimer(1.0, function()
+        -- Process the message
+        InternalDispatchMessage(event)
+
+        -- Clean up
+        bucket[event.peerId] = nil
+
+        -- Clean up bucket if empty
+        if not next(bucket) then
+            dbi.buckets[event.type] = nil
+        end
+    end)
+end
+
+function InternalDispatchMessage(event)
+    if event.type == CommMessageType.PeerDiscoveryRequest then
+        InternalPeerDiscoveryRequestHandler(event)
+    elseif event.type == CommMessageType.PeerDiscoveryResponse then
+        InternalPeerDiscoveryResponseHandler(event)
+    elseif event.type == CommMessageType.SnapshotRequest then
+        InternalRequestSnapshotMessageHandler(event)
+    elseif event.type == CommMessageType.SnapshotResponse then
+        InternalSnapshotMessageHandler(event)
+    elseif event.type == CommMessageType.Digest then
+        InternalDigestMessageHandler(event)
+    elseif event.type == CommMessageType.RequestRows then
+        InternalRequestRowsMessageHandler(event)
+    elseif event.type == CommMessageType.Rows then
+        InternalRowsMessageHandler(event)
+    else
+        Debug(format("received unknown message type %d from %s on channel %s", event.type, tostring(event.sender), tostring(event.channel)))
+    end
+end
+
+function InternalPeerDiscoveryRequestHandler(event)
     -- Send peer discovery response
     local obj = {
         type = CommMessageType.PeerDiscoveryResponse,
         peerId = Private.peerId,
-        data = Private.databases[db].clock,
+        data = event.dbi.clock,
     }
     local serialized = AceSerializer:Serialize(obj)
-    InternalSend(ctx.prefix, serialized, "WHISPER", ctx.sender, CommPriority.Low)
+    InternalSend(event.prefix, serialized, "WHISPER", event.sender, CommPriority.Low)
 end
 
-function InternalPeerDiscoveryResponseHandler(ctx)
-    -- Get the DB instance
-    local db = LibP2PDB:GetDB(ctx.prefix)
-    if not db then
-        Debug(format("received peer discovery response for unknown clusterId '%s' from %s on channel %s", tostring(ctx.prefix), tostring(ctx.sender), tostring(ctx.channel)))
-        return
-    end
-
-    local dbi = Private.databases[db]
-    assert(dbi, "db is not a recognized database instance")
-
+function InternalPeerDiscoveryResponseHandler(event)
     -- Update last discovery time
-    if dbi.onDiscoveryComplete then
-        dbi.lastDiscoveryResponseTime = GetTime()
+    if event.dbi.onDiscoveryComplete then
+        event.dbi.lastDiscoveryResponseTime = GetTime()
     end
 
     -- Store peer info
-    if not dbi.peers[ctx.peerId] then
-        dbi.peers[ctx.peerId] = {
-            name = ctx.sender,
+    if not event.dbi.peers[event.peerId] then
+        event.dbi.peers[event.peerId] = {
+            isNew = true,
+            name = event.sender,
         }
     end
-    dbi.peers[ctx.peerId].clock = ctx.data
+    event.dbi.peers[event.peerId].clock = event.data
 end
 
-function InternalRequestSnapshotMessageHandler(ctx)
-    -- Get the DB instance
-    local db = LibP2PDB:GetDB(ctx.prefix)
-    if not db then
-        Debug(format("received request snapshot message for unknown clusterId '%s' from %s on channel %s", tostring(ctx.prefix), tostring(ctx.sender), tostring(ctx.channel)))
-        return
-    end
-
+function InternalRequestSnapshotMessageHandler(event)
     local obj = {
-        type = CommMessageType.Snapshot,
+        type = CommMessageType.SnapshotResponse,
         peerId = Private.peerId,
-        data = LibP2PDB:Export(db),
+        data = InternalExport(event.dbi),
     }
     local serialized = AceSerializer:Serialize(obj)
-    InternalSend(ctx.prefix, serialized, "WHISPER", ctx.sender, CommPriority.Low)
+    InternalSend(event.prefix, serialized, "WHISPER", event.sender, CommPriority.Low)
 end
 
-function InternalSnapshotMessageHandler(ctx)
-    local db = LibP2PDB:GetDB(ctx.prefix)
-    if not db then
-        Debug(format("received snapshot message for unknown clusterId '%s' from %s on channel %s", tostring(ctx.prefix), tostring(ctx.sender), tostring(ctx.channel)))
-        return
-    end
-
-    local success, errors = LibP2PDB:Import(db, ctx.data)
+function InternalSnapshotMessageHandler(event)
+    local success, errors = InternalImport(event.dbi, event.data)
     if not success then
-        Debug(format("failed to import snapshot from %s on channel %s", tostring(ctx.sender), tostring(ctx.channel)))
+        Debug(format("failed to import snapshot from %s on channel %s", tostring(event.sender), tostring(event.channel)))
         if errors then
             for i, err in ipairs(errors) do
                 Debug(format("%d: %s", i, tostring(err)))
@@ -1741,26 +1774,17 @@ function InternalSnapshotMessageHandler(ctx)
     end
 end
 
-function InternalDigestMessageHandler(ctx)
-    local db = LibP2PDB:GetDB(ctx.prefix)
-    if not db then
-        Debug(format("received digest message for unknown clusterId '%s' from %s on channel %s", tostring(ctx.prefix), tostring(ctx.sender), tostring(ctx.channel)))
-        return
-    end
-
-    local dbi = Private.databases[db]
-    assert(dbi, "db is not a recognized database instance")
-
+function InternalDigestMessageHandler(event)
     -- Compare digest and build missing table
     local missingTables = {}
-    for tableName, incomingTable in pairs(ctx.data.tables or {}) do
-        local t = dbi.tables[tableName]
-        if t then
+    for tableName, incomingTable in pairs(event.data.tables or {}) do
+        local ti = event.dbi.tables[tableName]
+        if ti then
             local missingRows = {}
 
             -- Check keys present in digest
             for key, incomingVersion in pairs(incomingTable) do
-                local localRow = t.rows[key]
+                local localRow = ti.rows[key]
                 if not localRow then
                     -- We are missing this row, request it from sender
                     missingRows[key] = true
@@ -1791,27 +1815,18 @@ function InternalDigestMessageHandler(ctx)
         data = missingTables,
     }
     local serialized = AceSerializer:Serialize(obj)
-    InternalSend(ctx.prefix, serialized, "WHISPER", ctx.sender, CommPriority.Normal)
+    InternalSend(event.prefix, serialized, "WHISPER", event.sender, CommPriority.Normal)
 end
 
-function InternalRequestRowsMessageHandler(ctx)
-    local db = LibP2PDB:GetDB(ctx.prefix)
-    if not db then
-        Debug(format("received request rows message for unknown clusterId '%s' from %s on channel %s", tostring(ctx.prefix), tostring(ctx.sender), tostring(ctx.channel)))
-        return
-    end
-
-    local dbi = Private.databases[db]
-    assert(dbi, "db is not a recognized database instance")
-
+function InternalRequestRowsMessageHandler(event)
     -- Build rows to send
     local rowsToSend = {}
-    for tableName, requestedRows in pairs(ctx.data or {}) do
-        local t = dbi.tables[tableName]
-        if t then
+    for tableName, requestedRows in pairs(event.data or {}) do
+        local ti = event.dbi.tables[tableName]
+        if ti then
             local tableRows = {}
             for key, _ in pairs(requestedRows) do
-                local row = t.rows[key]
+                local row = ti.rows[key]
                 if row then
                     -- No need to copy here, we'll just be reading to serialize
                     tableRows[key] = row
@@ -1836,27 +1851,18 @@ function InternalRequestRowsMessageHandler(ctx)
         data = rowsToSend,
     }
     local serialized = AceSerializer:Serialize(obj)
-    InternalSend(ctx.prefix, serialized, "WHISPER", ctx.sender, CommPriority.Normal)
+    InternalSend(event.prefix, serialized, "WHISPER", event.sender, CommPriority.Normal)
 end
 
-function InternalRowsMessageHandler(ctx)
-    local db = LibP2PDB:GetDB(ctx.prefix)
-    if not db then
-        Debug(format("received rows message for unknown clusterId '%s' from %s on channel %s", tostring(ctx.prefix), tostring(ctx.sender), tostring(ctx.channel)))
-        return
-    end
-
-    local dbi = Private.databases[db]
-    assert(dbi, "db is not a recognized database instance")
-
+function InternalRowsMessageHandler(event)
     -- Import received rows
-    for incomingTableName, incomingTableData in pairs(ctx.data or {}) do
-        local t = dbi.tables[incomingTableName]
-        if t then
+    for incomingTableName, incomingTableData in pairs(event.data or {}) do
+        local ti = event.dbi.tables[incomingTableName]
+        if ti then
             for incomingKey, incomingRow in pairs(incomingTableData or {}) do
-                local importResult, importError = InternalImportRow(incomingKey, incomingRow, dbi, incomingTableName, t)
+                local importResult, importError = InternalImportRow(incomingKey, incomingRow, event.dbi, incomingTableName, ti)
                 if not importResult then
-                    Debug(format("failed to import row with key '%s' in table '%s' from %s on channel %s: %s", tostring(incomingKey), incomingTableName, tostring(ctx.sender), tostring(ctx.channel), tostring(importError)))
+                    Debug(format("failed to import row with key '%s' in table '%s' from %s on channel %s: %s", tostring(incomingKey), incomingTableName, tostring(event.sender), tostring(event.channel), tostring(importError)))
                 end
             end
         end
@@ -2403,7 +2409,7 @@ if enableDebugging then
             Assert.Throws(function() LibP2PDB:Update(db, "Users", "user1", "invalid") end)
         end,
 
-        Update_UpdateFunctionRowIsACopy = function()
+        Update_UpdateFunctionRowParameter_IsNotModified = function()
             local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             LibP2PDB:Insert(db, "Users", 1, { name = "Bob", age = 25 })
