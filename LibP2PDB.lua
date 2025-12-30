@@ -3132,8 +3132,10 @@ if enableDebugging then
             LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             local schema = LibP2PDB:GetSchema(db, "Users")
             Assert.IsTable(schema)
-            Assert.AreEqual(schema.name, "string")
-            Assert.AreEqual(schema.age, "number")
+            if schema then
+                Assert.AreEqual(schema.name, "string")
+                Assert.AreEqual(schema.age, "number")
+            end
         end,
 
         GetSchema_DBIsInvalid_Throws = function()
