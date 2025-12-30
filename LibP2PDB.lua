@@ -40,6 +40,8 @@ local IsInGuild, IsInRaid, IsInGroup, IsInInstance = IsInGuild, IsInRaid, IsInGr
 -- Constants
 ------------------------------------------------------------------------------------------------------------------------
 
+local enableDebugging = false
+
 local Color = {
     Ace = "ff33ff99",
     Debug = "ff00ffff",
@@ -73,7 +75,6 @@ local function C(color, text)
     return "|c" .. color .. text .. "|r"
 end
 
-local enableDebugging = false
 local function Debug(...)
     if enableDebugging then
         print(C(Color.Ace, "LibP2PDB") .. ": " .. C(Color.Debug, "[DEBUG]") .. " " .. strjoin(" ", tostringall(...)))
