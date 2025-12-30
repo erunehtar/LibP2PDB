@@ -1305,20 +1305,22 @@ function InternalSerialize(dbi)
                         for _, fieldInfo in ipairs(sortedSchema or {}) do
                             local fieldName = fieldInfo[1]
                             local fieldValue = row.data[fieldName]
-                            if fieldValue ~= nil then
-                                if #parts > 0 and parts[#parts] ~= "{" then
-                                    tinsert(parts, ";")
-                                end
-                                -- Skip field name, just add value
-                                if type(fieldValue) == "number" then
-                                    tinsert(parts, tostring(NumberToHex(fieldValue)))
-                                elseif type(fieldValue) == "boolean" then
-                                    tinsert(parts, fieldValue and "1" or "0")
-                                elseif type(fieldValue) == "string" then
-                                    tinsert(parts, fieldValue)
-                                else
-                                    assert(false, "unsupported field value type: " .. type(fieldValue))
-                                end
+                            -- Always add separator except for first field
+                            if #parts > 0 and parts[#parts] ~= "{" then
+                                tinsert(parts, ";")
+                            end
+                            -- Always serialize all fields, use \0 marker for nil
+                            if fieldValue == nil then
+                                -- \0 represents nil (unlikely to appear in normal strings)
+                                tinsert(parts, "\0")
+                            elseif type(fieldValue) == "number" then
+                                tinsert(parts, tostring(NumberToHex(fieldValue)))
+                            elseif type(fieldValue) == "boolean" then
+                                tinsert(parts, fieldValue and "1" or "0")
+                            elseif type(fieldValue) == "string" then
+                                tinsert(parts, fieldValue)
+                            else
+                                assert(false, "unsupported field value type: " .. type(fieldValue))
                             end
                         end
                     else
@@ -1490,18 +1492,38 @@ function InternalDeserialize(dbi, str)
                             for fieldIndex = 1, #dataEntry do
                                 local fieldToken = dataEntry[fieldIndex]
                                 local fieldValue
-                                if strmatch(tostring(fieldToken), "^[0-9a-fA-F]+$") then
-                                    fieldValue = HexToNumber("0x" .. tostring(fieldToken))
-                                elseif tostring(fieldToken) == "1" then
-                                    fieldValue = true
-                                elseif tostring(fieldToken) == "0" then
-                                    fieldValue = false
-                                else
-                                    fieldValue = tostring(fieldToken)
-                                end
-                                -- Map back to field name using sorted schema
-                                if sortedSchema[fieldIndex] then
-                                    local fieldName = sortedSchema[fieldIndex][1]
+
+                                -- Get schema info for this field
+                                local fieldInfo = sortedSchema[fieldIndex]
+                                if fieldInfo then
+                                    local fieldName = fieldInfo[1]
+                                    local allowedTypes = fieldInfo[2]
+
+                                    -- Normalize allowed types to a table
+                                    local typeList = {}
+                                    if type(allowedTypes) == "string" then
+                                        typeList[allowedTypes] = true
+                                    elseif type(allowedTypes) == "table" then
+                                        for _, t in ipairs(allowedTypes) do
+                                            typeList[t] = true
+                                        end
+                                    end
+
+                                    -- Parse based on schema and value
+                                    if typeList["nil"] and tostring(fieldToken) == "\0" then
+                                        -- \0 marker represents nil
+                                        fieldValue = nil
+                                    elseif typeList["number"] and strmatch(tostring(fieldToken), "^[0-9a-fA-F]+$") then
+                                        -- Parse as number if schema allows and looks like hex
+                                        fieldValue = HexToNumber("0x" .. tostring(fieldToken))
+                                    elseif typeList["boolean"] and (tostring(fieldToken) == "1" or tostring(fieldToken) == "0") then
+                                        -- Parse as boolean if schema allows and is 0 or 1
+                                        fieldValue = (tostring(fieldToken) == "1")
+                                    elseif typeList["string"] then
+                                        -- Parse as string if schema allows
+                                        fieldValue = tostring(fieldToken)
+                                    end
+
                                     data[fieldName] = fieldValue
                                 end
                             end
@@ -2789,6 +2811,34 @@ if enableDebugging then
                 serialized == expected4 or serialized == expected5 or serialized == expected6)
         end,
 
+        Serialize_EmptyStringVsNil = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Config", keyType = "string", schema = { key = "string", value = { "string", "nil" } } })
+            LibP2PDB:Insert(db, "Config", "empty", { key = "empty", value = "" })
+            LibP2PDB:Insert(db, "Config", "null", { key = "null", value = nil })
+
+            local serialized = LibP2PDB:Serialize(db)
+            Assert.IsString(serialized)
+
+            -- Verify empty string is present (not \0)
+            Assert.IsTrue(serialized:find("empty;") ~= nil, "should contain 'empty;' for empty string")
+
+            -- Verify \0 is present for nil
+            Assert.IsTrue(serialized:find("\0") ~= nil, "should contain \\0 for nil value")
+        end,
+
+        Serialize_OptionalFields = function()
+            local db = LibP2PDB:NewDB({ clusterId = "c", namespace = "n" })
+            LibP2PDB:NewTable(db, { name = "Config", keyType = "string", schema = { key = "string", value = { "string", "nil" } } })
+            LibP2PDB:Insert(db, "Config", "theme", { key = "theme", value = "dark" })
+            LibP2PDB:Insert(db, "Config", "sound", { key = "sound", value = nil })
+
+            local serialized = LibP2PDB:Serialize(db)
+            Assert.IsString(serialized)
+            -- Verify \0 is present in serialized string for nil value
+            Assert.IsTrue(serialized:find("\0") ~= nil, "serialized string should contain \\0 for nil value")
+        end,
+
         Serialize_DBIsInvalid_Throws = function()
             Assert.Throws(function() LibP2PDB:Serialize(nil) end)
             Assert.Throws(function() LibP2PDB:Serialize(123) end)
@@ -2988,6 +3038,25 @@ if enableDebugging then
 
             -- Row should be skipped
             Assert.IsNil(Private.databases[db].tables["Users"].rows["key"])
+        end,
+
+        Deserialize_OptionalFields = function()
+            local db1 = LibP2PDB:NewDB({ clusterId = "c1", namespace = "n1" })
+            LibP2PDB:NewTable(db1, { name = "Config", keyType = "string", schema = { key = "string", value = { "string", "nil" } } })
+            LibP2PDB:Insert(db1, "Config", "theme", { key = "theme", value = "dark" })
+            LibP2PDB:Insert(db1, "Config", "sound", { key = "sound", value = nil })
+
+            local serialized = LibP2PDB:Serialize(db1)
+
+            local db2 = LibP2PDB:NewDB({ clusterId = "c2", namespace = "n2" })
+            LibP2PDB:NewTable(db2, { name = "Config", keyType = "string", schema = { key = "string", value = { "string", "nil" } } })
+
+            local success, results = LibP2PDB:Deserialize(db2, serialized)
+            Assert.IsTrue(success)
+            Assert.IsNil(results)
+
+            Assert.AreEqual(LibP2PDB:Get(db2, "Config", "theme"), { key = "theme", value = "dark" })
+            Assert.AreEqual(LibP2PDB:Get(db2, "Config", "sound"), { key = "sound", value = nil })
         end,
 
         Deserialize_DBIsInvalid_Throws = function()
