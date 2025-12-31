@@ -60,6 +60,7 @@ local Color = {
     Green = "ff00ff00"
 }
 
+---@enum LibP2PDB.CommMessageType Communication message types
 local CommMessageType = {
     PeerDiscoveryRequest = 1,
     PeerDiscoveryResponse = 2,
@@ -70,6 +71,7 @@ local CommMessageType = {
     Rows = 7,
 }
 
+---@enum LibP2PDB.CommPriority Communication priorities
 local CommPriority = {
     Low = "BULK",
     Normal = "NORMAL",
@@ -236,6 +238,8 @@ end
 -- Private State
 ------------------------------------------------------------------------------------------------------------------------
 
+local Internal = {}
+
 local function NewPrivate()
     local private = {}
     private.playerName = assert(UnitName("player"), "unable to get player name")
@@ -243,7 +247,6 @@ local function NewPrivate()
     private.peerId = strsub(private.playerGUID, 8) -- skip "Player-" prefix
     private.databases = setmetatable({}, { __mode = "k" })
     private.prefixes = {}
-    private.OnCommReceived = function(self, ...) InternalOnCommReceived(...) end
     return private
 end
 local Private = NewPrivate()
@@ -260,17 +263,42 @@ local Private = NewPrivate()
 ---@field Compress fun(self: LibP2PDB.Compressor, str: string): string Compresses a string
 ---@field Decompress fun(self: LibP2PDB.Compressor, str: string): string? Decompresses a string
 
+---@class LibP2PDB.Encoder Encoder interface for encoding/decoding data
+---@field EncodeChannel fun(self: LibP2PDB.Encoder, str: string): string Encodes a string for safe transmission over chat channels
+---@field DecodeChannel fun(self: LibP2PDB.Encoder, str: string): string? Decodes a string received from chat channels
+---@field EncodePrint fun(self: LibP2PDB.Encoder, str: string): string Encodes a string for safe printing in chat windows
+---@field DecodePrint fun(self: LibP2PDB.Encoder, str: string): string? Decodes a string received from chat windows
+
 ---@class LibP2PDB.DBDesc Description for creating a new database instance
 ---@field prefix string Unique communication prefix for the database (max 16 chars)
 ---@field channels table? List of custom channels to use for broadcasts, in addition to default channels (GUILD, RAID, PARTY, YELL)
 ---@field serializer LibP2PDB.Serializer? Custom serializer for encoding/decoding data (default: LibSerialize or AceSerializer if available)
 ---@field compressor LibP2PDB.Compressor? Custom compressor for compressing/decompressing data (default: LibDeflate if available)
+---@field encoder LibP2PDB.Encoder? Custom encoder for encoding/decoding data for chat channels and print (default: LibDeflate if available)
 ---@field onChange function? Callback function(table, key, row) invoked on any row change
 ---@field discoveryQuietPeriod number? Seconds of quiet time with no new peers before considering discovery complete (default: 1.0)
 ---@field discoveryMaxTime number? Maximum seconds to wait for peer discovery before considering it complete (default: 3.0)
 ---@field onDiscoveryComplete function? Callback function(isInitial) invoked when peers discovery completes
 
----@class LibP2PDB.DB Database instance (opaque handle)
+---@class LibP2PDB.DB Database (opaque handle)
+
+---@class LibP2PDB.DBInstance Internal database instance
+---@field prefix string Unique communication prefix
+---@field clock number Lamport clock for versioning
+---@field channels table? List of custom channels for broadcasts
+---@field discoveryQuietPeriod number Seconds of quiet time for discovery completion
+---@field discoveryMaxTime number Maximum time for discovery completion
+---@field serializer LibP2PDB.Serializer Serializer interface
+---@field compressor LibP2PDB.Compressor Compressor interface
+---@field encoder LibP2PDB.Encoder Encoder interface
+---@field peers table Known peers for this session
+---@field buckets table Communication event buckets for burst control
+---@field tables table Defined tables in the database
+---@field onChange fun(tableName: string, key: number|string, data: table?)? Callback for row changes
+---@field onDiscoveryComplete fun(isInitial: boolean)? Callback for discovery completion
+---@field frame Frame Frame used to register OnUpdate handler
+---@field discoveryStartTime number Time when discovery started
+---@field lastDiscoveryResponseTime number Time when last discovery response was received
 
 ---Create a new database instance for peer-to-peer synchronization.
 ---Each database is identified by a unique prefix and operates independently.
@@ -283,6 +311,7 @@ function LibP2PDB:NewDB(desc)
     assert(desc.channels == nil or IsNonEmptyTable(desc.channels), "desc.channels must be a non-empty table if provided")
     assert(desc.serializer == nil or (IsTable(desc.serializer) and IsFunction(desc.serializer.Serialize) and IsFunction(desc.serializer.Deserialize)), "desc.serializer must be a serializer interface if provided")
     assert(desc.compressor == nil or (IsTable(desc.compressor) and IsFunction(desc.compressor.Compress) and IsFunction(desc.compressor.Decompress)), "desc.compressor must be a compressor interface if provided")
+    assert(desc.encoder == nil or (IsTable(desc.encoder) and IsFunction(desc.encoder.EncodeChannel) and IsFunction(desc.encoder.DecodeChannel) and IsFunction(desc.encoder.EncodePrint) and IsFunction(desc.encoder.DecodePrint)), "desc.encoder must be an encoder interface if provided")
     assert(desc.onChange == nil or IsFunction(desc.onChange), "desc.onChange must be a function if provided")
     assert(desc.discoveryQuietPeriod == nil or (IsNumber(desc.discoveryQuietPeriod) and desc.discoveryQuietPeriod > 0), "desc.discoveryQuietPeriod must be a non-negative number if provided")
     assert(desc.discoveryMaxTime == nil or (IsNumber(desc.discoveryMaxTime) and desc.discoveryMaxTime > 0), "desc.discoveryMaxTime must be a non-negative number if provided")
@@ -318,7 +347,7 @@ function LibP2PDB:NewDB(desc)
         onChange = desc.onChange,
         onDiscoveryComplete = desc.onDiscoveryComplete,
         -- Access control
-        writePolicy = nil,
+        --writePolicy = nil,
     }
 
     -- Internal registry
@@ -369,6 +398,44 @@ function LibP2PDB:NewDB(desc)
         assert(decompressed == testString, "compressor provided in desc.compressor is invalid")
     end
 
+    -- Setup default encoder if none provided
+    if not dbi.encoder then
+        if LibDeflate then
+            dbi.encoder = {
+                -- Create custom codec that rejects \000 (NULL), \010 (LF), and \013 (CR).
+                -- This is because SAY/YELL channels cannot handle LF and CR characters in
+                -- addition to NULL and will just truncate the message if they are present.
+                channelCodec = LibDeflate:CreateCodec("\000\010\013", "\001", ""),
+                EncodeChannel = function(self, str)
+                    return self.channelCodec:Encode(str)
+                end,
+                DecodeChannel = function(self, str)
+                    return self.channelCodec:Decode(str)
+                end,
+                EncodePrint = function(self, str)
+                    return LibDeflate:EncodeForPrint(str)
+                end,
+                DecodePrint = function(self, str)
+                    return LibDeflate:DecodeForPrint(str)
+                end,
+            }
+        else
+            error("encoder required but none found; provide custom encoder via desc.encoder")
+        end
+    end
+
+    -- Validate encoding works
+    do
+        local testString = "This is a test string for encoding.\000\010\013"
+        local encodedChannel = dbi.encoder:EncodeChannel(testString)
+        local decodedChannel = dbi.encoder:DecodeChannel(encodedChannel)
+        assert(decodedChannel == testString, "encoder provided in desc.encoder is invalid for channel encoding")
+
+        local encodedPrint = dbi.encoder:EncodePrint(testString)
+        local decodedPrint = dbi.encoder:DecodePrint(encodedPrint)
+        assert(decodedPrint == testString, "encoder provided in desc.encoder is invalid for print encoding")
+    end
+
     -- Set up OnUpdate handler
     if dbi.onDiscoveryComplete then
         dbi.frame = CreateFrame("Frame")
@@ -376,7 +443,7 @@ function LibP2PDB:NewDB(desc)
     end
 
     -- Register comm prefix
-    AceComm.RegisterComm(Private, desc.prefix)
+    AceComm.RegisterComm(Internal, desc.prefix)
     assert(C_ChatInfo.IsAddonMessagePrefixRegistered(desc.prefix), "failed to register addon message prefix '" .. desc.prefix .. "'")
 
     return db
@@ -773,41 +840,8 @@ function LibP2PDB:Import(db, exported)
     return InternalImport(dbi, exported)
 end
 
----Serialize the entire database to a compact string format for storage or transmission.
----
----Format: {clock;table{key{{value;...}clock;peer[;1]};...};...}
----
----Structure:
----  - Numbers encoded as hex (lowercase, no leading zeros) to save space
----  - Braces {} delimit nested structures
----  - Semicolons ; separate fields, tables, and rows (no trailing semicolons)
----  - Field values only (no names) in alphabetical schema order
----
----Layout:
----  Database level:
----    {clock;...tables...}
----
----  Table level (repeating, separated by ';'):
----    tableName{...rows...};...
----
----  Row level (repeating, separated by ';'):
----    key{{...data...}clock;peer[;tombstone]};...
----
----  Data level:
----    {value1;value2;...}  - Field values in alphabetical schema order
----
----  Version metadata:
----    clock                - Row version clock (hex number)
----    peer                 - Peer ID (or "=" if same as key)
----    [;1]                 - Tombstone flag (only if row is deleted)
----
----Example: {1a;Users{alice{{Alice,1e}14;peer-123};bob{{Bob,19}15;peer-456;1};peer-789{{Roger,2a}16;=}}}
----  - Database with clock=26 (0x1a)
----  - Table "Users" with 3 rows
----  - Row key="alice", data={name="Alice", age=30 (0x1e)}, version={clock=20 (0x14), peer="peer-123"}
----  - Row key="bob", data={name="Bob", age=25 (0x19)}, version={clock=21 (0x15), peer="peer-456", tombstone=true}
----  - Row key="peer-789", data={name="Roger", age=42 (0x2a)}, version={clock=22 (0x16), peer="=" (same as key)}
----
+---Serialize the entire database to a compact binary string format for storage.
+---The serialized string format is not suited for direct transmission over chat channels.
 ---@param db LibP2PDB.DB Database instance
 ---@return string serialized The serialized database string
 function LibP2PDB:Serialize(db)
@@ -821,7 +855,7 @@ function LibP2PDB:Serialize(db)
     return InternalSerialize(dbi)
 end
 
----Deserialize a database from a compact string format.
+---Deserialize an entire database from a compact binary string format.
 ---Merges the deserialized data with existing data based on version metadata.
 ---Validates incoming data against table definitions, skipping invalid entries.
 ---@param db LibP2PDB.DB Database instance
@@ -884,8 +918,7 @@ function LibP2PDB:DiscoverPeers(db)
         type = CommMessageType.PeerDiscoveryRequest,
         peerId = Private.peerId,
     }
-    local serialized = dbi.serializer:Serialize(obj)
-    InternalBroadcast(dbi.prefix, serialized, dbi.channels, CommPriority.Low)
+    Internal:Broadcast(dbi, obj, dbi.channels, CommPriority.Low)
 
     -- Record the time of the peer discovery request
     if dbi.onDiscoveryComplete then
@@ -910,17 +943,16 @@ function LibP2PDB:RequestSnapshot(db, target)
         type = CommMessageType.SnapshotRequest,
         peerId = Private.peerId,
     }
-    local serialized = dbi.serializer:Serialize(obj)
     if target then
-        InternalSend(dbi.prefix, serialized, "WHISPER", target, CommPriority.Normal)
+        Internal:Send(dbi, obj, "WHISPER", target, CommPriority.Normal)
     else
         -- Request snapshot from discovered peers
         for _, peerData in pairs(dbi.peers) do
             if peerData.isNew then
                 peerData.isNew = nil
-                InternalSend(dbi.prefix, serialized, "WHISPER", peerData.name, CommPriority.Normal)
+                Internal:Send(dbi, obj, "WHISPER", peerData.name, CommPriority.Normal)
             elseif peerData.clock > dbi.clock then
-                InternalSend(dbi.prefix, serialized, "WHISPER", peerData.name, CommPriority.Normal)
+                Internal:Send(dbi, obj, "WHISPER", peerData.name, CommPriority.Normal)
             end
         end
     end
@@ -938,14 +970,13 @@ function LibP2PDB:SyncNow(db)
     -- Build digest
     local digest = InternalBuildDigest(dbi)
 
-    -- Send the digest to all peers
+    -- Broadcast the digest
     local obj = {
         type = CommMessageType.Digest,
         peerId = Private.peerId,
         data = digest,
     }
-    local serialized = dbi.serializer:Serialize(obj)
-    InternalBroadcast(dbi.prefix, serialized, dbi.channels, CommPriority.Normal)
+    Internal:Broadcast(dbi, obj, dbi.channels, CommPriority.Normal)
 end
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -1426,18 +1457,30 @@ function InternalSerialize(dbi)
         end
     end
 
-    -- Serialize the root array to a compact binary string
-    return dbi.serializer:Serialize(rootArray)
+    -- Serialize the root array to a compact binary string format for storage
+    local serialized = dbi.serializer:Serialize(rootArray)
+    local compressed = dbi.compressor:Compress(serialized)
+    local encoded = dbi.encoder:EncodePrint(compressed)
+    return encoded
 end
 
-function InternalDeserialize(dbi, str)
-    -- First, deserialize the binary string back to array structure
-    local success, rootArray = dbi.serializer:Deserialize(str)
-    if not success then
-        return nil, { "failed to deserialize: invalid format" }
+function InternalDeserialize(dbi, encoded)
+    local compressed = dbi.encoder:DecodePrint(encoded)
+    if not compressed then
+        return nil, { "failed to decode serialized database string" }
     end
 
-    if not IsTable(rootArray) or not IsNonEmptyTable(rootArray) then
+    local serialized = dbi.compressor:Decompress(compressed)
+    if not serialized then
+        return nil, { "failed to decompress serialized database string" }
+    end
+
+    local success, rootArray = dbi.serializer:Deserialize(serialized)
+    if not success or not rootArray then
+        return nil, { "failed to deserialize serialized database string" }
+    end
+
+    if not IsNonEmptyTable(rootArray) then
         return nil, { "invalid database structure: missing root data" }
     end
 
@@ -1605,32 +1648,102 @@ function InternalBuildDigest(dbi)
     return digest
 end
 
-function InternalSend(prefix, message, channel, target, priority)
-    Debug(format("sending %d bytes, prefix=%s, channel=%s, target=%s", #message, tostring(prefix), tostring(channel), tostring(target)))
-    AceComm.SendCommMessage(Private, prefix, message, channel, target, priority)
+---@param dbi LibP2PDB.DBInstance
+---@param data any
+---@param channel string
+---@param target string?
+---@param priority LibP2PDB.CommPriority
+function Internal:Send(dbi, data, channel, target, priority)
+    local serialized = dbi.serializer:Serialize(data)
+    if not serialized then
+        Debug(format("failed to serialize data for prefix '%s'", tostring(dbi.prefix)))
+        return
+    end
+
+    local compressed = dbi.compressor:Compress(serialized)
+    if not compressed then
+        Debug(format("failed to compress data for prefix '%s'", tostring(dbi.prefix)))
+        return
+    end
+
+    local encoded = dbi.encoder:EncodeChannel(compressed)
+    if not encoded then
+        Debug(format("failed to encode data for prefix '%s'", tostring(dbi.prefix)))
+        return
+    end
+
+    if target then
+        Debug(format("sending %d bytes on prefix '%s' channel '%s' target '%s'", #encoded, tostring(dbi.prefix), tostring(channel), tostring(target)))
+    else
+        Debug(format("sending %d bytes on prefix '%s' channel '%s'", #encoded, tostring(dbi.prefix), tostring(channel)))
+    end
+
+    ---@cast priority "ALERT"|"BULK"|"NORMAL"
+    AceComm.SendCommMessage(self, dbi.prefix, encoded, channel, target, priority)
 end
 
-function InternalBroadcast(prefix, message, channels, priority)
+---@param dbi LibP2PDB.DBInstance
+---@param data any
+---@param channels table<string>?
+---@param priority LibP2PDB.CommPriority
+function Internal:Broadcast(dbi, data, channels, priority)
+    local serialized = dbi.serializer:Serialize(data)
+    if not serialized then
+        Debug(format("failed to serialize message for prefix '%s'", tostring(dbi.prefix)))
+        return
+    end
+
+    local compressed = dbi.compressor:Compress(serialized)
+    if not compressed then
+        Debug(format("failed to compress message for prefix '%s'", tostring(dbi.prefix)))
+        return
+    end
+
+    local encoded = dbi.encoder:EncodeChannel(compressed)
+    if not encoded then
+        Debug(format("failed to encode message for prefix '%s'", tostring(dbi.prefix)))
+        return
+    end
+
+    Debug(format("broadcasting %d bytes on prefix '%s'", #encoded, tostring(dbi.prefix)))
+
     if IsInGuild() then
-        InternalSend(prefix, message, "GUILD", nil, priority)
+        ---@cast priority "ALERT"|"BULK"|"NORMAL"
+        AceComm.SendCommMessage(self, dbi.prefix, encoded, "GUILD", nil, priority)
     end
 
     if IsInRaid() then
-        InternalSend(prefix, message, "RAID", nil, priority)
+        ---@cast priority "ALERT"|"BULK"|"NORMAL"
+        AceComm.SendCommMessage(self, dbi.prefix, encoded, "RAID", nil, priority)
     elseif IsInGroup() then
-        InternalSend(prefix, message, "PARTY", nil, priority)
+        ---@cast priority "ALERT"|"BULK"|"NORMAL"
+        AceComm.SendCommMessage(self, dbi.prefix, encoded, "PARTY", nil, priority)
     end
 
     if not IsInInstance() then
-        InternalSend(prefix, message, "YELL", nil, priority)
+        ---@cast priority "ALERT"|"BULK"|"NORMAL"
+        AceComm.SendCommMessage(self, dbi.prefix, encoded, "YELL", nil, priority)
     end
 
-    for _, channel in ipairs(channels) do
-        InternalSend(prefix, message, channel, nil, priority)
+    for _, channel in ipairs(channels or {}) do
+        ---@cast priority "ALERT"|"BULK"|"NORMAL"
+        AceComm.SendCommMessage(self, dbi.prefix, encoded, channel, nil, priority)
     end
 end
 
-function InternalOnCommReceived(prefix, message, channel, sender)
+---@class LibP2PDB.Message
+---@field type LibP2PDB.CommMessageType
+---@field peerId string
+---@field data any
+---@field dbi LibP2PDB.DBInstance
+---@field channel string
+---@field sender string
+
+---@param prefix string
+---@param encoded string
+---@param channel string
+---@param sender string
+function Internal:OnCommReceived(prefix, encoded, channel, sender)
     -- Ignore messages from self
     if sender == Private.playerName then
         return
@@ -1639,139 +1752,154 @@ function InternalOnCommReceived(prefix, message, channel, sender)
     -- Get the database instance for this prefix
     local db = LibP2PDB:GetDB(prefix)
     if not db then
-        Debug(format("received message for unknown prefix '%s' from '%s' on channel '%s'", tostring(prefix), tostring(sender), tostring(channel)))
+        Debug(format("received message for unknown prefix '%s' from channel '%s' sender '%s'", tostring(prefix), tostring(channel), tostring(sender)))
         return
     end
 
     local dbi = Private.databases[db]
     if not dbi then
-        Debug(format("received message for unregistered database prefix '%s' from '%s' on channel '%s'", tostring(prefix), tostring(sender), tostring(channel)))
+        Debug(format("received message for unregistered database prefix '%s' from channel '%s' sender '%s'", tostring(prefix), tostring(channel), tostring(sender)))
         return
     end
 
     -- Deserialize message
-    local success, deserialized = dbi.serializer:Deserialize(message)
-    if not success then
-        Debug(format("failed to deserialize message from '%s' on channel '%s': %s", tostring(sender), tostring(channel), Dump(deserialized)))
+    local compressed = dbi.encoder:DecodeChannel(encoded)
+    if not compressed then
+        Debug(format("failed to decode message from prefix '%s' channel '%s' sender '%s'", tostring(prefix), tostring(channel), tostring(sender)))
+        return
+    end
+
+    local serialized = dbi.compressor:Decompress(compressed)
+    if not serialized then
+        Debug(format("failed to decompress message from prefix '%s' channel '%s' sender '%s'", tostring(prefix), tostring(channel), tostring(sender)))
+        return
+    end
+
+    local success, obj = dbi.serializer:Deserialize(serialized)
+    if not success or not obj then
+        Debug(format("failed to deserialize message from prefix '%s' channel '%s' sender '%s': %s", tostring(prefix), tostring(channel), tostring(sender), Dump(obj)))
         return
     end
 
     -- Validate message structure
-    if not IsTable(deserialized) then
+    if not IsTable(obj) then
         Debug(format("received invalid message structure from '%s' on channel '%s'", tostring(sender), tostring(channel)))
         return
     end
 
-    if not IsNumber(deserialized.type) then
+    if not IsNumber(obj.type) then
         Debug(format("received message with missing or invalid type from '%s' on channel '%s'", tostring(sender), tostring(channel)))
         return
     end
 
-    if not IsNonEmptyString(deserialized.peerId) then
+    if not IsNonEmptyString(obj.peerId) then
         Debug(format("received message with missing or invalid peerId from '%s' on channel '%s'", tostring(sender), tostring(channel)))
         return
     end
 
-    -- Create communication event
-    local event = {
+    -- Build message object
+    ---@type LibP2PDB.Message
+    local message = {
+        type = obj.type,
+        peerId = obj.peerId,
+        data = obj.data,
         dbi = dbi,
-        type = deserialized.type,
-        peerId = deserialized.peerId,
-        prefix = prefix,
-        message = message,
         channel = channel,
         sender = sender,
-        data = deserialized.data,
     }
 
     -- Get or create bucket
-    local bucket = dbi.buckets[event.type]
+    local bucket = dbi.buckets[message.type]
     if not bucket then
         bucket = {}
-        dbi.buckets[event.type] = bucket
+        dbi.buckets[message.type] = bucket
     end
 
     -- If we already have a timer running for this peer, ignore it
-    if bucket[event.peerId] then
+    if bucket[message.peerId] then
         return
     end
 
     -- Create a timer to process this message after 1 second
-    bucket[event.peerId] = C_Timer.NewTimer(1.0, function()
+    bucket[message.peerId] = C_Timer.NewTimer(1.0, function()
         -- Process the message
-        InternalDispatchMessage(event)
+        InternalDispatchMessage(message)
 
         -- Clean up
-        bucket[event.peerId] = nil
+        bucket[message.peerId] = nil
 
         -- Clean up bucket if empty
         if not next(bucket) then
-            dbi.buckets[event.type] = nil
+            dbi.buckets[message.type] = nil
         end
     end)
 end
 
-function InternalDispatchMessage(event)
-    if event.type == CommMessageType.PeerDiscoveryRequest then
-        InternalPeerDiscoveryRequestHandler(event)
-    elseif event.type == CommMessageType.PeerDiscoveryResponse then
-        InternalPeerDiscoveryResponseHandler(event)
-    elseif event.type == CommMessageType.SnapshotRequest then
-        InternalRequestSnapshotMessageHandler(event)
-    elseif event.type == CommMessageType.SnapshotResponse then
-        InternalSnapshotMessageHandler(event)
-    elseif event.type == CommMessageType.Digest then
-        InternalDigestMessageHandler(event)
-    elseif event.type == CommMessageType.RequestRows then
-        InternalRequestRowsMessageHandler(event)
-    elseif event.type == CommMessageType.Rows then
-        InternalRowsMessageHandler(event)
+---@param message LibP2PDB.Message
+function InternalDispatchMessage(message)
+    if message.type == CommMessageType.PeerDiscoveryRequest then
+        InternalPeerDiscoveryRequestHandler(message)
+    elseif message.type == CommMessageType.PeerDiscoveryResponse then
+        InternalPeerDiscoveryResponseHandler(message)
+    elseif message.type == CommMessageType.SnapshotRequest then
+        InternalRequestSnapshotMessageHandler(message)
+    elseif message.type == CommMessageType.SnapshotResponse then
+        InternalSnapshotMessageHandler(message)
+    elseif message.type == CommMessageType.Digest then
+        InternalDigestMessageHandler(message)
+    elseif message.type == CommMessageType.RequestRows then
+        InternalRequestRowsMessageHandler(message)
+    elseif message.type == CommMessageType.Rows then
+        InternalRowsMessageHandler(message)
     else
-        Debug(format("received unknown message type %d from '%s' on channel '%s'", event.type, tostring(event.sender), tostring(event.channel)))
+        Debug(format("received unknown message type %d from '%s' on channel '%s'", message.type, tostring(message.sender), tostring(message.channel)))
     end
 end
 
-function InternalPeerDiscoveryRequestHandler(event)
+---@param message LibP2PDB.Message
+function InternalPeerDiscoveryRequestHandler(message)
     -- Send peer discovery response
     local obj = {
         type = CommMessageType.PeerDiscoveryResponse,
         peerId = Private.peerId,
-        data = event.dbi.clock,
+        data = message.dbi.clock,
     }
-    local serialized = event.dbi.serializer:Serialize(obj)
-    InternalSend(event.prefix, serialized, "WHISPER", event.sender, CommPriority.Low)
+    Internal:Send(message.dbi, obj, "WHISPER", message.sender, CommPriority.Low)
 end
 
-function InternalPeerDiscoveryResponseHandler(event)
+---@param message LibP2PDB.Message
+function InternalPeerDiscoveryResponseHandler(message)
     -- Update last discovery time
-    if event.dbi.onDiscoveryComplete then
-        event.dbi.lastDiscoveryResponseTime = GetTime()
+    if message.dbi.onDiscoveryComplete then
+        message.dbi.lastDiscoveryResponseTime = GetTime()
     end
 
     -- Store peer info
-    if not event.dbi.peers[event.peerId] then
-        event.dbi.peers[event.peerId] = {
+    if not message.dbi.peers[message.peerId] then
+        message.dbi.peers[message.peerId] = {
             isNew = true,
-            name = event.sender,
+            name = message.sender,
+            lastSeen = GetServerTime(),
         }
     end
-    event.dbi.peers[event.peerId].clock = event.data
+    message.dbi.peers[message.peerId].clock = message.data
 end
 
-function InternalRequestSnapshotMessageHandler(event)
+---@param message LibP2PDB.Message
+function InternalRequestSnapshotMessageHandler(message)
     local obj = {
         type = CommMessageType.SnapshotResponse,
         peerId = Private.peerId,
-        data = InternalExport(event.dbi),
+        data = InternalExport(message.dbi),
     }
-    local serialized = event.dbi.serializer:Serialize(obj)
-    InternalSend(event.prefix, serialized, "WHISPER", event.sender, CommPriority.Low)
+    Internal:Send(message.dbi, obj, "WHISPER", message.sender, CommPriority.Low)
 end
 
-function InternalSnapshotMessageHandler(event)
-    local success, errors = InternalImport(event.dbi, event.data)
+---@param message LibP2PDB.Message
+function InternalSnapshotMessageHandler(message)
+    local success, errors = InternalImport(message.dbi, message.data)
     if not success then
-        Debug(format("failed to import snapshot from '%s' on channel '%s'", tostring(event.sender), tostring(event.channel)))
+        Debug(format("failed to import snapshot from '%s' on channel '%s'", tostring(message.sender), tostring(message.channel)))
         if errors then
             for i, err in ipairs(errors) do
                 Debug(format("%d: %s", i, tostring(err)))
@@ -1780,11 +1908,12 @@ function InternalSnapshotMessageHandler(event)
     end
 end
 
-function InternalDigestMessageHandler(event)
+---@param message LibP2PDB.Message
+function InternalDigestMessageHandler(message)
     -- Compare digest and build missing table
     local missingTables = {}
-    for tableName, incomingTable in pairs(event.data.tables or {}) do
-        local ti = event.dbi.tables[tableName]
+    for tableName, incomingTable in pairs(message.data.tables or {}) do
+        local ti = message.dbi.tables[tableName]
         if ti then
             local missingRows = {}
 
@@ -1820,15 +1949,15 @@ function InternalDigestMessageHandler(event)
         peerId = Private.peerId,
         data = missingTables,
     }
-    local serialized = event.dbi.serializer:Serialize(obj)
-    InternalSend(event.prefix, serialized, "WHISPER", event.sender, CommPriority.Normal)
+    Internal:Send(message.dbi, obj, "WHISPER", message.sender, CommPriority.Normal)
 end
 
-function InternalRequestRowsMessageHandler(event)
+---@param message LibP2PDB.Message
+function InternalRequestRowsMessageHandler(message)
     -- Build rows to send
     local rowsToSend = {}
-    for tableName, requestedRows in pairs(event.data or {}) do
-        local ti = event.dbi.tables[tableName]
+    for tableName, requestedRows in pairs(message.data or {}) do
+        local ti = message.dbi.tables[tableName]
         if ti then
             local tableRows = {}
             for key, _ in pairs(requestedRows) do
@@ -1856,19 +1985,19 @@ function InternalRequestRowsMessageHandler(event)
         peerId = Private.peerId,
         data = rowsToSend,
     }
-    local serialized = event.dbi.serializer:Serialize(obj)
-    InternalSend(event.prefix, serialized, "WHISPER", event.sender, CommPriority.Normal)
+    Internal:Send(message.dbi, obj, "WHISPER", message.sender, CommPriority.Normal)
 end
 
-function InternalRowsMessageHandler(event)
+---@param message LibP2PDB.Message
+function InternalRowsMessageHandler(message)
     -- Import received rows
-    for incomingTableName, incomingTableData in pairs(event.data or {}) do
-        local ti = event.dbi.tables[incomingTableName]
+    for incomingTableName, incomingTableData in pairs(message.data or {}) do
+        local ti = message.dbi.tables[incomingTableName]
         if ti then
             for incomingKey, incomingRow in pairs(incomingTableData or {}) do
-                local importResult, importError = InternalImportRow(incomingKey, incomingRow, event.dbi, incomingTableName, ti)
+                local importResult, importError = InternalImportRow(incomingKey, incomingRow, message.dbi, incomingTableName, ti)
                 if not importResult then
-                    Debug(format("failed to import row with key '%s' in table '%s' from '%s' on channel '%s': %s", tostring(incomingKey), incomingTableName, tostring(event.sender), tostring(event.channel), tostring(importError)))
+                    Debug(format("failed to import row with key '%s' in table '%s' from '%s' on channel '%s': %s", tostring(incomingKey), incomingTableName, tostring(message.sender), tostring(message.channel), tostring(importError)))
                 end
             end
         end
@@ -2827,10 +2956,6 @@ if DEBUG then
 
             local serialized = LibP2PDB:Serialize(db)
             Assert.IsNonEmptyString(serialized)
-            Assert.Contains(serialized, "Users")
-            Assert.Contains(serialized, "Bob")
-            Assert.DoesNotContain(serialized, "Alice")
-            Assert.Contains(serialized, "Eve")
         end,
 
         Serialize_DBIsInvalid_Throws = function()
