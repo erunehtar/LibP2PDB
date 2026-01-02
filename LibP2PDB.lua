@@ -93,7 +93,7 @@ end
 
 --- Print function.
 --- @param fmt string Format string.
---- @param ... any Values to print.
+--- @param ... any Format arguments.
 local function Print(fmt, ...)
     local success, message = pcall(format, fmt, ...)
     if not success then
@@ -104,7 +104,7 @@ end
 
 --- Debug print function, only outputs if DEBUG is true.
 --- @param fmt string Format string.
---- @param ... any Values to print.
+--- @param ... any Format arguments.
 local function Debug(fmt, ...)
     if DEBUG then
         local success, message = pcall(format, fmt, ...)
@@ -117,9 +117,9 @@ end
 
 --- Error print function, only outputs if DEBUG is true.
 --- @param fmt string Format string.
---- @param ... any Values to print.
+--- @param ... any Format arguments.
 local function Error(fmt, ...)
-    if DEBUG then
+    if DEBUG and not DISABLE_ERROR_REPORTING then
         local success, message = pcall(format, fmt, ...)
         if not success then
             message = fmt
@@ -390,18 +390,23 @@ local function ShallowEqual(a, b)
     return count == 0
 end
 
---- Error handler for database operations.
---- @param dbi LibP2PDB.DBInstance Database instance.
---- @param err string Error message.
---- @return boolean success Always returns false.
-local function ErrorHandler(dbi, err)
-    assert(IsTable(dbi))
-    if dbi.onError then
-        dbi.onError(tostring(err), debugstack(2))
-    else
-        Error(tostring(err))
+--- Report a non-fatal error without stopping execution.
+--- @param dbi LibP2PDB.DBInstance? Database instance if available.
+--- @param fmt string Format string.
+--- @param ... any Format arguments.
+--- @return string message The error message.
+local function ReportError(dbi, fmt, ...)
+    local success, message = pcall(format, fmt, ...)
+    if not success then
+        message = fmt
     end
-    return false
+    if dbi and dbi.onError then
+        dbi.onError(message, debugstack(2))
+    else
+        Error(message)
+        LAST_ERROR = message
+    end
+    return message
 end
 
 --- Safely call a function with error handling.
@@ -415,7 +420,16 @@ local function SafeCall(dbi, func, ...)
     assert(IsFunction(func))
 
     -- Use xpcall to catch errors
-    local results = { xpcall(func, function(err) ErrorHandler(dbi, err) end, ...) }
+    local results = {
+        xpcall(func, function(err)
+            if dbi and dbi.onError then
+                dbi.onError(tostring(err), debugstack(2))
+            else
+                Error(tostring(err))
+                LAST_ERROR = tostring(err)
+            end
+        end, ...)
+    }
 
     -- If the function threw an error, return false with no results
     if not results[1] then
@@ -972,13 +986,13 @@ end
 
 --- @class LibP2PDB.DBState Database state.
 --- @field clock number Lamport clock of the exported database.
---- @field tables table<string, LibP2PDB.TableState> Registry of table states.
+--- @field tables table<string, LibP2PDB.TableState>? Registry of tables, or nil if no tables.
 
 --- @class LibP2PDB.TableState Table state.
---- @field rows table<LibP2PDB.TableKey, LibP2PDB.TableRow> Registry of table row states.
+--- @field rows table<LibP2PDB.TableKey, LibP2PDB.TableRow> Registry of table rows.
 
 --- Export the database state to a table.
---- Includes all tables and rows with their data and version metadata.
+--- Empty tables are omitted from the exported state.
 --- @param db LibP2PDB.DBHandle Database handle.
 --- @return LibP2PDB.DBState state The exported database state.
 function LibP2PDB:Export(db)
@@ -988,35 +1002,8 @@ function LibP2PDB:Export(db)
     local dbi = Private.databases[db]
     assert(dbi, "db is not a recognized database instance")
 
-    -- Export database
-    local state = {
-        clock = dbi.clock,
-    }
-
-    local tables = {}
-    for tableName, tableData in pairs(dbi.tables) do
-        local rows = {}
-        for key, row in pairs(tableData.rows) do
-            rows[key] = {
-                data = ShallowCopy(row.data),
-                version = ShallowCopy(row.version),
-            }
-        end
-
-        -- Include table only if it has rows
-        if next(rows) ~= nil then
-            tables[tableName] = {
-                rows = rows
-            }
-        end
-    end
-
-    -- Include tables only if there are any
-    if next(tables) ~= nil then
-        state.tables = tables
-    end
-
-    return state
+    -- Export database state
+    return Private:ExportDatabase(dbi)
 end
 
 --- Import a database state from a table.
@@ -1036,10 +1023,12 @@ function LibP2PDB:Import(db, state)
     Private:ImportDatabase(dbi, state)
 end
 
---- Serialize the entire database to a compact binary string format for storage.
---- The serialized string format is not suited for direct transmission over chat channels.
+--- Serialize the database state to a compact binary string format.
+--- If a table has a schema, fields are serialized in alphabetical order without names.
+--- If no schema is defined, all fields are serialized in arbitrary order with names.
+--- Empty tables are omitted from the serialized output.
 --- @param db LibP2PDB.DBHandle Database handle.
---- @return string serialized The serialized database string.
+--- @return string serialized The serialized database state.
 function LibP2PDB:Serialize(db)
     assert(IsTable(db), "db must be a table")
 
@@ -1047,78 +1036,15 @@ function LibP2PDB:Serialize(db)
     local dbi = Private.databases[db]
     assert(dbi, "db is not a recognized database instance")
 
-    -- Preprocess database into array structure
-    local rootArray = { dbi.clock }
-    local rootIdx = 1
-    for tableName, tableData in pairs(dbi.tables) do
-        local rows = tableData.rows
-
-        -- Serialize only if the table has rows
-        if next(rows) then
-            local tableArray = { tableName }
-            local tableIdx = 1
-
-            -- Get sorted schema once for this table
-            --- @type LibP2PDB.TableSchemaSorted?
-            local schemaSorted = Private:GetTableSchema(tableData, true)
-
-            -- Serialize rows
-            for key, row in pairs(rows) do
-                -- Add row data
-                local data = row.data
-                local version = row.version
-                local rowArray, rowIdx
-                if schemaSorted then
-                    -- Schema defined: serialize fields in alphabetical order without names
-                    local dataArray = {}
-                    local dataIdx = 0
-                    if data then
-                        for i = 1, #schemaSorted do
-                            local fieldName = schemaSorted[i][1]
-                            local fieldValue = data[fieldName]
-                            dataIdx = dataIdx + 1
-                            dataArray[dataIdx] = fieldValue == nil and NIL_MARKER or fieldValue
-                        end
-                    else
-                        for i = 1, #schemaSorted do
-                            dataIdx = dataIdx + 1
-                            dataArray[dataIdx] = NIL_MARKER
-                        end
-                    end
-                    rowArray = { key, dataArray, version.clock, version.peer }
-                    rowIdx = 4
-                else
-                    -- No schema: serialize all fields in arbitrary order
-                    rowArray = { key, data or {}, version.clock, version.peer }
-                    rowIdx = 4
-                end
-
-                -- Add tombstone flag if present
-                if version.tombstone then
-                    rowIdx = rowIdx + 1
-                    rowArray[rowIdx] = true
-                end
-
-                tableIdx = tableIdx + 1
-                tableArray[tableIdx] = rowArray
-            end
-
-            rootIdx = rootIdx + 1
-            rootArray[rootIdx] = tableArray
-        end
-    end
-
-    -- Serialize the root array to a compact binary string format for storage
-    local serialized = dbi.serializer:Serialize(rootArray)
-    local compressed = dbi.compressor:Compress(serialized)
-    return dbi.encoder:EncodePrint(compressed)
+    -- Serialize database state
+    return Private:SerializeDatabase(dbi)
 end
 
---- Deserialize an entire database from a compact binary string format.
+--- Deserialize a database state from a compact binary string format.
 --- Merges the deserialized data with existing data based on version metadata.
 --- Validates incoming data against table definitions, skipping invalid entries.
 --- @param db LibP2PDB.DBHandle Database handle.
---- @param str string The serialized database string to deserialize
+--- @param str string The serialized database string to deserialize.
 function LibP2PDB:Deserialize(db, str)
     assert(IsTable(db), "db must be a table")
     assert(IsNonEmptyString(str), "str must be a non-empty string")
@@ -1128,16 +1054,15 @@ function LibP2PDB:Deserialize(db, str)
     assert(dbi, "db is not a recognized database instance")
 
     -- Deserialize the serialized database
-    local success, state = Private:DeserializeDatabase(dbi, str)
-    if not success then
-        --- @cast state string
-        ErrorHandler(dbi, "Deserialize failed: " .. tostring(state))
+    local state = Private:DeserializeDatabase(dbi, str)
+    if not state then
+        ReportError(dbi, "failed to deserialize database state")
         return
     end
 
-    -- Import the deserialized state
+    -- Import the database state
     --- @cast state LibP2PDB.DBState
-    self:Import(db, state)
+    Private:ImportDatabase(dbi, state)
 end
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -1546,6 +1471,41 @@ function Private:InvokeChangeCallbacks(dbi, tableName, ti, key, rowData)
     end
 end
 
+--- Export the database state to a table.
+--- Empty tables are omitted from the exported state.
+--- @param dbi LibP2PDB.DBInstance Database instance.
+--- @return LibP2PDB.DBState state The exported database state.
+function Private:ExportDatabase(dbi)
+    local state = {
+        clock = dbi.clock,
+    }
+
+    local tables = {}
+    for tableName, tableData in pairs(dbi.tables) do
+        local rows = {}
+        for key, row in pairs(tableData.rows) do
+            rows[key] = {
+                data = ShallowCopy(row.data),
+                version = ShallowCopy(row.version),
+            }
+        end
+
+        -- Include table only if it has rows
+        if next(rows) ~= nil then
+            tables[tableName] = {
+                rows = rows
+            }
+        end
+    end
+
+    -- Include tables only if there are any
+    if next(tables) ~= nil then
+        state.tables = tables
+    end
+
+    return state
+end
+
 --- Import a database state into the database instance.
 --- Merges the imported state with existing data based on version metadata.
 --- Validates incoming data against table definitions, skipping invalid entries.
@@ -1680,61 +1640,127 @@ function Private:IsIncomingNewer(existing, incoming)
     end
 end
 
+--- Serialize the database state to a compact binary string format.
+--- If a table has a schema, fields are serialized in alphabetical order without names.
+--- If no schema is defined, all fields are serialized in arbitrary order with names.
+--- Empty tables are omitted from the serialized output.
+--- @param dbi LibP2PDB.DBInstance Database instance.
+--- @return string serialized The serialized database state.
+function Private:SerializeDatabase(dbi)
+    -- Preprocess database into array structure
+    local rootArray = { dbi.clock }
+    local rootIdx = 1
+    for tableName, tableData in pairs(dbi.tables) do
+        local rows = tableData.rows
+
+        -- Serialize only if the table has rows
+        if next(rows) then
+            local tableArray = { tableName }
+            local tableIdx = 1
+
+            -- Get sorted schema once for this table
+            --- @type LibP2PDB.TableSchemaSorted?
+            local schemaSorted = Private:GetTableSchema(tableData, true)
+
+            -- Serialize rows
+            for key, row in pairs(rows) do
+                -- Add row data
+                local data = row.data
+                local version = row.version
+                local rowArray, rowIdx
+                if schemaSorted then
+                    -- Schema defined: serialize fields in alphabetical order without names
+                    local dataArray = {}
+                    local dataIdx = 0
+                    if data then
+                        for i = 1, #schemaSorted do
+                            local fieldName = schemaSorted[i][1]
+                            local fieldValue = data[fieldName]
+                            dataIdx = dataIdx + 1
+                            dataArray[dataIdx] = fieldValue == nil and NIL_MARKER or fieldValue
+                        end
+                    else
+                        for i = 1, #schemaSorted do
+                            dataIdx = dataIdx + 1
+                            dataArray[dataIdx] = NIL_MARKER
+                        end
+                    end
+                    rowArray = { key, dataArray, version.clock, version.peer }
+                    rowIdx = 4
+                else
+                    -- No schema: serialize all fields in arbitrary order
+                    rowArray = { key, data or {}, version.clock, version.peer }
+                    rowIdx = 4
+                end
+
+                -- Add tombstone flag if present
+                if version.tombstone then
+                    rowIdx = rowIdx + 1
+                    rowArray[rowIdx] = true
+                end
+
+                tableIdx = tableIdx + 1
+                tableArray[tableIdx] = rowArray
+            end
+
+            rootIdx = rootIdx + 1
+            rootArray[rootIdx] = tableArray
+        end
+    end
+
+    -- Serialize the root array to a compact binary string format
+    return dbi.serializer:Serialize(rootArray)
+end
+
 --- Deserialize an entire database from a compact binary string format.
 --- @param dbi LibP2PDB.DBInstance Database instance.
---- @param encoded string The serialized database string to deserialize.
---- @return boolean success Returns true on success, false otherwise.
---- @return LibP2PDB.DBState|string state The deserialized database state on success, or an error message on failure.
-function Private:DeserializeDatabase(dbi, encoded)
-    local compressed = dbi.encoder:DecodePrint(encoded)
-    if not compressed then
-        return false, "failed to decode serialized database string"
-    end
-
-    local serialized = dbi.compressor:Decompress(compressed)
-    if not serialized then
-        return false, "failed to decompress serialized database string"
-    end
-
-    local success, rootArray = dbi.serializer:Deserialize(serialized)
+--- @param str string The serialized database string to deserialize.
+--- @return LibP2PDB.DBState? state The deserialized database state on success, or an error message on failure.
+function Private:DeserializeDatabase(dbi, str)
+    local success, rootArray = dbi.serializer:Deserialize(str)
     if not success or not rootArray then
-        return false, "failed to deserialize serialized database string"
+        ReportError(dbi, "failed to deserialize binary string")
+        return
     end
-
     if not IsNonEmptyTable(rootArray) then
-        return false, "invalid database structure: missing root data"
+        ReportError(dbi, "root array must be a non-empty table")
+        return
     end
 
     -- Process the array structure into a state that can be imported later
     local clock = rootArray[1]
     if not IsNumber(clock, 0) then
-        return false, format("invalid database structure: invalid database clock: '%s'", tostring(clock))
+        ReportError(dbi, "clock must be a positive number")
+        return
     end
 
     --- @type LibP2PDB.DBState
     local state = {
         clock = clock,
-        tables = {}
     }
 
     -- Parse tables (format: clock, tableArray1, tableArray2, ...)
     local rootLen = #rootArray
+    local tables = {}
     for i = 2, rootLen do
         local tableArray = rootArray[i]
         local tableLen = tableArray and #tableArray or 0
 
         if not IsTable(tableArray) or tableLen < 1 then
-            return false, "invalid table structure: missing table data"
+            ReportError(dbi, "table array must be a non-empty table")
+            return
         end
 
         local tableName = tableArray[1]
         if not IsNonEmptyString(tableName) then
-            return false, format("invalid table structure: invalid table name")
+            ReportError(dbi, "table name must be a non-empty string")
+            return
         end
 
         local ti = dbi.tables[tableName]
         if not ti then
-            return false, format("table '%s' is not defined in the database", tostring(tableName))
+            ReportError(dbi, "table '%s' is not defined in the database", tostring(tableName))
+            return
         end
 
         -- Get sorted schema once for this table
@@ -1742,45 +1768,53 @@ function Private:DeserializeDatabase(dbi, encoded)
         local schemaSorted = Private:GetTableSchema(ti, true)
 
         -- Parse rows (format: tableName, rowArray1, rowArray2, ...)
-        local table = { rows = {}, }
-        local rows = table.rows
+        local rows = {}
         local keyType = ti.keyType
         for rowIndex = 2, tableLen do
             local rowArray = tableArray[rowIndex]
             local rowLen = rowArray and #rowArray or 0
-            local success, result = Private:DeserializeRow(rowArray, rowLen, schemaSorted, keyType, tableName)
-            if success then
-                --- @cast result LibP2PDB.TableRow
+            local row = Private:DeserializeRow(dbi, keyType, tableName, rowArray, rowLen, schemaSorted)
+            if row then
                 local key = rowArray[1]
-                rows[key] = result
-            else
-                --- @cast result string
-                return false, result
+                rows[key] = row
             end
         end
-        state.tables[tableName] = table
+
+        -- Include table only if it has rows
+        if next(rows) ~= nil then
+            tables[tableName] = {
+                rows = rows,
+            }
+        end
     end
 
-    return true, state
+    -- Include tables only if there are any
+    if next(tables) ~= nil then
+        state.tables = tables
+    end
+
+    return state
 end
 
 --- Deserialize a single row from an array structure.
+--- @param dbi LibP2PDB.DBInstance Database instance.
+--- @param keyType LibP2PDB.TableKeyType Expected key type for the table.
+--- @param tableName string Name of the table (for error messages).
 --- @param rowArray table The array structure representing the row.
 --- @param rowLen number Length of the row array.
 --- @param schemaSorted LibP2PDB.TableSchemaSorted? Optional sorted schema for the table.
---- @param keyType LibP2PDB.TableKeyType Expected key type for the table.
---- @param tableName string Name of the table (for error messages).
---- @return boolean success Returns true on success, false otherwise.
---- @return LibP2PDB.TableRow|string row The deserialized row on success, or an error message on failure.
-function Private:DeserializeRow(rowArray, rowLen, schemaSorted, keyType, tableName)
+--- @return LibP2PDB.TableRow? row The deserialized row on success, or an error message on failure.
+function Private:DeserializeRow(dbi, keyType, tableName, rowArray, rowLen, schemaSorted)
     if not IsTable(rowArray) or rowLen < 3 then
-        return false, format("skipping row with invalid structure in table '%s'", tableName)
+        ReportError(dbi, "skipping row with invalid structure in table '%s'", tableName)
+        return
     end
 
     -- Validate key type
     local key = rowArray[1]
     if type(key) ~= keyType then
-        return false, format("skipping row with invalid key type in table '%s'", tableName)
+        ReportError(dbi, "skipping row with invalid key type '%s' in table '%s'", tostring(key), tableName)
+        return
     end
 
     local dataArray = rowArray[2]
@@ -1812,12 +1846,14 @@ function Private:DeserializeRow(rowArray, rowLen, schemaSorted, keyType, tableNa
 
     local versionClock = rowArray[3]
     if not IsNumber(versionClock, 0) then
-        return false, format("skipping row with invalid version clock in table '%s'", tableName)
+        ReportError(dbi, "skipping row with invalid version clock '%s' in table '%s'", tostring(versionClock), tableName)
+        return
     end
 
     local versionPeer = rowArray[4]
     if not IsNonEmptyString(versionPeer) then
-        return false, format("skipping row with invalid version peer in table '%s'", tableName)
+        ReportError(dbi, "skipping row with invalid version peer '%s' in table '%s'", tostring(versionPeer), tableName)
+        return
     end
 
     local versionTombstone = false
@@ -1834,7 +1870,7 @@ function Private:DeserializeRow(rowArray, rowLen, schemaSorted, keyType, tableNa
     end
 
     -- Return row object
-    return true, {
+    return {
         data = not versionTombstone and data or nil,
         version = version,
     }
@@ -2339,6 +2375,13 @@ if DEBUG then
         DoesNotThrow = function(fn, msg)
             local s, r = pcall(fn)
             assert(s == true, msg or format("function threw an error: %s", tostring(r)))
+        end,
+        ExpectErrors = function(func)
+            DISABLE_ERROR_REPORTING = true
+            func()
+            DISABLE_ERROR_REPORTING = false
+            assert(LAST_ERROR ~= nil, "expected an error but none was reported")
+            LAST_ERROR = nil
         end,
     }
 
@@ -3199,7 +3242,7 @@ if DEBUG then
             local db2 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests2" })
             LibP2PDB:NewTable(db2, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
 
-            LibP2PDB:Import(db2, exported)
+            Assert.ExpectErrors(function() LibP2PDB:Import(db2, exported) end)
             Assert.AreEqual(LibP2PDB:Get(db2, "Users", 1), LibP2PDB:Get(db1, "Users", 1))
             Assert.IsNil(LibP2PDB:Get(db2, "Users", 2))
         end,
@@ -3247,9 +3290,7 @@ if DEBUG then
             LibP2PDB:NewTable(db2, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
 
             -- Test with invalid binary data
-            LibP2PDB:Deserialize(db2, "invalid_binary_data")
-            -- todo: Since the Deserialize function currently does not return an error for invalid binary data,
-            -- we cannot assert failure here. This is a placeholder for future implementation.
+            Assert.ExpectErrors(function() LibP2PDB:Deserialize(db2, "invalid_binary_data") end)
         end,
 
         Deserialize_InvalidTableStructure_Fails = function()
@@ -3259,9 +3300,7 @@ if DEBUG then
             LibP2PDB:NewTable(db2, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
 
             -- Test with malformed serialized data
-            LibP2PDB:Deserialize(db2, "\1\2\3")
-            -- todo: Since the Deserialize function currently does not return an error for malformed data,
-            -- we cannot assert failure here. This is a placeholder for future implementation.
+            Assert.ExpectErrors(function() LibP2PDB:Deserialize(db2, "\1\2\3") end)
         end,
 
         Deserialize_UndefinedTable_Fails = function()
@@ -3274,9 +3313,7 @@ if DEBUG then
 
             -- Serialize from db1 (has Products table), deserialize to db2 (only has Users table)
             local serialized = LibP2PDB:Serialize(db1)
-            LibP2PDB:Deserialize(db2, serialized)
-            -- todo: Since the Deserialize function currently does not return an error for undefined tables,
-            -- we cannot assert failure here. This is a placeholder for future implementation.
+            Assert.ExpectErrors(function() LibP2PDB:Deserialize(db2, serialized) end)
         end,
 
         Deserialize_InvalidKeyType_SkipsRow = function()
@@ -3290,7 +3327,7 @@ if DEBUG then
 
             -- Serialize from db1 (string keys), deserialize to db2 (expects number keys)
             local serialized = LibP2PDB:Serialize(db1)
-            LibP2PDB:Deserialize(db2, serialized)
+            Assert.ExpectErrors(function() LibP2PDB:Deserialize(db2, serialized) end)
 
             -- String key should be skipped (check internal rows to avoid Get assertion)
             Assert.IsNil(Private.databases[db2].tables["Users"].rows["stringkey"])
@@ -3389,16 +3426,10 @@ if DEBUG then
             Assert.IsFalse(LibP2PDB:HasKey(db2, "Users", "deleted"))
         end,
 
-        Deserialize_MalformedNestedStructure_Fails = function()
-            local db1 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests1" })
-            LibP2PDB:NewTable(db1, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
-            local db2 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests2" })
-            LibP2PDB:NewTable(db2, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
-
-            -- Test with corrupted binary data
-            LibP2PDB:Deserialize(db2, "corrupted_data")
-            -- todo: Since the Deserialize function currently does not return an error for corrupted data,
-            -- we cannot assert failure here. This is a placeholder for future implementation.
+        Deserialize_InvalidBinaryData_Fails = function()
+            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests1" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
+            Assert.ExpectErrors(function() LibP2PDB:Deserialize(db, "corrupted_data") end)
         end,
 
         Deserialize_EmptyData_ImportsCorrectly = function()
