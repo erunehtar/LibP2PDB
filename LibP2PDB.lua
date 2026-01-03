@@ -170,6 +170,20 @@ local function IsStringOrNil(value, maxlen)
     return value == nil or IsString(value, maxlen)
 end
 
+--- Determine if a value is an empty string.
+--- @param value any Value to check if it's an empty string.
+--- @return boolean isEmptyString True if the value is an empty string, false otherwise.
+local function IsEmptyString(value)
+    return IsString(value) and #value == 0
+end
+
+--- Determine if a value is an empty string or nil.
+--- @param value any Value to check if it's an empty string or nil.
+--- @return boolean isEmptyStringOrNil True if the value is an empty string or nil, false otherwise.
+local function IsEmptyStringOrNil(value)
+    return value == nil or IsEmptyString(value)
+end
+
 --- Determine if a value is a non-empty string.
 --- @param value any Value to check if it's a non-empty string.
 --- @param maxlen number? Optional maximum length.
@@ -230,6 +244,20 @@ end
 --- @return boolean isTableOrNil True if the value is a table or nil, false otherwise.
 local function IsTableOrNil(value)
     return value == nil or IsTable(value)
+end
+
+--- Determine if a value is an empty table.
+--- @param value any Value to check if it's an empty table.
+--- @return boolean isEmptyTable True if the value is an empty table, false otherwise.
+local function IsEmptyTable(value)
+    return IsTable(value) and next(value) == nil
+end
+
+--- Determine if a value is an empty table or nil.
+--- @param value any Value to check if it's an empty table or nil.
+--- @return boolean isEmptyTableOrNil True if the value is an empty table or nil, false otherwise.
+local function IsEmptyTableOrNil(value)
+    return value == nil or IsEmptyTable(value)
 end
 
 --- Determine if a value is a non-empty table.
@@ -698,15 +726,15 @@ end
 --- @param db LibP2PDB.DBHandle Database handle.
 --- @param desc LibP2PDB.TableDesc Description of the table to define.
 function LibP2PDB:NewTable(db, desc)
-    assert(IsTable(db), "db must be a table")
+    assert(IsEmptyTable(db), "db must be an empty table")
     assert(IsNonEmptyTable(desc), "desc must be a non-empty table")
     assert(IsNonEmptyString(desc.name), "desc.name must be a non-empty string")
     assert(IsNonEmptyString(desc.keyType), "desc.keyType must be a non-empty string")
     assert(desc.keyType == "string" or desc.keyType == "number", "desc.keyType must be 'string' or 'number'")
-    assert(IsTableOrNil(desc.schema), "desc.schema must be a table if provided")
+    assert(IsNonEmptyTableOrNil(desc.schema), "desc.schema must be a non-empty table if provided")
     for fieldKey, allowedTypes in pairs(desc.schema or {}) do
         assert(IsNonEmptyString(fieldKey) or IsNumber(fieldKey), "each field key in desc.schema must be a non-empty string or number")
-        if IsTable(allowedTypes) then
+        if IsNonEmptyTable(allowedTypes) then
             --- @cast allowedTypes string[]
             for _, allowedType in ipairs(allowedTypes) do
                 assert(IsNonEmptyString(allowedType), "each type in desc.schema field types must be a non-empty string")
@@ -716,7 +744,7 @@ function LibP2PDB:NewTable(db, desc)
             --- @cast allowedTypes string
             assert(IsPrimitiveType(allowedTypes), "field type in desc.schema must be 'string', 'number', 'boolean', or 'nil'")
         else
-            error("each field value in desc.schema must be a non-empty string or table of strings")
+            error("each field value in desc.schema must be a non-empty string or non-empty table of strings")
         end
     end
     assert(IsFunctionOrNil(desc.onValidate), "desc.onValidate must be a function if provided")
@@ -724,7 +752,7 @@ function LibP2PDB:NewTable(db, desc)
 
     -- Validate db instance
     local dbi = Private.databases[db]
-    assert(dbi, "db is not a recognized database instance")
+    assert(dbi, "db is not a recognized database handle")
 
     -- Ensure table name is unique
     assert(dbi.tables[desc.name] == nil, "table '" .. desc.name .. "' already exists in the database")
@@ -751,7 +779,7 @@ function LibP2PDB:GetTableSchema(db, tableName, sorted)
     assert(IsNonEmptyString(tableName), "tableName must be a non-empty string")
 
     local dbi = Private.databases[db]
-    assert(dbi, "db is not a recognized database instance")
+    assert(dbi, "db is not a recognized database handle")
 
     local ti = dbi.tables[tableName]
     assert(ti, "table '" .. tableName .. "' is not defined in the database")
@@ -779,7 +807,7 @@ function LibP2PDB:Insert(db, tableName, key, data)
 
     -- Validate db instance
     local dbi = Private.databases[db]
-    assert(dbi, "db is not a recognized database instance")
+    assert(dbi, "db is not a recognized database handle")
 
     -- Validate table and key type
     local ti = dbi.tables[tableName]
@@ -812,7 +840,7 @@ function LibP2PDB:Set(db, tableName, key, data)
 
     -- Validate db instance
     local dbi = Private.databases[db]
-    assert(dbi, "db is not a recognized database instance")
+    assert(dbi, "db is not a recognized database handle")
 
     -- Validate table and key type
     local ti = dbi.tables[tableName]
@@ -841,7 +869,7 @@ function LibP2PDB:Update(db, tableName, key, updateFn)
 
     -- Validate db instance
     local dbi = Private.databases[db]
-    assert(dbi, "db is not a recognized database instance")
+    assert(dbi, "db is not a recognized database handle")
 
     -- Validate table and key type
     local ti = dbi.tables[tableName]
@@ -877,7 +905,7 @@ function LibP2PDB:Delete(db, tableName, key)
 
     -- Validate db instance
     local dbi = Private.databases[db]
-    assert(dbi, "db is not a recognized database instance")
+    assert(dbi, "db is not a recognized database handle")
 
     -- Validate table and key type
     local ti = dbi.tables[tableName]
@@ -901,7 +929,7 @@ function LibP2PDB:Get(db, tableName, key)
 
     -- Validate db instance
     local dbi = Private.databases[db]
-    assert(dbi, "db is not a recognized database instance")
+    assert(dbi, "db is not a recognized database handle")
 
     -- Validate table and key type
     local ti = dbi.tables[tableName]
@@ -930,7 +958,7 @@ function LibP2PDB:HasKey(db, tableName, key)
 
     -- Validate db instance
     local dbi = Private.databases[db]
-    assert(dbi, "db is not a recognized database instance")
+    assert(dbi, "db is not a recognized database handle")
 
     -- Validate table and key type
     local ti = dbi.tables[tableName]
@@ -961,7 +989,7 @@ function LibP2PDB:Subscribe(db, tableName, callback)
 
     -- Validate db instance
     local dbi = Private.databases[db]
-    assert(dbi, "db is not a recognized database instance")
+    assert(dbi, "db is not a recognized database handle")
 
     -- Validate table
     local ti = dbi.tables[tableName]
@@ -982,7 +1010,7 @@ function LibP2PDB:Unsubscribe(db, tableName, callback)
 
     -- Validate db instance
     local dbi = Private.databases[db]
-    assert(dbi, "db is not a recognized database instance")
+    assert(dbi, "db is not a recognized database handle")
 
     -- Validate table
     local t = dbi.tables[tableName]
@@ -1012,7 +1040,7 @@ function LibP2PDB:Export(db)
 
     -- Validate db instance
     local dbi = Private.databases[db]
-    assert(dbi, "db is not a recognized database instance")
+    assert(dbi, "db is not a recognized database handle")
 
     -- Export database state
     return Private:ExportDatabase(dbi)
@@ -1029,7 +1057,7 @@ function LibP2PDB:Import(db, state)
 
     -- Validate db instance
     local dbi = Private.databases[db]
-    assert(dbi, "db is not a recognized database instance")
+    assert(dbi, "db is not a recognized database handle")
 
     -- Import database state
     Private:ImportDatabase(dbi, state)
@@ -1046,7 +1074,7 @@ function LibP2PDB:Serialize(db)
 
     -- Validate db instance
     local dbi = Private.databases[db]
-    assert(dbi, "db is not a recognized database instance")
+    assert(dbi, "db is not a recognized database handle")
 
     -- Serialize database state
     return Private:SerializeDatabase(dbi)
@@ -1063,7 +1091,7 @@ function LibP2PDB:Deserialize(db, str)
 
     -- Validate db instance
     local dbi = Private.databases[db]
-    assert(dbi, "db is not a recognized database instance")
+    assert(dbi, "db is not a recognized database handle")
 
     -- Deserialize the serialized database
     local state = Private:DeserializeDatabase(dbi, str)
@@ -1089,7 +1117,7 @@ function LibP2PDB:DiscoverPeers(db)
 
     -- Validate db instance
     local dbi = Private.databases[db]
-    assert(dbi, "db is not a recognized database instance")
+    assert(dbi, "db is not a recognized database handle")
 
     -- Send the discover peers message
     local obj = {
@@ -1114,7 +1142,7 @@ function LibP2PDB:RequestSnapshot(db, target)
 
     -- Validate db instance
     local dbi = Private.databases[db]
-    assert(dbi, "db is not a recognized database instance")
+    assert(dbi, "db is not a recognized database handle")
 
     -- Send the request message
     local obj = {
@@ -1140,7 +1168,7 @@ function LibP2PDB:SyncNow(db)
 
     -- Validate db instance
     local dbi = Private.databases[db]
-    assert(dbi, "db is not a recognized database instance")
+    assert(dbi, "db is not a recognized database handle")
 
     -- Build digest
     local digest = Private:BuildDigest(dbi)
@@ -1183,7 +1211,7 @@ function LibP2PDB:ListTables(db)
 
     -- Validate db instance
     local dbi = Private.databases[db]
-    assert(dbi, "db is not a recognized database instance")
+    assert(dbi, "db is not a recognized database handle")
 
     -- Collect table names
     local tableNames = {}
@@ -1203,7 +1231,7 @@ function LibP2PDB:ListKeys(db, tableName)
 
     -- Validate db instance
     local dbi = Private.databases[db]
-    assert(dbi, "db is not a recognized database instance")
+    assert(dbi, "db is not a recognized database handle")
 
     -- Validate table
     local ti = dbi.tables[tableName]
@@ -1227,7 +1255,7 @@ function LibP2PDB:ListPeers(db)
     assert(IsTable(db), "db must be a table")
 
     local dbi = Private.databases[db]
-    assert(dbi, "db is not a recognized database instance")
+    assert(dbi, "db is not a recognized database handle")
 
     -- Collect peers
     local peers = {}
@@ -2327,10 +2355,10 @@ if DEBUG then
         IsFalse = function(value, msg) assert(value == false, msg or "value is not false") end,
         IsNumber = function(value, msg) assert(IsNumber(value), msg or "value is not a number") end,
         IsString = function(value, msg) assert(IsString(value), msg or "value is not a string") end,
-        IsEmptyString = function(value, msg) assert(IsString(value) and #value == 0, msg or "value is not an empty string") end,
+        IsEmptyString = function(value, msg) assert(IsEmptyString(value), msg or "value is not an empty string") end,
         IsNonEmptyString = function(value, msg) assert(IsNonEmptyString(value), msg or "value is not a non-empty string") end,
         IsTable = function(value, msg) assert(IsTable(value), msg or "value is not a table") end,
-        IsEmptyTable = function(value, msg) assert(IsTable(value) and next(value) == nil, msg or "value is not an empty table") end,
+        IsEmptyTable = function(value, msg) assert(IsEmptyTable(value), msg or "value is not an empty table") end,
         IsNonEmptyTable = function(value, msg) assert(IsNonEmptyTable(value), msg or "value is not a non-empty table") end,
         IsFunction = function(value, msg) assert(IsFunction(value), msg or "value is not a function") end,
         IsInterface = function(value, interface, msg)
@@ -2605,7 +2633,10 @@ if DEBUG then
 
         GetDatabase = function()
             local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
+            Assert.IsEmptyTable(db1)
+
             local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
+            Assert.IsEmptyTable(db2)
 
             local fetched1 = LibP2PDB:GetDatabase("LibP2PDBTests1")
             Assert.AreEqual(fetched1, db1)
@@ -2629,135 +2660,167 @@ if DEBUG then
 
         NewTable = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-            LibP2PDB:NewTable(db, {
-                name = "Users",
-                keyType = "string",
-                schema = {
-                    name = "string",
-                    age = "number",
-                },
-                onValidate = function(key, row) return true end,
-                onChange = function(key, row) end,
-            })
-
+            Assert.IsEmptyTable(db)
             local dbi = Private.databases[db]
-            Assert.IsTable(dbi)
+            Assert.IsNonEmptyTable(dbi)
 
-            local t = dbi.tables["Users"]
-            Assert.IsTable(t)
-            Assert.AreEqual(t.keyType, "string")
-            Assert.AreEqual(t.schema.name, "string")
-            Assert.AreEqual(t.schema.age, "number")
-            Assert.IsFunction(t.onValidate)
-            Assert.IsFunction(t.onChange)
-            Assert.IsTable(t.subscribers)
-            Assert.IsEmptyTable(t.rows)
+            do -- check new table creation with minimal description
+                LibP2PDB:NewTable(db, { name = "Users1", keyType = "string" })
 
-            -- Attempt to define the same table again
-            Assert.Throws(function()
+                local ti = dbi.tables["Users1"]
+                Assert.IsNonEmptyTable(ti)
+                Assert.AreEqual(ti.keyType, "string")
+                Assert.IsNil(ti.schema)
+                Assert.IsNil(ti.onValidate)
+                Assert.IsNil(ti.onChange)
+                Assert.IsTable(ti.subscribers)
+                Assert.IsEmptyTable(ti.rows)
+            end
+
+            do -- check new table creation with full description
                 LibP2PDB:NewTable(db, {
-                    name = "Users",
-                    keyType = "string",
+                    name = "Users2",
+                    keyType = "number",
+                    schema = {
+                        name = "string",
+                        age = "number",
+                    },
+                    onValidate = function(key, row) return true end,
+                    onChange = function(key, row) end,
                 })
-            end)
 
-            -- Ensure the original table definition remains unchanged
-            local t2 = dbi.tables["Users"]
-            Assert.AreEqual(t, t2)
+                local ti = dbi.tables["Users2"]
+                Assert.IsNonEmptyTable(ti)
+                Assert.AreEqual(ti.keyType, "number")
+                Assert.AreEqual(ti.schema, { name = "string", age = "number" })
+                Assert.IsFunction(ti.onValidate)
+                Assert.IsFunction(ti.onChange)
+                Assert.IsTable(ti.subscribers)
+                Assert.IsEmptyTable(ti.rows)
+            end
 
-            -- Define another table
-            LibP2PDB:NewTable(db, {
-                name = "Products",
-                keyType = "number",
-            })
+            do -- check schema allowed types
+                local schemaDef = {
+                    boolField = "boolean",
+                    strField = "string",
+                    numField = "number",
+                    nilField = "nil", -- not really useful?
+                    multiple = { "boolean", "string", "number", "nil" },
+                }
+                LibP2PDB:NewTable(db, {
+                    name = "Users3",
+                    keyType = "string",
+                    schema = schemaDef,
+                })
+
+                local ti = dbi.tables["Users3"]
+                Assert.IsNonEmptyTable(ti)
+                Assert.AreEqual(ti.schema, schemaDef)
+            end
         end,
 
         NewTable_DBIsInvalid_Throws = function()
             Assert.Throws(function() LibP2PDB:NewTable(nil, { name = "Users", keyType = "string" }) end)
-            Assert.Throws(function() LibP2PDB:NewTable(123, { name = "Users", keyType = "string" }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(true, { name = "Users", keyType = "string" }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(false, { name = "Users", keyType = "string" }) end)
             Assert.Throws(function() LibP2PDB:NewTable("", { name = "Users", keyType = "string" }) end)
-            Assert.Throws(function() LibP2PDB:NewTable({}, { name = "Users", keyType = "string" }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(123, { name = "Users", keyType = "string" }) end)
         end,
 
         NewTable_DescIsInvalid_Throws = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:NewTable(db, nil) end)
-            Assert.Throws(function() LibP2PDB:NewTable(db, 123) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, true) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, false) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, "") end)
             Assert.Throws(function() LibP2PDB:NewTable(db, "invalid") end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, 123) end)
             Assert.Throws(function() LibP2PDB:NewTable(db, {}) end)
         end,
 
         NewTable_DescNameIsInvalid_Throws = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:NewTable(db, { name = nil, keyType = "string" }) end)
-            Assert.Throws(function() LibP2PDB:NewTable(db, { name = 123, keyType = "string" }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = true, keyType = "string" }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = false, keyType = "string" }) end)
             Assert.Throws(function() LibP2PDB:NewTable(db, { name = "", keyType = "string" }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = 123, keyType = "string" }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = {}, keyType = "string" }) end)
         end,
 
         NewTable_DescKeyTypeIsInvalid_Throws = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = nil }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = true }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = false }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "" }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "boolean" }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "nil" }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "table" }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "function" }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "userdata" }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "thread" }) end)
             Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = 123 }) end)
-            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "invalid" }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = {} }) end)
         end,
 
         NewTable_DescSchemaIsInvalid_Throws = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = true }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = false }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = "" }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = "invalid" }) end)
             Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = 123 }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = {} }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = true } }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = false } }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = "" } }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = "table" } }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = "function" } }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = "userdata" } }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = "thread" } }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = 123 } }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = {} } }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = {true} } }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = {false} } }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = {""} } }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = {"table"} } }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = {"function"} } }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = {"userdata"} } }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = {"thread"} } }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = {123} } }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = {{}} } }) end)
         end,
 
         NewTable_DescOnValidateIsInvalid_Throws = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", onValidate = true }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", onValidate = false }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", onValidate = "" }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", onValidate = "invalid" }) end)
             Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", onValidate = 123 }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", onValidate = {} }) end)
         end,
 
         NewTable_DescOnChangeIsInvalid_Throws = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", onChange = true }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", onChange = false }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", onChange = "" }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", onChange = "invalid" }) end)
             Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", onChange = 123 }) end)
+            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", onChange = {} }) end)
         end,
 
-        Schema_OnlyPrimitiveTypesAllowed = function()
-            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Products", keyType = "number", schema = { a = "function" } }) end)
-            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Products", keyType = "number", schema = { a = "table" } }) end)
-            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Products", keyType = "number", schema = { a = "userdata" } }) end)
-            Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Products", keyType = "number", schema = { a = "thread" } }) end)
+        NewTable_DBNotFound_Throws = function()
+            Assert.Throws(function() LibP2PDB:NewTable({}, { name = "Users", keyType = "string" }) end)
         end,
 
-        Schema_IsOptional = function()
+        NewTable_NameAlreadyExists_Throws = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-            LibP2PDB:NewTable(db, { name = "Logs", keyType = "number" })
-            Assert.IsTrue(LibP2PDB:Insert(db, "Logs", 1, { message = "System started", timestamp = 1620000000 }))
-            Assert.AreEqual(LibP2PDB:Get(db, "Logs", 1), { message = "System started", timestamp = 1620000000 })
-            Assert.IsTrue(LibP2PDB:Insert(db, "Logs", 2, { message = "User logged in", timestamp = 1620003600, username = "Bob" }))
-            Assert.AreEqual(LibP2PDB:Get(db, "Logs", 2), { message = "User logged in", timestamp = 1620003600, username = "Bob" })
-        end,
-
-        Schema_CopySkipNonPrimitiveTypes = function()
-            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-            LibP2PDB:NewTable(db, { name = "Config", keyType = "string" })
-            Assert.IsTrue(LibP2PDB:Insert(db, "Config", "settings", { maxUsers = 100, someFunction = function() end, nestedTable = { a = 1 } }))
-
-            local row = LibP2PDB:Get(db, "Config", "settings")
-            Assert.AreEqual(row, { maxUsers = 100 })
-        end,
-
-        Schema_MultipleTypesAllowed = function()
-            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-            LibP2PDB:NewTable(db, { name = "Metrics", keyType = "string", schema = { value = { "number", "string" }, timestamp = "number" } })
-            Assert.IsTrue(LibP2PDB:Insert(db, "Metrics", "cpu_usage", { value = 75.5, timestamp = 1620000000 }))
-            Assert.AreEqual(LibP2PDB:Get(db, "Metrics", "cpu_usage"), { value = 75.5, timestamp = 1620000000 })
-            Assert.IsTrue(LibP2PDB:Insert(db, "Metrics", "status", { value = "OK", timestamp = 1620003600 }))
-            Assert.AreEqual(LibP2PDB:Get(db, "Metrics", "status"), { value = "OK", timestamp = 1620003600 })
-        end,
-
-        Schema_NilTypeAllowed = function()
-            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-            LibP2PDB:NewTable(db, { name = "Settings", keyType = "string", schema = { value = { "string", "nil" } } })
-            Assert.IsTrue(LibP2PDB:Insert(db, "Settings", "theme", { value = "dark" }))
-            Assert.AreEqual(LibP2PDB:Get(db, "Settings", "theme"), { value = "dark" })
-            Assert.IsTrue(LibP2PDB:Insert(db, "Settings", "notifications", { value = nil }))
-            Assert.AreEqual(LibP2PDB:Get(db, "Settings", "notifications"), { value = nil })
+            local tableDesc = { name = "Users", keyType = "string" }
+            LibP2PDB:NewTable(db, tableDesc)
+            Assert.Throws(function() LibP2PDB:NewTable(db, tableDesc) end)
         end,
 
         Insert = function()
@@ -3848,16 +3911,24 @@ if DEBUG then
     end
 
     local function RunTests()
+        Debug("Running LibP2PDB tests...")
+        local startTime = debugprofilestop()
         for _, v in pairs(UnitTests) do
             RunTest(v)
         end
-        Debug("All tests " .. C(Color.Green, "successful") .. ".")
+        local endTime = debugprofilestop()
+        Debug("All tests %s.", C(Color.Green, "successful"))
+        Debug("Ran all tests in %.2f ms.", endTime - startTime)
     end
 
     local function RunPerformanceTests()
+        Debug("Running LibP2PDB performance tests...")
+        local startTime = debugprofilestop()
         for _, v in pairs(PerformanceTests) do
             RunTest(v)
         end
+        local endTime = debugprofilestop()
+        Debug("Ran all performance tests in %.2f ms.", endTime - startTime)
     end
 
     -- add slash command
