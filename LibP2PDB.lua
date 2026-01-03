@@ -167,7 +167,7 @@ end
 --- @param maxlen number? Optional maximum length.
 --- @return boolean isStringOrNil True if the value is a string or nil, false otherwise.
 local function IsStringOrNil(value, maxlen)
-    return IsString(value, maxlen) or value == nil
+    return value == nil or IsString(value, maxlen)
 end
 
 --- Determine if a value is a non-empty string.
@@ -183,7 +183,7 @@ end
 --- @param maxlen number? Optional maximum length.
 --- @return boolean isNonEmptyStringOrNil True if the value is a non-empty string or nil, false otherwise.
 local function IsNonEmptyStringOrNil(value, maxlen)
-    return IsNonEmptyString(value, maxlen) or value == nil
+    return value == nil or IsNonEmptyString(value, maxlen)
 end
 
 --- Determine if a value is a number.
@@ -201,7 +201,7 @@ end
 --- @param maxValue number? Optional maximum value.
 --- @return boolean isNumberOrNil True if the value is a number or nil, false otherwise.
 local function IsNumberOrNil(value, minValue, maxValue)
-    return IsNumber(value, minValue, maxValue) or value == nil
+    return value == nil or IsNumber(value, minValue, maxValue)
 end
 
 --- Determine if a value is a boolean.
@@ -215,48 +215,57 @@ end
 --- @param value any Value to check if it's a boolean or nil.
 --- @return boolean isBooleanOrNil True if the value is a boolean or nil, false otherwise.
 local function IsBooleanOrNil(value)
-    return IsBoolean(value) or value == nil
+    return value == nil or IsBoolean(value)
 end
 
 --- Determine if a value is a table.
 --- @param value any Value to check if it's a table.
---- @param ... string Optional required keys that must exist in the table.
 --- @return boolean isTable True if the value is a table, false otherwise.
-local function IsTable(value, ...)
-    if type(value) ~= "table" then
-        return false
-    end
-    local vargs = { ... }
-    for k in pairs(vargs) do
-        if value[k] == nil then
-            return false
-        end
-    end
-    return true
+local function IsTable(value)
+    return type(value) == "table"
 end
 
 --- Determine if a value is a table or nil.
 --- @param value any Value to check if it's a table or nil.
---- @param ... string Optional required keys that must exist in the table.
 --- @return boolean isTableOrNil True if the value is a table or nil, false otherwise.
-local function IsTableOrNil(value, ...)
-    return IsTable(value, ...) or value == nil
+local function IsTableOrNil(value)
+    return value == nil or IsTable(value)
 end
 
 --- Determine if a value is a non-empty table.
 --- @param value any Value to check if it's a non-empty table.
---- @param ... string Optional required keys that must exist in the table.
 --- @return boolean isNonEmptyTable True if the value is a non-empty table, false otherwise.
-local function IsNonEmptyTable(value, ...)
-    return IsTable(value, ...) and next(value) ~= nil
+local function IsNonEmptyTable(value)
+    return IsTable(value) and next(value) ~= nil
 end
 
 --- Determine if a value is a non-empty table or nil.
 --- @param value any Value to check if it's a non-empty table or nil.
---- @param ... string Optional required keys that must exist in the table.
 --- @return boolean isNonEmptyTableOrNil True if the value is a non-empty table or nil, false otherwise.
-local function IsNonEmptyTableOrNil(value, ...)
-    return IsNonEmptyTable(value, ...) or value == nil
+local function IsNonEmptyTableOrNil(value)
+    return value == nil or IsNonEmptyTable(value)
+end
+
+--- Determine if a value is a primitive type.
+--- @param value any Value to check if it's a primitive type.
+--- @return boolean isPrimitive True if the value is a primitive type, false otherwise.
+local function IsPrimitive(value)
+    local t = type(value)
+    return t == "boolean" or t == "string" or t == "number" or t == "nil"
+end
+
+--- Determine if a value is a primitive type or nil.
+--- @param value any Value to check if it's a primitive type or nil.
+--- @return boolean isPrimitiveOrNil True if the value is a primitive type or nil, false otherwise.
+local function IsPrimitiveOrNil(value)
+    return value == nil or IsPrimitive(value)
+end
+
+--- Determine if a type name is a primitive type.
+--- @param typeName string Type name to check if it's a primitive type.
+--- @return boolean isPrimitiveType True if the type name is a primitive type, false otherwise.
+local function IsPrimitiveType(typeName)
+    return typeName == "boolean" or typeName == "string" or typeName == "number" or typeName == "nil"
 end
 
 --- Determine if a value is a function.
@@ -270,29 +279,31 @@ end
 --- @param value any Value to check if it's a function or nil.
 --- @return boolean isFunctionOrNil True if the value is a function or nil, false otherwise.
 local function IsFunctionOrNil(value)
-    return IsFunction(value) or value == nil
+    return value == nil or IsFunction(value)
 end
 
---- Determine if a value is a primitive type.
---- @param value any Value to check if it's a primitive type.
---- @return boolean isPrimitive True if the value is a primitive type, false otherwise.
-local function IsPrimitive(value)
-    local t = type(value)
-    return t == "string" or t == "number" or t == "boolean" or t == "nil"
+--- Determine if a value implements an interface (has required function names).
+--- @param value any Value to check if it implements the interface.
+--- @param ... string Function names required by the interface.
+local function IsInterface(value, ...)
+    if type(value) ~= "table" then
+        return false
+    end
+    local interface = { ... }
+    for _, fnName in ipairs(interface) do
+        local fn = value[fnName]
+        if not IsFunction(fn) then
+            return false
+        end
+    end
+    return true
 end
 
---- Determine if a value is a primitive type or nil.
---- @param value any Value to check if it's a primitive type or nil.
---- @return boolean isPrimitiveOrNil True if the value is a primitive type or nil, false otherwise.
-local function IsPrimitiveOrNil(value)
-    return IsPrimitive(value) or value == nil
-end
-
---- Determine if a type name is a primitive type.
---- @param typeName string Type name to check if it's a primitive type.
---- @return boolean isPrimitiveType True if the type name is a primitive type, false otherwise.
-local function IsPrimitiveType(typeName)
-    return typeName == "string" or typeName == "number" or typeName == "boolean" or typeName == "nil"
+--- Determine if a value implements an interface or is nil.
+--- @param value any Value to check if it implements the interface or is nil.
+--- @param ... string Function names required by the interface.
+local function IsInterfaceOrNil(value, ...)
+    return value == nil or IsInterface(value, ...)
 end
 
 --- Determine if an array contains a value.
@@ -506,19 +517,20 @@ end)
 --- @alias LibP2PDB.DBOnChangeCallback fun(tableName: string, key: LibP2PDB.TableKey, data: LibP2PDB.TableRowData?) Callback function invoked on any row change.
 --- @alias LibP2PDB.DBOnDiscoveryCompleteCallback fun(isInitial: boolean) Callback function invoked when peer discovery completes.
 
---- Create a new database for peer-to-peer synchronization.
+--- Create a new peer-to-peer synchronized database instance.
 --- Each database is identified by a unique prefix and operates independently.
 --- Database configuration cannot be changed after creation.
---- Use GetDB to retrieve existing databases by prefix.
+--- Use GetDatabase to retrieve existing databases by prefix.
 --- @param desc LibP2PDB.DBDesc Description of the database to create.
 --- @return LibP2PDB.DBHandle dbh The newly created database handle.
-function LibP2PDB:NewDB(desc)
+function LibP2PDB:NewDatabase(desc)
     assert(IsNonEmptyTable(desc), "desc must be a non-empty table")
     assert(IsNonEmptyString(desc.prefix, 16), "desc.prefix must be a non-empty string (max 16 chars)")
+    assert(IsFunctionOrNil(desc.onError), "desc.onError must be a function if provided")
     assert(IsNonEmptyTableOrNil(desc.channels), "desc.channels must be a non-empty array of string if provided")
-    assert(IsTableOrNil(desc.serializer, "Serialize", "Deserialize"), "desc.serializer must be a serializer interface if provided")
-    assert(IsTableOrNil(desc.compressor, "Compress", "Decompress"), "desc.compressor must be a compressor interface if provided")
-    assert(IsTableOrNil(desc.encoder, "EncodeChannel", "DecodeChannel", "EncodePrint", "DecodePrint"), "desc.encoder must be an encoder interface if provided")
+    assert(IsInterfaceOrNil(desc.serializer, "Serialize", "Deserialize"), "desc.serializer must be a serializer interface if provided")
+    assert(IsInterfaceOrNil(desc.compressor, "Compress", "Decompress"), "desc.compressor must be a compressor interface if provided")
+    assert(IsInterfaceOrNil(desc.encoder, "EncodeChannel", "DecodeChannel", "EncodePrint", "DecodePrint"), "desc.encoder must be an encoder interface if provided")
     assert(IsFunctionOrNil(desc.onChange), "desc.onChange must be a function if provided")
     assert(IsNumberOrNil(desc.discoveryQuietPeriod, 0), "desc.discoveryQuietPeriod must be a positive number if provided")
     assert(IsNumberOrNil(desc.discoveryMaxTime, 0), "desc.discoveryMaxTime must be a positive number if provided")
@@ -657,7 +669,7 @@ end
 --- Retrieve a database by its prefix.
 --- @param prefix string Unique communication prefix for the database (max 16 chars).
 --- @return LibP2PDB.DBHandle? dbh The database handle if found, or nil if not found.
-function LibP2PDB:GetDB(prefix)
+function LibP2PDB:GetDatabase(prefix)
     assert(IsNonEmptyString(prefix, 16), "prefix must be a non-empty string (max 16 chars)")
     return Private.prefixes[prefix]
 end
@@ -2019,7 +2031,7 @@ function Private:OnCommReceived(prefix, encoded, channel, sender)
     end
 
     -- Get the database instance for this prefix
-    local db = LibP2PDB:GetDB(prefix)
+    local db = LibP2PDB:GetDatabase(prefix)
     if not db then
         Debug("received message for unknown prefix '%s' from channel '%s' sender '%s'", tostring(prefix), tostring(channel), tostring(sender))
         return
@@ -2308,47 +2320,33 @@ end
 ------------------------------------------------------------------------------------------------------------------------
 
 if DEBUG then
-    local function Equal(a, b)
-        assert(a ~= nil, "first value is nil")
-        assert(b ~= nil, "second value is nil")
-        if type(a) ~= type(b) then return false end
-        if type(a) ~= "table" then return a == b end
-        for k, v in pairs(a) do
-            if not Equal(v, b[k]) then return false end
-        end
-        for k, v in pairs(b) do
-            if not Equal(v, a[k]) then return false end
-        end
-        return true
-    end
-
     local Assert = {
         IsNil = function(value, msg) assert(value == nil, msg or "value is not nil") end,
         IsNotNil = function(value, msg) assert(value ~= nil, msg or "value is nil") end,
-        IsTrue = function(value, msg) assert(type(value) == "boolean" and value == true, msg or "value is not true") end,
-        IsFalse = function(value, msg) assert(type(value) == "boolean" and value == false, msg or "value is not false") end,
-        IsNumber = function(value, msg) assert(type(value) == "number", msg or "value is not a number") end,
-        IsNotNumber = function(value, msg) assert(type(value) ~= "number", msg or "value is a number") end,
-        IsString = function(value, msg) assert(type(value) == "string", msg or "value is not a string") end,
-        IsNonEmptyString = function(value, msg) assert(type(value) == "string" and #value > 0, msg or "value is not a non-empty string") end,
-        IsNotString = function(value, msg) assert(type(value) ~= "string", msg or "value is a string") end,
-        IsTable = function(value, msg) assert(type(value) == "table", msg or "value is not a table") end,
-        IsNonEmptyTable = function(value, msg) assert(type(value) == "table" and next(value) ~= nil, msg or "value is not a non-empty table") end,
-        IsNotTable = function(value, msg) assert(type(value) ~= "table", msg or "value is a table") end,
-        IsFunction = function(value, msg) assert(type(value) == "function", msg or "value is not a function") end,
-        IsNotFunction = function(value, msg) assert(type(value) ~= "function", msg or "value is a function") end,
-        AreEqual = function(actual, expected, msg) assert(Equal(actual, expected) == true, msg or format("values are not equal, expected '%s' but got '%s'", tostring(expected), tostring(actual))) end,
-        AreNotEqual = function(actual, expected, msg) assert(Equal(actual, expected) == false, msg or format("values are equal, both are '%s'", tostring(actual))) end,
-        IsEmptyString = function(value, msg) assert(type(value) == "string" and #value == 0, msg or "value is not an empty string") end,
-        IsNotEmptyString = function(value, msg) assert(type(value) == "string" and #value > 0, msg or "value is an empty string") end,
-        IsEmptyTable = function(value, msg) assert(type(value) == "table" and next(value) == nil, msg or "value is not an empty table") end,
-        IsNotEmptyTable = function(value, msg) assert(type(value) == "table" and next(value) ~= nil, msg or "value is an empty table") end,
+        IsTrue = function(value, msg) assert(value == true, msg or "value is not true") end,
+        IsFalse = function(value, msg) assert(value == false, msg or "value is not false") end,
+        IsNumber = function(value, msg) assert(IsNumber(value), msg or "value is not a number") end,
+        IsString = function(value, msg) assert(IsString(value), msg or "value is not a string") end,
+        IsEmptyString = function(value, msg) assert(IsString(value) and #value == 0, msg or "value is not an empty string") end,
+        IsNonEmptyString = function(value, msg) assert(IsNonEmptyString(value), msg or "value is not a non-empty string") end,
+        IsTable = function(value, msg) assert(IsTable(value), msg or "value is not a table") end,
+        IsEmptyTable = function(value, msg) assert(IsTable(value) and next(value) == nil, msg or "value is not an empty table") end,
+        IsNonEmptyTable = function(value, msg) assert(IsNonEmptyTable(value), msg or "value is not a non-empty table") end,
+        IsFunction = function(value, msg) assert(IsFunction(value), msg or "value is not a function") end,
+        IsInterface = function(value, interface, msg)
+            assert(IsTable(value), msg or "value is not a table")
+            for _, fnName in ipairs(interface) do
+                assert(IsFunction(value[fnName]), msg or format("value is missing function '%s'", tostring(fnName)))
+            end
+        end,
+        AreEqual = function(actual, expected, msg) assert(DeepEqual(actual, expected) == true, msg or format("values are not equal, expected '%s' but got '%s'", tostring(expected), tostring(actual))) end,
+        AreNotEqual = function(actual, expected, msg) assert(DeepEqual(actual, expected) == false, msg or format("values are equal, both are '%s'", tostring(actual))) end,
         Contains = function(haystack, needle, msg)
             if type(haystack) == "string" then
                 assert(strfind(haystack, needle, 1, true) ~= nil, msg or format("string does not contain '%s'", tostring(needle)))
             elseif type(haystack) == "table" then
                 for _, v in pairs(haystack) do
-                    if Equal(v, needle) then
+                    if DeepEqual(v, needle) then
                         return
                     end
                 end
@@ -2362,7 +2360,7 @@ if DEBUG then
                 assert(strfind(haystack, needle, 1, true) == nil, msg or format("string contains '%s'", tostring(needle)))
             elseif type(haystack) == "table" then
                 for _, v in pairs(haystack) do
-                    if Equal(v, needle) then
+                    if DeepEqual(v, needle) then
                         assert(false, msg or format("table contains value '%s'", tostring(needle)))
                         return
                     end
@@ -2387,102 +2385,250 @@ if DEBUG then
 
     --- @diagnostic disable: param-type-mismatch, assign-type-mismatch, missing-fields
     local UnitTests = {
-        New = function()
-            local db = LibP2PDB:NewDB({
-                prefix = "LibP2PDBTests",
-                channels = { "GUILD" },
-                onChange = function(table, key, row) end,
-                discoveryQuietPeriod = 5,
-                discoveryMaxTime = 30,
-                onDiscoveryComplete = function(isInitial) end,
-            })
-            Assert.IsTable(db)
+        NewDatabase = function()
+            do -- check new database creation with minimal description
+                Assert.IsNil(LibP2PDB:GetDatabase("LibP2PDBTests1"))
+                local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
+                Assert.IsEmptyTable(db)
+                Assert.AreEqual(LibP2PDB:GetDatabase("LibP2PDBTests1"), db)
 
-            local dbi = Private.databases[db]
-            Assert.IsTable(dbi)
-            Assert.AreEqual(dbi.prefix, "LibP2PDBTests")
-            Assert.AreEqual(dbi.clock, 0)
-            Assert.IsTable(dbi.peers)
-            Assert.AreEqual(dbi.channels, { "GUILD" })
-            Assert.AreEqual(dbi.discoveryQuietPeriod, 5)
-            Assert.AreEqual(dbi.discoveryMaxTime, 30)
-            Assert.IsEmptyTable(dbi.tables)
-            Assert.IsFunction(dbi.onChange)
-            Assert.IsFunction(dbi.onDiscoveryComplete)
-            --Assert.IsNil(dbi.writePolicy)
+                -- verify internal database instance
+                local dbi = Private.databases[db]
+                Assert.IsNonEmptyTable(dbi)
+                Assert.AreEqual(dbi.prefix, "LibP2PDBTests1")
+                Assert.AreEqual(dbi.clock, 0)
+                Assert.IsNil(dbi.channels)
+                Assert.AreEqual(dbi.discoveryQuietPeriod, 1)
+                Assert.AreEqual(dbi.discoveryMaxTime, 3)
+                Assert.IsInterface(dbi.serializer, { "Serialize", "Deserialize" })
+                Assert.IsInterface(dbi.compressor, { "Compress", "Decompress" })
+                Assert.IsInterface(dbi.encoder, { "EncodeChannel", "DecodeChannel", "EncodePrint", "DecodePrint" })
+                Assert.IsEmptyTable(dbi.peers)
+                Assert.IsEmptyTable(dbi.buckets)
+                Assert.IsEmptyTable(dbi.tables)
+                Assert.IsNil(dbi.onError)
+                Assert.IsNil(dbi.onChange)
+                Assert.IsNil(dbi.onDiscoveryComplete)
+                Assert.IsNil(dbi.discoveryStartTime)
+                Assert.IsNil(dbi.lastDiscoveryResponseTime)
+                Assert.IsNil(dbi.isInitialDiscoveryComplete)
+            end
 
-            Assert.Throws(function() LibP2PDB:NewDB({ prefix = "LibP2PDBTests" }) end)
+            do -- check new database creation with full description
+                Assert.IsNil(LibP2PDB:GetDatabase("LibP2PDBTests2"))
+                local db = LibP2PDB:NewDatabase({
+                    prefix = "LibP2PDBTests2",
+                    onError = function(dbi, msg) end,
+                    channels = { "CUSTOM" },
+                    serializer = AceSerializer,
+                    compressor = {
+                        Compress = function(self, str) return str end,
+                        Decompress = function(self, str) return str end
+                    },
+                    encoder = {
+                        EncodeChannel = function(self, str) return str end,
+                        DecodeChannel = function(self, str) return str end,
+                        EncodePrint = function(self, str) return str end,
+                        DecodePrint = function(self, str) return str end
+                    },
+                    onChange = function(table, key, row) end,
+                    discoveryQuietPeriod = 5,
+                    discoveryMaxTime = 30,
+                    onDiscoveryComplete = function(isInitial) end,
+                })
+                Assert.IsEmptyTable(db)
+                Assert.AreEqual(LibP2PDB:GetDatabase("LibP2PDBTests2"), db)
+
+                -- verify internal database instance
+                local dbi = Private.databases[db]
+                Assert.IsNonEmptyTable(dbi)
+                Assert.AreEqual(dbi.prefix, "LibP2PDBTests2")
+                Assert.AreEqual(dbi.clock, 0)
+                Assert.AreEqual(dbi.channels, { "CUSTOM" })
+                Assert.AreEqual(dbi.discoveryQuietPeriod, 5)
+                Assert.AreEqual(dbi.discoveryMaxTime, 30)
+                Assert.IsInterface(dbi.serializer, { "Serialize", "Deserialize" })
+                Assert.IsInterface(dbi.compressor, { "Compress", "Decompress" })
+                Assert.IsInterface(dbi.encoder, { "EncodeChannel", "DecodeChannel", "EncodePrint", "DecodePrint" })
+                Assert.IsEmptyTable(dbi.peers)
+                Assert.IsEmptyTable(dbi.buckets)
+                Assert.IsEmptyTable(dbi.tables)
+                Assert.IsFunction(dbi.onError)
+                Assert.IsFunction(dbi.onChange)
+                Assert.IsFunction(dbi.onDiscoveryComplete)
+                Assert.IsNil(dbi.discoveryStartTime)
+                Assert.IsNil(dbi.lastDiscoveryResponseTime)
+                Assert.IsNil(dbi.isInitialDiscoveryComplete)
+            end
         end,
 
-        NewDB_DescIsInvalid_Throws = function()
-            Assert.Throws(function() LibP2PDB:NewDB(nil) end)
-            Assert.Throws(function() LibP2PDB:NewDB(123) end)
-            Assert.Throws(function() LibP2PDB:NewDB("invalid") end)
-            Assert.Throws(function() LibP2PDB:NewDB({}) end)
+        NewDatabase_DescIsInvalid_Throws = function()
+            Assert.Throws(function() LibP2PDB:NewDatabase(nil) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase(true) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase(false) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase("") end)
+            Assert.Throws(function() LibP2PDB:NewDatabase("invalid") end)
+            Assert.Throws(function() LibP2PDB:NewDatabase(123) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({}) end)
         end,
 
-        NewDB_DescPrefixIsInvalid_Throws = function()
-            Assert.Throws(function() LibP2PDB:NewDB({ prefix = nil }) end)
-            Assert.Throws(function() LibP2PDB:NewDB({ prefix = 123 }) end)
-            Assert.Throws(function() LibP2PDB:NewDB({ prefix = {} }) end)
-            Assert.Throws(function() LibP2PDB:NewDB({ prefix = "" }) end)
-            Assert.Throws(function() LibP2PDB:NewDB({ prefix = "abcdefg1234567890" }) end)
+        NewDatabase_DescPrefixIsInvalid_Throws = function()
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = nil }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = true }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = false }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "" }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "this_prefix_is_longer_than_16_characters" }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = 123 }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = {} }) end)
         end,
 
-        NewDB_DescChannelsIsInvalid_Throws = function()
-            Assert.Throws(function() LibP2PDB:NewDB({ prefix = "LibP2PDBTests", channels = "invalid" }) end)
-            Assert.Throws(function() LibP2PDB:NewDB({ prefix = "LibP2PDBTests", channels = 123 }) end)
-            Assert.Throws(function() LibP2PDB:NewDB({ prefix = "LibP2PDBTests", channels = {} }) end)
+        NewDatabase_DescOnErrorIsInvalid_Throws = function()
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onError = true }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onError = false }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onError = "" }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onError = "invalid" }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onError = 123 }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onError = {} }) end)
         end,
 
-        NewDB_DescOnChangeIsInvalid_Throws = function()
-            Assert.Throws(function() LibP2PDB:NewDB({ prefix = "LibP2PDBTests", onChange = "invalid" }) end)
-            Assert.Throws(function() LibP2PDB:NewDB({ prefix = "LibP2PDBTests", onChange = 123 }) end)
-            Assert.Throws(function() LibP2PDB:NewDB({ prefix = "LibP2PDBTests", onChange = {} }) end)
+        NewDatabase_DescChannelsIsInvalid_Throws = function()
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", channels = true }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", channels = false }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", channels = "" }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", channels = "invalid" }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", channels = 123 }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", channels = {} }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", channels = { true } }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", channels = { false } }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", channels = { "" } }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", channels = { 123 } }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", channels = { {} } }) end)
         end,
 
-        NewDB_DescDiscoveryQuietPeriodIsInvalid_Throws = function()
-            Assert.Throws(function() LibP2PDB:NewDB({ prefix = "LibP2PDBTests", discoveryQuietPeriod = -1 }) end)
-            Assert.Throws(function() LibP2PDB:NewDB({ prefix = "LibP2PDBTests", discoveryQuietPeriod = "invalid" }) end)
-            Assert.Throws(function() LibP2PDB:NewDB({ prefix = "LibP2PDBTests", discoveryQuietPeriod = {} }) end)
+        NewDatabase_DescOnChangeIsInvalid_Throws = function()
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = true }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = false }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = "" }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = "invalid" }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = 123 }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = {} }) end)
         end,
 
-        NewDB_DescDiscoveryMaxTimeIsInvalid_Throws = function()
-            Assert.Throws(function() LibP2PDB:NewDB({ prefix = "LibP2PDBTests", discoveryMaxTime = -1 }) end)
-            Assert.Throws(function() LibP2PDB:NewDB({ prefix = "LibP2PDBTests", discoveryMaxTime = "invalid" }) end)
-            Assert.Throws(function() LibP2PDB:NewDB({ prefix = "LibP2PDBTests", discoveryMaxTime = {} }) end)
+        NewDatabase_DescDiscoveryQuietPeriodIsInvalid_Throws = function()
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", discoveryQuietPeriod = true }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", discoveryQuietPeriod = false }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", discoveryQuietPeriod = -1 }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", discoveryQuietPeriod = "" }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", discoveryQuietPeriod = "invalid" }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", discoveryQuietPeriod = {} }) end)
         end,
 
-        NewDB_DescOnDiscoveryCompleteIsInvalid_Throws = function()
-            Assert.Throws(function() LibP2PDB:NewDB({ prefix = "LibP2PDBTests", onDiscoveryComplete = "invalid" }) end)
-            Assert.Throws(function() LibP2PDB:NewDB({ prefix = "LibP2PDBTests", onDiscoveryComplete = 123 }) end)
-            Assert.Throws(function() LibP2PDB:NewDB({ prefix = "LibP2PDBTests", onDiscoveryComplete = {} }) end)
+        NewDatabase_DescDiscoveryMaxTimeIsInvalid_Throws = function()
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", discoveryMaxTime = true }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", discoveryMaxTime = false }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", discoveryMaxTime = -1 }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", discoveryMaxTime = "" }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", discoveryMaxTime = "invalid" }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", discoveryMaxTime = {} }) end)
         end,
 
-        GetDB = function()
-            local db1 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests1" })
-            local db2 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests2" })
+        NewDatabase_DescOnDiscoveryCompleteIsInvalid_Throws = function()
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onDiscoveryComplete = true }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onDiscoveryComplete = false }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onDiscoveryComplete = "" }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onDiscoveryComplete = "invalid" }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onDiscoveryComplete = 123 }) end)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onDiscoveryComplete = {} }) end)
+        end,
 
-            local fetched1 = LibP2PDB:GetDB("LibP2PDBTests1")
+        NewDatabase_PrefixAlreadyExists_Throws = function()
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+            Assert.IsEmptyTable(db)
+            Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" }) end)
+        end,
+
+        NewDatabase_DefaultSerializerNotFound_Throws = function()
+            -- can't test this properly since we do not want to unload libraries
+        end,
+
+        NewDatabase_CustomSerializerFails_Throws = function()
+            Assert.Throws(function()
+                LibP2PDB:NewDatabase({
+                    prefix = "LibP2PDBTests",
+                    serializer = {
+                        Serialize = function(self, value) return tostring(value) end,
+                        Deserialize = function(self, str) return true, {} end,
+                    },
+                })
+            end)
+        end,
+
+        NewDatabase_DefaultCompressorNotFound_Throws = function()
+            -- can't test this properly since we do not want to unload libraries
+        end,
+
+        NewDatabase_CustomCompressorFails_Throws = function()
+            Assert.Throws(function()
+                LibP2PDB:NewDatabase({
+                    prefix = "LibP2PDBTests",
+                    compressor = {
+                        Compress = function(self, str) return str end,
+                        Decompress = function(self, str) return nil end,
+                    },
+                })
+            end)
+        end,
+
+        NewDatabase_DefaultEncoderNotFound_Throws = function()
+            -- can't test this properly since we do not want to unload libraries
+        end,
+
+        NewDatabase_CustomEncoderFails_Throws = function()
+            Assert.Throws(function()
+                LibP2PDB:NewDatabase({
+                    prefix = "LibP2PDBTests",
+                    encoder = {
+                        EncodeChannel = function(self, str) return str end,
+                        DecodeChannel = function(self, str) return nil end,
+                        EncodePrint = function(self, str) return str end,
+                        DecodePrint = function(self, str) return nil end,
+                    },
+                })
+            end)
+        end,
+
+        NewDatabase_RegistersCommPrefix = function()
+            local db = LibP2PDB:NewDatabase({ prefix = "_LibP2PDBTests_" })
+            Assert.IsEmptyTable(db)
+            Assert.IsTrue(C_ChatInfo.IsAddonMessagePrefixRegistered("_LibP2PDBTests_"))
+        end,
+
+        GetDatabase = function()
+            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
+            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
+
+            local fetched1 = LibP2PDB:GetDatabase("LibP2PDBTests1")
             Assert.AreEqual(fetched1, db1)
 
-            local fetched2 = LibP2PDB:GetDB("LibP2PDBTests2")
+            local fetched2 = LibP2PDB:GetDatabase("LibP2PDBTests2")
             Assert.AreEqual(fetched2, db2)
 
-            local fetchedNil = LibP2PDB:GetDB("NonExistent")
+            local fetchedNil = LibP2PDB:GetDatabase("NonExistent")
             Assert.IsNil(fetchedNil)
         end,
 
-        GetDB_PrefixIsInvalid_Throws = function()
-            Assert.Throws(function() LibP2PDB:GetDB(nil) end)
-            Assert.Throws(function() LibP2PDB:GetDB(123) end)
-            Assert.Throws(function() LibP2PDB:GetDB({}) end)
-            Assert.Throws(function() LibP2PDB:GetDB("") end)
-            Assert.Throws(function() LibP2PDB:GetDB("abcdefg1234567890") end)
+        GetDatabase_PrefixIsInvalid_Throws = function()
+            Assert.Throws(function() LibP2PDB:GetDatabase(nil) end)
+            Assert.Throws(function() LibP2PDB:GetDatabase(true) end)
+            Assert.Throws(function() LibP2PDB:GetDatabase(false) end)
+            Assert.Throws(function() LibP2PDB:GetDatabase("") end)
+            Assert.Throws(function() LibP2PDB:GetDatabase("this_prefix_is_longer_than_16_characters") end)
+            Assert.Throws(function() LibP2PDB:GetDatabase(123) end)
+            Assert.Throws(function() LibP2PDB:GetDatabase({}) end)
         end,
 
         NewTable = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, {
                 name = "Users",
                 keyType = "string",
@@ -2534,7 +2680,7 @@ if DEBUG then
         end,
 
         NewTable_DescIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:NewTable(db, nil) end)
             Assert.Throws(function() LibP2PDB:NewTable(db, 123) end)
             Assert.Throws(function() LibP2PDB:NewTable(db, "invalid") end)
@@ -2542,36 +2688,36 @@ if DEBUG then
         end,
 
         NewTable_DescNameIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:NewTable(db, { name = nil, keyType = "string" }) end)
             Assert.Throws(function() LibP2PDB:NewTable(db, { name = 123, keyType = "string" }) end)
             Assert.Throws(function() LibP2PDB:NewTable(db, { name = "", keyType = "string" }) end)
         end,
 
         NewTable_DescKeyTypeIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = nil }) end)
             Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = 123 }) end)
             Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "invalid" }) end)
         end,
 
         NewTable_DescSchemaIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = 123 }) end)
         end,
 
         NewTable_DescOnValidateIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", onValidate = 123 }) end)
         end,
 
         NewTable_DescOnChangeIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", onChange = 123 }) end)
         end,
 
         Schema_OnlyPrimitiveTypesAllowed = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Products", keyType = "number", schema = { a = "function" } }) end)
             Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Products", keyType = "number", schema = { a = "table" } }) end)
             Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Products", keyType = "number", schema = { a = "userdata" } }) end)
@@ -2579,7 +2725,7 @@ if DEBUG then
         end,
 
         Schema_IsOptional = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Logs", keyType = "number" })
             Assert.IsTrue(LibP2PDB:Insert(db, "Logs", 1, { message = "System started", timestamp = 1620000000 }))
             Assert.AreEqual(LibP2PDB:Get(db, "Logs", 1), { message = "System started", timestamp = 1620000000 })
@@ -2588,7 +2734,7 @@ if DEBUG then
         end,
 
         Schema_CopySkipNonPrimitiveTypes = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Config", keyType = "string" })
             Assert.IsTrue(LibP2PDB:Insert(db, "Config", "settings", { maxUsers = 100, someFunction = function() end, nestedTable = { a = 1 } }))
 
@@ -2597,7 +2743,7 @@ if DEBUG then
         end,
 
         Schema_MultipleTypesAllowed = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Metrics", keyType = "string", schema = { value = { "number", "string" }, timestamp = "number" } })
             Assert.IsTrue(LibP2PDB:Insert(db, "Metrics", "cpu_usage", { value = 75.5, timestamp = 1620000000 }))
             Assert.AreEqual(LibP2PDB:Get(db, "Metrics", "cpu_usage"), { value = 75.5, timestamp = 1620000000 })
@@ -2606,7 +2752,7 @@ if DEBUG then
         end,
 
         Schema_NilTypeAllowed = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Settings", keyType = "string", schema = { value = { "string", "nil" } } })
             Assert.IsTrue(LibP2PDB:Insert(db, "Settings", "theme", { value = "dark" }))
             Assert.AreEqual(LibP2PDB:Get(db, "Settings", "theme"), { value = "dark" })
@@ -2615,7 +2761,7 @@ if DEBUG then
         end,
 
         Insert = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, {
                 name = "Users",
                 keyType = "number",
@@ -2646,7 +2792,7 @@ if DEBUG then
         end,
 
         Insert_FireCallbacks = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             local callbackFired = false
             LibP2PDB:NewTable(db, {
                 name = "Users",
@@ -2664,7 +2810,7 @@ if DEBUG then
         end,
 
         Insert_AfterTombstone_Succeeds = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, {
                 name = "Users",
                 keyType = "number",
@@ -2690,27 +2836,27 @@ if DEBUG then
         end,
 
         Insert_TableIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:Insert(db, nil, 1, { name = "A" }) end)
             Assert.Throws(function() LibP2PDB:Insert(db, 123, 1, { name = "A" }) end)
             Assert.Throws(function() LibP2PDB:Insert(db, {}, 1, { name = "A" }) end)
         end,
 
         Insert_KeyIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
             Assert.Throws(function() LibP2PDB:Insert(db, "Users", nil, { name = "A" }) end)
             Assert.Throws(function() LibP2PDB:Insert(db, "Users", {}, { name = "A" }) end)
         end,
 
         Insert_KeyTypeMismatch_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "number" })
             Assert.Throws(function() LibP2PDB:Insert(db, "Users", "user1", { name = "A" }) end)
         end,
 
         Insert_RowIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
             Assert.Throws(function() LibP2PDB:Insert(db, "Users", "user1", nil) end)
             Assert.Throws(function() LibP2PDB:Insert(db, "Users", "user1", 123) end)
@@ -2718,14 +2864,14 @@ if DEBUG then
         end,
 
         Insert_RowSchemaMismatch_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             Assert.Throws(function() LibP2PDB:Insert(db, "Users", 1, { name = "Bob" }) end)
             Assert.Throws(function() LibP2PDB:Insert(db, "Users", 1, { name = "Bob", age = "25" }) end)
         end,
 
         Set = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, {
                 name = "Users",
                 keyType = "number",
@@ -2756,7 +2902,7 @@ if DEBUG then
         end,
 
         Set_WhenChanges_FireCallbacks = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             local callbackFired = false
             LibP2PDB:NewTable(db, {
                 name = "Users",
@@ -2789,27 +2935,27 @@ if DEBUG then
         end,
 
         Set_TableIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:Set(db, nil, 1, { name = "A" }) end)
             Assert.Throws(function() LibP2PDB:Set(db, 123, 1, { name = "A" }) end)
             Assert.Throws(function() LibP2PDB:Set(db, {}, 1, { name = "A" }) end)
         end,
 
         Set_KeyIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
             Assert.Throws(function() LibP2PDB:Set(db, "Users", nil, { name = "A" }) end)
             Assert.Throws(function() LibP2PDB:Set(db, "Users", {}, { name = "A" }) end)
         end,
 
         Set_KeyTypeMismatch_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "number" })
             Assert.Throws(function() LibP2PDB:Set(db, "Users", "user1", { name = "A" }) end)
         end,
 
         Set_RowIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
             Assert.Throws(function() LibP2PDB:Set(db, "Users", "user1", nil) end)
             Assert.Throws(function() LibP2PDB:Set(db, "Users", "user1", 123) end)
@@ -2817,14 +2963,14 @@ if DEBUG then
         end,
 
         Set_RowSchemaMismatch_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             Assert.Throws(function() LibP2PDB:Set(db, "Users", 1, { name = "Bob" }) end)
             Assert.Throws(function() LibP2PDB:Set(db, "Users", 1, { name = "Bob", age = "25" }) end)
         end,
 
         Update = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             LibP2PDB:Insert(db, "Users", 1, { name = "Bob", age = 25 })
             local updateFn = function(row)
@@ -2838,7 +2984,7 @@ if DEBUG then
         end,
 
         Update_WhenChanges_FireCallbacks = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             local callbackFired = false
             LibP2PDB:NewTable(db, {
                 name = "Users",
@@ -2873,21 +3019,21 @@ if DEBUG then
         end,
 
         Update_TableIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:Update(db, nil, 1, function(data) return data end) end)
             Assert.Throws(function() LibP2PDB:Update(db, 123, 1, function(data) return data end) end)
             Assert.Throws(function() LibP2PDB:Update(db, {}, 1, function(data) return data end) end)
         end,
 
         Update_KeyIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
             Assert.Throws(function() LibP2PDB:Update(db, "Users", nil, function(data) return data end) end)
             Assert.Throws(function() LibP2PDB:Update(db, "Users", {}, function(data) return data end) end)
         end,
 
         Update_UpdateFunctionIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
             LibP2PDB:Insert(db, "Users", "user1", { name = "A" })
             Assert.Throws(function() LibP2PDB:Update(db, "Users", "user1", nil) end)
@@ -2896,7 +3042,7 @@ if DEBUG then
         end,
 
         Update_UpdateFunctionRowParameter_IsNotModified = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             LibP2PDB:Insert(db, "Users", 1, { name = "Bob", age = 25 })
             LibP2PDB:Update(db, "Users", 1, function(row)
@@ -2908,7 +3054,7 @@ if DEBUG then
         end,
 
         Get = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             LibP2PDB:Insert(db, "Users", 1, { name = "Bob", age = 25 })
             Assert.AreEqual(LibP2PDB:Get(db, "Users", 1), { name = "Bob", age = 25 })
@@ -2923,21 +3069,21 @@ if DEBUG then
         end,
 
         Get_TableIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:Get(db, nil, 1) end)
             Assert.Throws(function() LibP2PDB:Get(db, 123, 1) end)
             Assert.Throws(function() LibP2PDB:Get(db, {}, 1) end)
         end,
 
         Get_KeyIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
             Assert.Throws(function() LibP2PDB:Get(db, "Users", nil) end)
             Assert.Throws(function() LibP2PDB:Get(db, "Users", {}) end)
         end,
 
         HasKey = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             LibP2PDB:Insert(db, "Users", 1, { name = "Bob", age = 25 })
             Assert.IsTrue(LibP2PDB:HasKey(db, "Users", 1))
@@ -2952,21 +3098,21 @@ if DEBUG then
         end,
 
         HasKey_TableIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:HasKey(db, nil, 1) end)
             Assert.Throws(function() LibP2PDB:HasKey(db, 123, 1) end)
             Assert.Throws(function() LibP2PDB:HasKey(db, {}, 1) end)
         end,
 
         HasKey_KeyIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
             Assert.Throws(function() LibP2PDB:HasKey(db, "Users", nil) end)
             Assert.Throws(function() LibP2PDB:HasKey(db, "Users", {}) end)
         end,
 
         Delete = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             LibP2PDB:Insert(db, "Users", 1, { name = "Bob", age = 25 })
             Assert.IsTable(Private.databases[db].tables["Users"].rows[1].data)
@@ -2987,7 +3133,7 @@ if DEBUG then
         end,
 
         Delete_WhenChanges_FireCallbacks = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             local callbackFired = false
             LibP2PDB:NewTable(db, {
                 name = "Users",
@@ -3023,21 +3169,21 @@ if DEBUG then
         end,
 
         Delete_TableIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:Delete(db, nil, 1) end)
             Assert.Throws(function() LibP2PDB:Delete(db, 123, 1) end)
             Assert.Throws(function() LibP2PDB:Delete(db, {}, 1) end)
         end,
 
         Delete_KeyIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
             Assert.Throws(function() LibP2PDB:Delete(db, "Users", nil) end)
             Assert.Throws(function() LibP2PDB:Delete(db, "Users", {}) end)
         end,
 
         Version = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string" } })
             LibP2PDB:Insert(db, "Users", 1, { name = "Bob" })
 
@@ -3066,7 +3212,7 @@ if DEBUG then
         end,
 
         Version_WhenPeerEqualsKey_PeerValueIsEqualChar = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { name = "string" } })
 
             LibP2PDB:Insert(db, "Users", Private.peerId, { name = "Bob" })
@@ -3102,7 +3248,7 @@ if DEBUG then
         end,
 
         Subscribe = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             local callbackInvoked = 0
             local callback = function(key, row)
@@ -3124,14 +3270,14 @@ if DEBUG then
         end,
 
         Subscribe_TableIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:Subscribe(db, nil, function() end) end)
             Assert.Throws(function() LibP2PDB:Subscribe(db, 123, function() end) end)
             Assert.Throws(function() LibP2PDB:Subscribe(db, {}, function() end) end)
         end,
 
         Subscribe_CallbackIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
             Assert.Throws(function() LibP2PDB:Subscribe(db, "Users", nil) end)
             Assert.Throws(function() LibP2PDB:Subscribe(db, "Users", 123) end)
@@ -3139,7 +3285,7 @@ if DEBUG then
         end,
 
         Unsubscribe = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             local callbackInvoked = 0
             local callback = function(key, row)
@@ -3160,14 +3306,14 @@ if DEBUG then
         end,
 
         Unsubscribe_TableIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:Unsubscribe(db, nil, function() end) end)
             Assert.Throws(function() LibP2PDB:Unsubscribe(db, 123, function() end) end)
             Assert.Throws(function() LibP2PDB:Unsubscribe(db, {}, function() end) end)
         end,
 
         Unsubscribe_CallbackIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
             Assert.Throws(function() LibP2PDB:Unsubscribe(db, "Users", nil) end)
             Assert.Throws(function() LibP2PDB:Unsubscribe(db, "Users", 123) end)
@@ -3175,7 +3321,7 @@ if DEBUG then
         end,
 
         Export = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             LibP2PDB:Insert(db, "Users", 1, { name = "Bob", age = 25 })
             LibP2PDB:Insert(db, "Users", 2, { name = "Alice", age = 30 })
@@ -3199,11 +3345,11 @@ if DEBUG then
         end,
 
         Import = function()
-            local db1 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests1" })
+            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
             LibP2PDB:NewTable(db1, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             LibP2PDB:Insert(db1, "Users", 1, { name = "Bob", age = 25 })
             LibP2PDB:Insert(db1, "Users", 2, { name = "Alice", age = 30 })
-            local db2 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests2" })
+            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
             LibP2PDB:NewTable(db2, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
 
             local exported = LibP2PDB:Export(db1)
@@ -3214,7 +3360,7 @@ if DEBUG then
         end,
 
         Import_DBIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             local exported = LibP2PDB:Export(db)
             Assert.Throws(function() LibP2PDB:Import(nil, exported) end)
             Assert.Throws(function() LibP2PDB:Import(123, exported) end)
@@ -3223,14 +3369,14 @@ if DEBUG then
         end,
 
         Import_ExportedIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:Import(db, nil) end)
             Assert.Throws(function() LibP2PDB:Import(db, 123) end)
             Assert.Throws(function() LibP2PDB:Import(db, "invalid") end)
         end,
 
         Import_SkipInvalidRows = function()
-            local db1 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests1" })
+            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
             LibP2PDB:NewTable(db1, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             LibP2PDB:Insert(db1, "Users", 1, { name = "Bob", age = 25 })
 
@@ -3239,7 +3385,7 @@ if DEBUG then
             -- Corrupt the exported state by adding a row with invalid schema
             exported.tables["Users"].rows[2] = { data = { name = "Alice" }, version = { clock = 2, peer = Private.peerId } }
 
-            local db2 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests2" })
+            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
             LibP2PDB:NewTable(db2, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
 
             Assert.ExpectErrors(function() LibP2PDB:Import(db2, exported) end)
@@ -3248,7 +3394,7 @@ if DEBUG then
         end,
 
         Serialize = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
             LibP2PDB:Insert(db, "Users", "1", { name = "Bob", age = 25 })
             LibP2PDB:Insert(db, "Users", "2", { name = "Alice", age = 30 })
@@ -3267,13 +3413,13 @@ if DEBUG then
         end,
 
         Deserialize = function()
-            local db1 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests1" })
+            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
             LibP2PDB:NewTable(db1, { name = "Users", keyType = "string", schema = { name = "string", age = "number", gender = { "string", "nil" } } })
             LibP2PDB:Insert(db1, "Users", "1", { name = "Bob", age = 25, gender = "male" })
             LibP2PDB:Insert(db1, "Users", "2", { name = "Alice", age = 30, gender = "female" })
             LibP2PDB:Delete(db1, "Users", "2")
             LibP2PDB:Insert(db1, "Users", Private.peerId, { name = "Eve", age = 35, gender = nil })
-            local db2 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests2" })
+            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
             LibP2PDB:NewTable(db2, { name = "Users", keyType = "string", schema = { name = "string", age = "number", gender = { "string", "nil" } } })
 
             local serialized = LibP2PDB:Serialize(db1)
@@ -3284,9 +3430,9 @@ if DEBUG then
         end,
 
         Deserialize_InvalidClock_Fails = function()
-            local db1 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests1" })
+            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
             LibP2PDB:NewTable(db1, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
-            local db2 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests2" })
+            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
             LibP2PDB:NewTable(db2, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
 
             -- Test with invalid binary data
@@ -3294,9 +3440,9 @@ if DEBUG then
         end,
 
         Deserialize_InvalidTableStructure_Fails = function()
-            local db1 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests1" })
+            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
             LibP2PDB:NewTable(db1, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
-            local db2 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests2" })
+            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
             LibP2PDB:NewTable(db2, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
 
             -- Test with malformed serialized data
@@ -3304,11 +3450,11 @@ if DEBUG then
         end,
 
         Deserialize_UndefinedTable_Fails = function()
-            local db1 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests1" })
+            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
             LibP2PDB:NewTable(db1, { name = "Products", keyType = "string", schema = { name = "string" } })
             LibP2PDB:Insert(db1, "Products", "1", { name = "Widget" })
 
-            local db2 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests2" })
+            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
             LibP2PDB:NewTable(db2, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
 
             -- Serialize from db1 (has Products table), deserialize to db2 (only has Users table)
@@ -3317,12 +3463,12 @@ if DEBUG then
         end,
 
         Deserialize_InvalidKeyType_SkipsRow = function()
-            local db1 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests1" })
+            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
             LibP2PDB:NewTable(db1, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
             LibP2PDB:Insert(db1, "Users", "stringkey", { name = "Alice", age = 30 })
             LibP2PDB:Insert(db1, "Users", "5", { name = "Bob", age = 25 })
 
-            local db2 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests2" })
+            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
             LibP2PDB:NewTable(db2, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
 
             -- Serialize from db1 (string keys), deserialize to db2 (expects number keys)
@@ -3337,12 +3483,12 @@ if DEBUG then
         end,
 
         Deserialize_InvalidRowStructure_SkipsRow = function()
-            local db1 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests1" })
+            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
             LibP2PDB:NewTable(db1, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
             LibP2PDB:Insert(db1, "Users", "key1", { name = "Bob", age = 25 })
             LibP2PDB:Insert(db1, "Users", "key2", { name = "Alice", age = 30 })
 
-            local db2 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests2" })
+            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
             LibP2PDB:NewTable(db2, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
 
             -- Normal serialize/deserialize should work
@@ -3355,12 +3501,12 @@ if DEBUG then
         end,
 
         Deserialize_InvalidVersionClock_SkipsRow = function()
-            local db1 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests1" })
+            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
             LibP2PDB:NewTable(db1, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
             LibP2PDB:Insert(db1, "Users", "key1", { name = "Bob", age = 25 })
             LibP2PDB:Insert(db1, "Users", "key2", { name = "Alice", age = 30 })
 
-            local db2 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests2" })
+            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
             LibP2PDB:NewTable(db2, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
 
             -- Normal serialize/deserialize should work
@@ -3373,12 +3519,12 @@ if DEBUG then
         end,
 
         Deserialize_InvalidVersionPeer_SkipsRow = function()
-            local db1 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests1" })
+            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
             LibP2PDB:NewTable(db1, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
             LibP2PDB:Insert(db1, "Users", "key1", { name = "Bob", age = 25 })
             LibP2PDB:Insert(db1, "Users", "key2", { name = "Alice", age = 30 })
 
-            local db2 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests2" })
+            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
             LibP2PDB:NewTable(db2, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
 
             -- Normal serialize/deserialize should work
@@ -3391,12 +3537,12 @@ if DEBUG then
         end,
 
         Deserialize_InvalidFieldType_SkipsRow = function()
-            local db1 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests1" })
+            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
             LibP2PDB:NewTable(db1, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
             LibP2PDB:Insert(db1, "Users", "key1", { name = "Bob", age = 25 })
             LibP2PDB:Insert(db1, "Users", "key2", { name = "Alice", age = 30 })
 
-            local db2 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests2" })
+            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
             LibP2PDB:NewTable(db2, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
 
             -- Normal serialize/deserialize should work - schema validation happens during Set, not deserialize
@@ -3409,12 +3555,12 @@ if DEBUG then
         end,
 
         Deserialize_TombstoneWithoutData_Imports = function()
-            local db1 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests1" })
+            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
             LibP2PDB:NewTable(db1, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
             LibP2PDB:Insert(db1, "Users", "deleted", { name = "Bob", age = 25 })
             LibP2PDB:Delete(db1, "Users", "deleted")
 
-            local db2 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests2" })
+            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
             LibP2PDB:NewTable(db2, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
             LibP2PDB:Insert(db2, "Users", "deleted", { name = "OldData", age = 99 })
 
@@ -3427,17 +3573,17 @@ if DEBUG then
         end,
 
         Deserialize_InvalidBinaryData_Fails = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests1" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
             Assert.ExpectErrors(function() LibP2PDB:Deserialize(db, "corrupted_data") end)
         end,
 
         Deserialize_EmptyData_ImportsCorrectly = function()
-            local db1 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests1" })
+            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
             LibP2PDB:NewTable(db1, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
             LibP2PDB:Insert(db1, "Users", "key", { name = "Bob", age = 25 })
 
-            local db2 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests2" })
+            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
             LibP2PDB:NewTable(db2, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
 
             -- Normal serialize/deserialize
@@ -3449,14 +3595,14 @@ if DEBUG then
         end,
 
         Deserialize_OptionalFields = function()
-            local db1 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests1" })
+            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
             LibP2PDB:NewTable(db1, { name = "Config", keyType = "string", schema = { key = "string", value = { "string", "nil" } } })
             LibP2PDB:Insert(db1, "Config", "theme", { key = "theme", value = "dark" })
             LibP2PDB:Insert(db1, "Config", "sound", { key = "sound", value = nil })
 
             local serialized = LibP2PDB:Serialize(db1)
 
-            local db2 = LibP2PDB:NewDB({ prefix = "LibP2PDBTests2" })
+            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
             LibP2PDB:NewTable(db2, { name = "Config", keyType = "string", schema = { key = "string", value = { "string", "nil" } } })
 
             LibP2PDB:Deserialize(db2, serialized)
@@ -3472,7 +3618,7 @@ if DEBUG then
         end,
 
         Deserialize_SerializedIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:Deserialize(db, nil) end)
             Assert.Throws(function() LibP2PDB:Deserialize(db, 123) end)
             Assert.Throws(function() LibP2PDB:Deserialize(db, "") end)
@@ -3480,7 +3626,7 @@ if DEBUG then
         end,
 
         GetTableSchema = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             local schema = LibP2PDB:GetTableSchema(db, "Users")
             Assert.IsTable(schema)
@@ -3498,14 +3644,14 @@ if DEBUG then
         end,
 
         GetTableSchema_TableIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:GetTableSchema(db, nil) end)
             Assert.Throws(function() LibP2PDB:GetTableSchema(db, 123) end)
             Assert.Throws(function() LibP2PDB:GetTableSchema(db, {}) end)
         end,
 
         ListTables = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "number" })
             LibP2PDB:NewTable(db, { name = "Posts", keyType = "string" })
             local tables = LibP2PDB:ListTables(db)
@@ -3524,7 +3670,7 @@ if DEBUG then
         end,
 
         ListKeys = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             LibP2PDB:Insert(db, "Users", 1, { name = "Bob", age = 25 })
             LibP2PDB:Insert(db, "Users", 2, { name = "Alice", age = 30 })
@@ -3546,7 +3692,7 @@ if DEBUG then
         end,
 
         ListKeys_TableIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:ListKeys(db, nil) end)
             Assert.Throws(function() LibP2PDB:ListKeys(db, 123) end)
             Assert.Throws(function() LibP2PDB:ListKeys(db, {}) end)
@@ -3624,7 +3770,7 @@ if DEBUG then
     end
 
     local function GenerateDatabase(numRows)
-        local db = LibP2PDB:NewDB({ prefix = "LibP2PDBTests" })
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
         LibP2PDB:NewTable(db, {
             name = "Players",
             keyType = "number",
