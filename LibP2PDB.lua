@@ -769,23 +769,6 @@ function LibP2PDB:NewTable(db, desc)
     }
 end
 
---- Retrieve the schema definition for a specific table.
---- @param db LibP2PDB.DBHandle Database handle.
---- @param tableName string Name of the table to get the schema for.
---- @param sorted boolean? Optional flag to return the schema with sorted field names (default: false).
---- @return LibP2PDB.TableSchema|LibP2PDB.TableSchemaSorted|nil schema The table schema, or nil if no schema is defined. If sorted is true, returns an array of {fieldName, fieldType(s)} pairs sorted by fieldName.
-function LibP2PDB:GetTableSchema(db, tableName, sorted)
-    assert(IsEmptyTable(db), "db must be an empty table")
-    assert(IsNonEmptyString(tableName), "tableName must be a non-empty string")
-
-    local dbi = Private.databases[db]
-    assert(dbi, "db is not a recognized database handle")
-
-    local ti = dbi.tables[tableName]
-    assert(ti, "table '" .. tableName .. "' is not defined in the database")
-    return DeepCopy(Private:GetTableSchema(ti, sorted))
-end
-
 ------------------------------------------------------------------------------------------------------------------------
 -- Public API: CRUD Operations
 ------------------------------------------------------------------------------------------------------------------------
@@ -4177,31 +4160,6 @@ if DEBUG then
             Assert.Throws(function() LibP2PDB:Deserialize(db, 123) end)
             Assert.Throws(function() LibP2PDB:Deserialize(db, "") end)
             Assert.Throws(function() LibP2PDB:Deserialize(db, {}) end)
-        end,
-
-        GetTableSchema = function()
-            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
-            local schema = LibP2PDB:GetTableSchema(db, "Users")
-            Assert.IsTable(schema)
-            if schema then
-                Assert.AreEqual(schema.name, "string")
-                Assert.AreEqual(schema.age, "number")
-            end
-        end,
-
-        GetTableSchema_DBIsInvalid_Throws = function()
-            Assert.Throws(function() LibP2PDB:GetTableSchema(nil, "Users") end)
-            Assert.Throws(function() LibP2PDB:GetTableSchema(123, "Users") end)
-            Assert.Throws(function() LibP2PDB:GetTableSchema("", "Users") end)
-            Assert.Throws(function() LibP2PDB:GetTableSchema({}, "Users") end)
-        end,
-
-        GetTableSchema_TableNameIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-            Assert.Throws(function() LibP2PDB:GetTableSchema(db, nil) end)
-            Assert.Throws(function() LibP2PDB:GetTableSchema(db, 123) end)
-            Assert.Throws(function() LibP2PDB:GetTableSchema(db, {}) end)
         end,
 
         ListTables = function()
