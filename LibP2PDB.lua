@@ -895,7 +895,7 @@ end
 --- @param tableName string Name of the table to delete from.
 --- @param key LibP2PDB.TableKey Primary key value for the row (must match table's keyType).
 --- @return boolean success Returns true on success, false otherwise.
-function LibP2PDB:Delete(db, tableName, key)
+function LibP2PDB:DeleteKey(db, tableName, key)
     assert(IsEmptyTable(db), "db must be an empty table")
     assert(IsNonEmptyString(tableName), "table name must be a non-empty string")
     assert(IsNonEmptyString(key) or IsNumber(key), "key must be a string or number")
@@ -2872,11 +2872,11 @@ if DEBUG then
                 Assert.IsTrue(LibP2PDB:InsertKey(db, "Users3", 3, { name = "Eve" }))
                 Assert.AreEqual(LibP2PDB:GetKey(db, "Users3", 3), { name = "Eve" })
 
-                Assert.IsTrue(LibP2PDB:Delete(db, "Users3", 1))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users3", 1))
                 Assert.IsNil(LibP2PDB:GetKey(db, "Users3", 1))
-                Assert.IsTrue(LibP2PDB:Delete(db, "Users3", 2))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users3", 2))
                 Assert.IsNil(LibP2PDB:GetKey(db, "Users3", 2))
-                Assert.IsTrue(LibP2PDB:Delete(db, "Users3", 3))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users3", 3))
                 Assert.IsNil(LibP2PDB:GetKey(db, "Users3", 3))
 
                 Assert.IsTrue(LibP2PDB:InsertKey(db, "Users3", 1, { name = "Alice" }))
@@ -2967,7 +2967,7 @@ if DEBUG then
             Assert.AreEqual(subCount, 1)
 
             -- check inserting over a deleted key invokes all callbacks
-            Assert.IsTrue(LibP2PDB:Delete(db, "Users", 1))
+            Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users", 1))
             Assert.IsTrue(LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }))
             Assert.AreEqual(dbCount, 3)    -- 1 for delete, 1 for insert
             Assert.AreEqual(tableCount, 3) -- 1 for delete, 1 for insert
@@ -3030,11 +3030,11 @@ if DEBUG then
                 Assert.IsTrue(LibP2PDB:SetKey(db, "Users3", 3, { name = "Eve" }))
                 Assert.AreEqual(LibP2PDB:GetKey(db, "Users3", 3), { name = "Eve" })
 
-                Assert.IsTrue(LibP2PDB:Delete(db, "Users3", 1))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users3", 1))
                 Assert.IsNil(LibP2PDB:GetKey(db, "Users3", 1))
-                Assert.IsTrue(LibP2PDB:Delete(db, "Users3", 2))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users3", 2))
                 Assert.IsNil(LibP2PDB:GetKey(db, "Users3", 2))
-                Assert.IsTrue(LibP2PDB:Delete(db, "Users3", 3))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users3", 3))
                 Assert.IsNil(LibP2PDB:GetKey(db, "Users3", 3))
 
                 Assert.IsTrue(LibP2PDB:SetKey(db, "Users3", 1, { name = "Alice" }))
@@ -3125,7 +3125,7 @@ if DEBUG then
             Assert.AreEqual(subCount, 1)
 
             -- check inserting over a deleted key invokes all callbacks
-            Assert.IsTrue(LibP2PDB:Delete(db, "Users", 1))
+            Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users", 1))
             Assert.IsTrue(LibP2PDB:SetKey(db, "Users", 1, { name = "Bob", age = 25 }))
             Assert.AreEqual(dbCount, 3)    -- 1 for delete, 1 for insert
             Assert.AreEqual(tableCount, 3) -- 1 for delete, 1 for insert
@@ -3188,11 +3188,11 @@ if DEBUG then
                 Assert.IsTrue(LibP2PDB:UpdateKey(db, "Users3", 3, function(data) return { name = "Eve" } end))
                 Assert.AreEqual(LibP2PDB:GetKey(db, "Users3", 3), { name = "Eve" })
 
-                Assert.IsTrue(LibP2PDB:Delete(db, "Users3", 1))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users3", 1))
                 Assert.IsNil(LibP2PDB:GetKey(db, "Users3", 1))
-                Assert.IsTrue(LibP2PDB:Delete(db, "Users3", 2))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users3", 2))
                 Assert.IsNil(LibP2PDB:GetKey(db, "Users3", 2))
-                Assert.IsTrue(LibP2PDB:Delete(db, "Users3", 3))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users3", 3))
                 Assert.IsNil(LibP2PDB:GetKey(db, "Users3", 3))
 
                 Assert.IsTrue(LibP2PDB:UpdateKey(db, "Users3", 1, function(data) return { name = "Alice" } end))
@@ -3283,7 +3283,7 @@ if DEBUG then
             Assert.AreEqual(subCount, 1)
 
             -- check inserting over a deleted key invokes all callbacks
-            Assert.IsTrue(LibP2PDB:Delete(db, "Users", 1))
+            Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users", 1))
             Assert.IsTrue(LibP2PDB:UpdateKey(db, "Users", 1, function() return { name = "Bob", age = 25 } end))
             Assert.AreEqual(dbCount, 3)    -- 1 for delete, 1 for insert
             Assert.AreEqual(tableCount, 3) -- 1 for delete, 1 for insert
@@ -3302,75 +3302,148 @@ if DEBUG then
             Assert.AreEqual(fetchedRow, { name = "Bob", age = 25 })
         end,
 
-        Delete = function()
+        DeleteKey = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
-            LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 })
-            Assert.IsTable(Private.databases[db].tables["Users"].rows[1].data)
-            Assert.IsNil(Private.databases[db].tables["Users"].rows[1].version.tombstone)
-            Assert.IsTrue(LibP2PDB:HasKey(db, "Users", 1))
+            do -- test with string key type and no schema
+                LibP2PDB:NewTable(db, {
+                    name = "Users1",
+                    keyType = "string",
+                    onValidate = function(key, data)
+                        return not data or not data.age or data.age >= 0
+                    end
+                })
+                Assert.IsTrue(LibP2PDB:InsertKey(db, "Users1", "user1", { name = "Bob", age = 25, city = "NY" }))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users1", "user1"))
+                Assert.IsTrue(LibP2PDB:InsertKey(db, "Users1", "user2", { name = "Alice", age = 30, town = "LA" }))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users1", "user2"))
+                Assert.IsFalse(LibP2PDB:InsertKey(db, "Users1", "user3", { name = "Eve", age = -1 }))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users1", "user3"))
+                Assert.IsTrue(LibP2PDB:InsertKey(db, "Users1", "user4", {}))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users1", "user4"))
+            end
+            do -- test with number key type and schema
+                LibP2PDB:NewTable(db, {
+                    name = "Users2",
+                    keyType = "number",
+                    schema = {
+                        name = "string",
+                        age = {
+                            "number",
+                            "nil"
+                        }
+                    },
+                    onValidate = function(key, data)
+                        return not data or not data.age or data.age >= 0
+                    end
+                })
+                Assert.IsTrue(LibP2PDB:InsertKey(db, "Users2", 1, { name = "Bob", age = 25 }))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users2", 1))
+                Assert.IsTrue(LibP2PDB:InsertKey(db, "Users2", 2, { name = "Alice" }))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users2", 2))
+                Assert.IsFalse(LibP2PDB:InsertKey(db, "Users2", 3, { name = "Eve", age = -1 }))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users2", 3))
+            end
+            do -- check inserting over deleted keys
+                LibP2PDB:NewTable(db, {
+                    name = "Users3",
+                    keyType = "number",
+                    onValidate = function(key, data)
+                        return not data or not data.age or data.age >= 0
+                    end,
+                })
+                Assert.IsTrue(LibP2PDB:InsertKey(db, "Users3", 1, { name = "Bob" }))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users3", 1))
+                Assert.IsTrue(LibP2PDB:InsertKey(db, "Users3", 2, { name = "Alice" }))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users3", 2))
+                Assert.IsTrue(LibP2PDB:InsertKey(db, "Users3", 3, { name = "Eve" }))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users3", 3))
 
-            -- Delete existing key
-            LibP2PDB:Delete(db, "Users", 1)
-            Assert.IsNil(Private.databases[db].tables["Users"].rows[1].data)
-            Assert.IsTrue(Private.databases[db].tables["Users"].rows[1].version.tombstone)
-            Assert.IsNil(LibP2PDB:GetKey(db, "Users", 1))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users3", 1))
+                Assert.IsNil(LibP2PDB:GetKey(db, "Users3", 1))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users3", 2))
+                Assert.IsNil(LibP2PDB:GetKey(db, "Users3", 2))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users3", 3))
+                Assert.IsNil(LibP2PDB:GetKey(db, "Users3", 3))
 
-            -- Delete non-existent key
-            Assert.DoesNotThrow(function() LibP2PDB:Delete(db, "Users", 2) end)
-            Assert.IsNil(Private.databases[db].tables["Users"].rows[2].data)
-            Assert.IsTrue(Private.databases[db].tables["Users"].rows[2].version.tombstone)
-            Assert.IsNil(LibP2PDB:GetKey(db, "Users", 2))
+                Assert.IsTrue(LibP2PDB:InsertKey(db, "Users3", 1, { name = "Alice" }))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users3", 1))
+                Assert.IsTrue(LibP2PDB:InsertKey(db, "Users3", 2, { name = "Eve" }))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users3", 2))
+                Assert.IsTrue(LibP2PDB:InsertKey(db, "Users3", 3, { name = "Bob" }))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users3", 3))
+            end
         end,
 
-        Delete_WhenChanges_FireCallbacks = function()
-            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-            local callbackFired = false
-            LibP2PDB:NewTable(db, {
-                name = "Users",
-                keyType = "number",
-                schema = {
-                    name = "string",
-                    age = "number",
-                },
-                onChange = function(key, row)
-                    callbackFired = true
-                end,
-            })
-            LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 })
-
-            callbackFired = false
-            LibP2PDB:Delete(db, "Users", 1)
-            Assert.IsTrue(callbackFired, "onChange callback was not fired on Delete when deleting existing row")
-
-            callbackFired = false
-            LibP2PDB:Delete(db, "Users", 2)
-            Assert.IsTrue(callbackFired, "onChange callback was not fired on Delete when deleting non-existent row")
-
-            callbackFired = false
-            LibP2PDB:Delete(db, "Users", 1)
-            Assert.IsFalse(callbackFired, "onChange callback was fired on Delete when deleting already deleted row")
+        DeleteKey_DBIsInvalid_Throws = function()
+            Assert.Throws(function() LibP2PDB:DeleteKey(nil, "Users", 1) end)
+            Assert.Throws(function() LibP2PDB:DeleteKey(true, "Users", 1) end)
+            Assert.Throws(function() LibP2PDB:DeleteKey(false, "Users", 1) end)
+            Assert.Throws(function() LibP2PDB:DeleteKey("", "Users", 1) end)
+            Assert.Throws(function() LibP2PDB:DeleteKey("invalid", "Users", 1) end)
+            Assert.Throws(function() LibP2PDB:DeleteKey(123, "Users", 1) end)
+            Assert.Throws(function() LibP2PDB:DeleteKey({}, "Users", 1) end)
         end,
 
-        Delete_DBIsInvalid_Throws = function()
-            Assert.Throws(function() LibP2PDB:Delete(nil, "Users", 1) end)
-            Assert.Throws(function() LibP2PDB:Delete(123, "Users", 1) end)
-            Assert.Throws(function() LibP2PDB:Delete("", "Users", 1) end)
-            Assert.Throws(function() LibP2PDB:Delete({}, "Users", 1) end)
+        DeleteKey_TableNameIsInvalid_Throws = function()
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+            Assert.Throws(function() LibP2PDB:DeleteKey(db, nil, 1) end)
+            Assert.Throws(function() LibP2PDB:DeleteKey(db, true, 1) end)
+            Assert.Throws(function() LibP2PDB:DeleteKey(db, false, 1) end)
+            Assert.Throws(function() LibP2PDB:DeleteKey(db, "", 1) end)
+            Assert.Throws(function() LibP2PDB:DeleteKey(db, "invalid", 1) end)
+            Assert.Throws(function() LibP2PDB:DeleteKey(db, 123, 1) end)
+            Assert.Throws(function() LibP2PDB:DeleteKey(db, {}, 1) end)
         end,
 
-        Delete_TableNameIsInvalid_Throws = function()
+        DeleteKey_KeyIsInvalid_Throws = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-            Assert.Throws(function() LibP2PDB:Delete(db, nil, 1) end)
-            Assert.Throws(function() LibP2PDB:Delete(db, 123, 1) end)
-            Assert.Throws(function() LibP2PDB:Delete(db, {}, 1) end)
+            do -- check string key type
+                LibP2PDB:NewTable(db, { name = "Users1", keyType = "string" })
+                Assert.Throws(function() LibP2PDB:DeleteKey(db, "Users1", nil) end)
+                Assert.Throws(function() LibP2PDB:DeleteKey(db, "Users1", true) end)
+                Assert.Throws(function() LibP2PDB:DeleteKey(db, "Users1", false) end)
+                Assert.Throws(function() LibP2PDB:DeleteKey(db, "Users1", "") end)
+                Assert.Throws(function() LibP2PDB:DeleteKey(db, "Users1", 123) end)
+                Assert.Throws(function() LibP2PDB:DeleteKey(db, "Users1", {}) end)
+            end
+            do -- check number key type
+                LibP2PDB:NewTable(db, { name = "Users2", keyType = "number" })
+                Assert.Throws(function() LibP2PDB:DeleteKey(db, "Users2", nil) end)
+                Assert.Throws(function() LibP2PDB:DeleteKey(db, "Users2", true) end)
+                Assert.Throws(function() LibP2PDB:DeleteKey(db, "Users2", false) end)
+                Assert.Throws(function() LibP2PDB:DeleteKey(db, "Users2", "") end)
+                Assert.Throws(function() LibP2PDB:DeleteKey(db, "Users2", "invalid") end)
+                Assert.Throws(function() LibP2PDB:DeleteKey(db, "Users2", {}) end)
+            end
         end,
 
-        Delete_KeyIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-            LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
-            Assert.Throws(function() LibP2PDB:Delete(db, "Users", nil) end)
-            Assert.Throws(function() LibP2PDB:Delete(db, "Users", {}) end)
+        DeleteKey_InvokeChangeCallbacks = function()
+            local dbCount, tableCount, subCount = 0, 0, 0
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = function() dbCount = dbCount + 1 end })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", onChange = function() tableCount = tableCount + 1 end })
+            LibP2PDB:Subscribe(db, "Users", function() subCount = subCount + 1 end)
+            Assert.AreEqual(dbCount, 0)
+            Assert.AreEqual(tableCount, 0)
+            Assert.AreEqual(subCount, 0)
+
+            -- check deleting a key invokes all callbacks
+            Assert.IsTrue(LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }))
+            Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users", 1))
+            Assert.AreEqual(dbCount, 2)    -- 1 for insert, 1 for delete
+            Assert.AreEqual(tableCount, 2) -- 1 for insert, 1 for delete
+            Assert.AreEqual(subCount, 2)   -- 1 for insert, 1 for delete
+
+            -- check deleting the same key again does not invoke any callbacks
+            Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users", 1))
+            Assert.AreEqual(dbCount, 2)
+            Assert.AreEqual(tableCount, 2)
+            Assert.AreEqual(subCount, 2)
+
+            -- check deleting a non-existent key invokes all callbacks
+            Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users", 2))
+            Assert.AreEqual(dbCount, 3)
+            Assert.AreEqual(tableCount, 3)
+            Assert.AreEqual(subCount, 3)
         end,
 
         HasKey = function()
@@ -3429,11 +3502,11 @@ if DEBUG then
                 Assert.IsTrue(LibP2PDB:InsertKey(db, "Users3", 3, { name = "Eve" }))
                 Assert.IsTrue(LibP2PDB:HasKey(db, "Users3", 3))
 
-                Assert.IsTrue(LibP2PDB:Delete(db, "Users3", 1))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users3", 1))
                 Assert.IsFalse(LibP2PDB:HasKey(db, "Users3", 1))
-                Assert.IsTrue(LibP2PDB:Delete(db, "Users3", 2))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users3", 2))
                 Assert.IsFalse(LibP2PDB:HasKey(db, "Users3", 2))
-                Assert.IsTrue(LibP2PDB:Delete(db, "Users3", 3))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users3", 3))
                 Assert.IsFalse(LibP2PDB:HasKey(db, "Users3", 3))
 
                 Assert.IsTrue(LibP2PDB:InsertKey(db, "Users3", 1, { name = "Alice" }))
@@ -3509,7 +3582,7 @@ if DEBUG then
             Assert.AreEqual(tableCount, 1)
             Assert.AreEqual(subCount, 1)
 
-            Assert.IsTrue(LibP2PDB:Delete(db, "Users", 1))
+            Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users", 1))
             Assert.IsFalse(LibP2PDB:HasKey(db, "Users", 1))
             Assert.IsTrue(LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }))
             Assert.IsTrue(LibP2PDB:HasKey(db, "Users", 1))
@@ -3574,11 +3647,11 @@ if DEBUG then
                 Assert.IsTrue(LibP2PDB:InsertKey(db, "Users3", 3, { name = "Eve" }))
                 Assert.AreEqual(LibP2PDB:GetKey(db, "Users3", 3), { name = "Eve" })
 
-                Assert.IsTrue(LibP2PDB:Delete(db, "Users3", 1))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users3", 1))
                 Assert.IsNil(LibP2PDB:GetKey(db, "Users3", 1))
-                Assert.IsTrue(LibP2PDB:Delete(db, "Users3", 2))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users3", 2))
                 Assert.IsNil(LibP2PDB:GetKey(db, "Users3", 2))
-                Assert.IsTrue(LibP2PDB:Delete(db, "Users3", 3))
+                Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users3", 3))
                 Assert.IsNil(LibP2PDB:GetKey(db, "Users3", 3))
 
                 Assert.IsTrue(LibP2PDB:InsertKey(db, "Users3", 1, { name = "Alice" }))
@@ -3654,7 +3727,7 @@ if DEBUG then
             Assert.AreEqual(tableCount, 1)
             Assert.AreEqual(subCount, 1)
 
-            Assert.IsTrue(LibP2PDB:Delete(db, "Users", 1))
+            Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users", 1))
             Assert.IsNil(LibP2PDB:GetKey(db, "Users", 1))
             Assert.IsTrue(LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }))
             Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
@@ -3684,7 +3757,7 @@ if DEBUG then
             Assert.AreEqual(version.peer, Private.peerId)
             Assert.IsNil(version.tombstone)
 
-            LibP2PDB:Delete(db, "Users", 1)
+            LibP2PDB:DeleteKey(db, "Users", 1)
             version = Private.databases[db].tables["Users"].rows[1].version
             Assert.IsTable(version)
             Assert.AreEqual(version.clock, 3)
@@ -3720,7 +3793,7 @@ if DEBUG then
             Assert.AreEqual(version.peer, "=")
             Assert.IsNil(version.tombstone)
 
-            LibP2PDB:Delete(db, "Users", Private.peerId)
+            LibP2PDB:DeleteKey(db, "Users", Private.peerId)
             version = Private.databases[db].tables["Users"].rows[Private.peerId].version
             Assert.IsTable(version)
             Assert.AreEqual(version.clock, 4)
@@ -3879,7 +3952,7 @@ if DEBUG then
             LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
             LibP2PDB:InsertKey(db, "Users", "1", { name = "Bob", age = 25 })
             LibP2PDB:InsertKey(db, "Users", "2", { name = "Alice", age = 30 })
-            LibP2PDB:Delete(db, "Users", "2")
+            LibP2PDB:DeleteKey(db, "Users", "2")
             LibP2PDB:InsertKey(db, "Users", Private.peerId, { name = "Eve", age = 35 })
 
             local serialized = LibP2PDB:Serialize(db)
@@ -3898,7 +3971,7 @@ if DEBUG then
             LibP2PDB:NewTable(db1, { name = "Users", keyType = "string", schema = { name = "string", age = "number", gender = { "string", "nil" } } })
             LibP2PDB:InsertKey(db1, "Users", "1", { name = "Bob", age = 25, gender = "male" })
             LibP2PDB:InsertKey(db1, "Users", "2", { name = "Alice", age = 30, gender = "female" })
-            LibP2PDB:Delete(db1, "Users", "2")
+            LibP2PDB:DeleteKey(db1, "Users", "2")
             LibP2PDB:InsertKey(db1, "Users", Private.peerId, { name = "Eve", age = 35, gender = nil })
             local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
             LibP2PDB:NewTable(db2, { name = "Users", keyType = "string", schema = { name = "string", age = "number", gender = { "string", "nil" } } })
@@ -4039,7 +4112,7 @@ if DEBUG then
             local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
             LibP2PDB:NewTable(db1, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
             LibP2PDB:InsertKey(db1, "Users", "deleted", { name = "Bob", age = 25 })
-            LibP2PDB:Delete(db1, "Users", "deleted")
+            LibP2PDB:DeleteKey(db1, "Users", "deleted")
 
             local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
             LibP2PDB:NewTable(db2, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
@@ -4156,7 +4229,7 @@ if DEBUG then
             LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 })
             LibP2PDB:InsertKey(db, "Users", 2, { name = "Alice", age = 30 })
             LibP2PDB:InsertKey(db, "Users", 3, { name = "Eve", age = 35 })
-            LibP2PDB:Delete(db, "Users", 2)
+            LibP2PDB:DeleteKey(db, "Users", 2)
             local keys = LibP2PDB:ListKeys(db, "Users")
             Assert.IsTable(keys)
             Assert.AreEqual(#keys, 2)
