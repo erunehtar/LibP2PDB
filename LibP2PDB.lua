@@ -832,7 +832,7 @@ end
 --- @param key LibP2PDB.TableKey Primary key value for the row (must match table's keyType).
 --- @param data table Row data containing fields defined in the table schema.
 --- @return boolean success Returns true on success, false otherwise.
-function LibP2PDB:Set(db, tableName, key, data)
+function LibP2PDB:SetKey(db, tableName, key, data)
     assert(IsEmptyTable(db), "db must be an empty table")
     assert(IsNonEmptyString(tableName), "table name must be a non-empty string")
     assert(IsNonEmptyString(key) or IsNumber(key), "key must be a string or number")
@@ -2898,6 +2898,7 @@ if DEBUG then
             Assert.Throws(function() LibP2PDB:InsertKey(db, true, 1, { name = "A" }) end)
             Assert.Throws(function() LibP2PDB:InsertKey(db, false, 1, { name = "A" }) end)
             Assert.Throws(function() LibP2PDB:InsertKey(db, "", 1, { name = "A" }) end)
+            Assert.Throws(function() LibP2PDB:InsertKey(db, "invalid", 1, { name = "A" }) end)
             Assert.Throws(function() LibP2PDB:InsertKey(db, 123, 1, { name = "A" }) end)
             Assert.Throws(function() LibP2PDB:InsertKey(db, {}, 1, { name = "A" }) end)
         end,
@@ -2906,22 +2907,21 @@ if DEBUG then
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             do -- check string key type
                 LibP2PDB:NewTable(db, { name = "Users1", keyType = "string" })
-                Assert.Throws(function() LibP2PDB:InsertKey(db, "Users", nil, { name = "A" }) end)
-                Assert.Throws(function() LibP2PDB:InsertKey(db, "Users", true, { name = "A" }) end)
-                Assert.Throws(function() LibP2PDB:InsertKey(db, "Users", false, { name = "A" }) end)
-                Assert.Throws(function() LibP2PDB:InsertKey(db, "Users", "", { name = "A" }) end)
-                Assert.Throws(function() LibP2PDB:InsertKey(db, "Users", 123, { name = "A" }) end)
-                Assert.Throws(function() LibP2PDB:InsertKey(db, "Users", {}, { name = "A" }) end)
-                Assert.Throws(function() LibP2PDB:InsertKey(db, "Users", 1, { name = "A" }) end)
+                Assert.Throws(function() LibP2PDB:InsertKey(db, "Users1", nil, { name = "A" }) end)
+                Assert.Throws(function() LibP2PDB:InsertKey(db, "Users1", true, { name = "A" }) end)
+                Assert.Throws(function() LibP2PDB:InsertKey(db, "Users1", false, { name = "A" }) end)
+                Assert.Throws(function() LibP2PDB:InsertKey(db, "Users1", "", { name = "A" }) end)
+                Assert.Throws(function() LibP2PDB:InsertKey(db, "Users1", 123, { name = "A" }) end)
+                Assert.Throws(function() LibP2PDB:InsertKey(db, "Users1", {}, { name = "A" }) end)
             end
             do -- check number key type
                 LibP2PDB:NewTable(db, { name = "Users2", keyType = "number" })
                 Assert.Throws(function() LibP2PDB:InsertKey(db, "Users2", nil, { name = "A" }) end)
                 Assert.Throws(function() LibP2PDB:InsertKey(db, "Users2", true, { name = "A" }) end)
                 Assert.Throws(function() LibP2PDB:InsertKey(db, "Users2", false, { name = "A" }) end)
-                Assert.Throws(function() LibP2PDB:InsertKey(db, "Users2", "stringKey", { name = "A" }) end)
+                Assert.Throws(function() LibP2PDB:InsertKey(db, "Users2", "", { name = "A" }) end)
+                Assert.Throws(function() LibP2PDB:InsertKey(db, "Users2", "invalid", { name = "A" }) end)
                 Assert.Throws(function() LibP2PDB:InsertKey(db, "Users2", {}, { name = "A" }) end)
-                Assert.Throws(function() LibP2PDB:InsertKey(db, "Users2", "1", { name = "A" }) end)
             end
         end,
 
@@ -2962,109 +2962,160 @@ if DEBUG then
 
             -- check inserting over a deleted key invokes all callbacks
             Assert.IsTrue(LibP2PDB:Delete(db, "Users", 1))
-            Assert.IsTrue(LibP2PDB:InsertKey(db, "Users", 1, { name = "Alice", age = 30 }))
-            Assert.AreEqual(dbCount, 3) -- 1 for delete, 1 for insert
+            Assert.IsTrue(LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }))
+            Assert.AreEqual(dbCount, 3)    -- 1 for delete, 1 for insert
             Assert.AreEqual(tableCount, 3) -- 1 for delete, 1 for insert
-            Assert.AreEqual(subCount, 3) -- 1 for delete, 1 for insert
+            Assert.AreEqual(subCount, 3)   -- 1 for delete, 1 for insert
         end,
 
-        Set = function()
+        SetKey = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-            LibP2PDB:NewTable(db, {
-                name = "Users",
-                keyType = "number",
-                schema = {
-                    name = "string",
-                    age = "number",
-                },
-                onValidate = function(key, row)
-                    Assert.IsNumber(key)
-                    Assert.IsTable(row)
-                    Assert.IsString(row.name)
-                    Assert.IsNumber(row.age)
-                    return row.age >= 0 -- age must be non-negative
-                end,
-                onChange = function(key, row)
-                    Assert.IsNumber(key)
-                    Assert.IsTable(row)
-                    Assert.IsString(row.name)
-                    Assert.IsNumber(row.age)
-                end,
-            })
-            Assert.IsTrue(LibP2PDB:Set(db, "Users", 1, { name = "Bob", age = 25 }))
-            Assert.AreEqual(LibP2PDB:Get(db, "Users", 1), { name = "Bob", age = 25 })
-            Assert.IsTrue(LibP2PDB:Set(db, "Users", 1, { name = "Bob", age = 40 }))
-            Assert.AreEqual(LibP2PDB:Get(db, "Users", 1), { name = "Bob", age = 40 })
-            Assert.IsFalse(LibP2PDB:Set(db, "Users", 2, { name = "Charlie", age = -5 }))
-            Assert.IsNil(LibP2PDB:Get(db, "Users", 2))
+            do -- test with string key type and no schema
+                LibP2PDB:NewTable(db, {
+                    name = "Users1",
+                    keyType = "string",
+                    onValidate = function(key, data)
+                        return data.age >= 0
+                    end
+                })
+                Assert.IsTrue(LibP2PDB:SetKey(db, "Users1", "user1", { name = "Bob", age = 25, city = "NY" }))
+                Assert.AreEqual(LibP2PDB:Get(db, "Users1", "user1"), { name = "Bob", age = 25, city = "NY" })
+                Assert.IsTrue(LibP2PDB:SetKey(db, "Users1", "user1", { name = "Alice", age = 30, town = "LA" }))
+                Assert.AreEqual(LibP2PDB:Get(db, "Users1", "user1"), { name = "Alice", age = 30, town = "LA" })
+                Assert.IsFalse(LibP2PDB:SetKey(db, "Users1", "user1", { name = "Eve", age = -1 }))
+                Assert.AreEqual(LibP2PDB:Get(db, "Users1", "user1"), { name = "Alice", age = 30, town = "LA" })
+            end
+            do -- test with number key type and schema
+                LibP2PDB:NewTable(db, {
+                    name = "Users2",
+                    keyType = "number",
+                    schema = {
+                        name = "string",
+                        age = {
+                            "number",
+                            "nil"
+                        }
+                    },
+                    onValidate = function(key, data)
+                        return data.age == nil or data.age >= 0
+                    end
+                })
+                Assert.IsTrue(LibP2PDB:SetKey(db, "Users2", 1, { name = "Bob", age = 25 }))
+                Assert.AreEqual(LibP2PDB:Get(db, "Users2", 1), { name = "Bob", age = 25 })
+                Assert.IsTrue(LibP2PDB:SetKey(db, "Users2", 1, { name = "Alice" }))
+                Assert.AreEqual(LibP2PDB:Get(db, "Users2", 1), { name = "Alice" })
+                Assert.IsFalse(LibP2PDB:SetKey(db, "Users2", 1, { name = "Eve", age = -1 }))
+                Assert.AreEqual(LibP2PDB:Get(db, "Users2", 1), { name = "Alice" })
+            end
+            do -- check setting over deleted keys
+                LibP2PDB:NewTable(db, { name = "Users3", keyType = "number" })
+                Assert.IsTrue(LibP2PDB:SetKey(db, "Users3", 1, { name = "Bob" }))
+                Assert.AreEqual(LibP2PDB:Get(db, "Users3", 1), { name = "Bob" })
+                Assert.IsTrue(LibP2PDB:SetKey(db, "Users3", 2, { name = "Alice" }))
+                Assert.AreEqual(LibP2PDB:Get(db, "Users3", 2), { name = "Alice" })
+                Assert.IsTrue(LibP2PDB:SetKey(db, "Users3", 3, { name = "Eve" }))
+                Assert.AreEqual(LibP2PDB:Get(db, "Users3", 3), { name = "Eve" })
+
+                Assert.IsTrue(LibP2PDB:Delete(db, "Users3", 1))
+                Assert.IsNil(LibP2PDB:Get(db, "Users3", 1))
+                Assert.IsTrue(LibP2PDB:Delete(db, "Users3", 2))
+                Assert.IsNil(LibP2PDB:Get(db, "Users3", 2))
+                Assert.IsTrue(LibP2PDB:Delete(db, "Users3", 3))
+                Assert.IsNil(LibP2PDB:Get(db, "Users3", 3))
+
+                Assert.IsTrue(LibP2PDB:SetKey(db, "Users3", 1, { name = "Alice" }))
+                Assert.AreEqual(LibP2PDB:Get(db, "Users3", 1), { name = "Alice" })
+                Assert.IsTrue(LibP2PDB:SetKey(db, "Users3", 2, { name = "Eve" }))
+                Assert.AreEqual(LibP2PDB:Get(db, "Users3", 2), { name = "Eve" })
+                Assert.IsTrue(LibP2PDB:SetKey(db, "Users3", 3, { name = "Bob" }))
+                Assert.AreEqual(LibP2PDB:Get(db, "Users3", 3), { name = "Bob" })
+            end
         end,
 
-        Set_WhenChanges_FireCallbacks = function()
+        SetKey_DBIsInvalid_Throws = function()
+            Assert.Throws(function() LibP2PDB:SetKey(nil, "Users", 1, { name = "A" }) end)
+            Assert.Throws(function() LibP2PDB:SetKey(true, "Users", 1, { name = "A" }) end)
+            Assert.Throws(function() LibP2PDB:SetKey(false, "Users", 1, { name = "A" }) end)
+            Assert.Throws(function() LibP2PDB:SetKey("", "Users", 1, { name = "A" }) end)
+            Assert.Throws(function() LibP2PDB:SetKey("invalid", "Users", 1, { name = "A" }) end)
+            Assert.Throws(function() LibP2PDB:SetKey(123, "Users", 1, { name = "A" }) end)
+            Assert.Throws(function() LibP2PDB:SetKey({}, "Users", 1, { name = "A" }) end)
+        end,
+
+        SetKey_TableNameIsInvalid_Throws = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-            local callbackFired = false
-            LibP2PDB:NewTable(db, {
-                name = "Users",
-                keyType = "number",
-                schema = {
-                    name = "string",
-                    age = "number",
-                },
-                onChange = function(key, row)
-                    callbackFired = true
-                end,
-            })
-            LibP2PDB:Set(db, "Users", 1, { name = "Bob", age = 25 })
-            Assert.IsTrue(callbackFired, "onChange callback was not fired on Set when inserting new row")
-
-            callbackFired = false
-            LibP2PDB:Set(db, "Users", 1, { name = "Bob", age = 25 })
-            Assert.IsFalse(callbackFired, "onChange callback was fired on Set when setting identical row")
-
-            callbackFired = false
-            LibP2PDB:Set(db, "Users", 1, { name = "Bob", age = 30 })
-            Assert.IsTrue(callbackFired, "onChange callback was not fired on Set when updating row")
+            Assert.Throws(function() LibP2PDB:SetKey(db, nil, 1, { name = "A" }) end)
+            Assert.Throws(function() LibP2PDB:SetKey(db, true, 1, { name = "A" }) end)
+            Assert.Throws(function() LibP2PDB:SetKey(db, false, 1, { name = "A" }) end)
+            Assert.Throws(function() LibP2PDB:SetKey(db, "", 1, { name = "A" }) end)
+            Assert.Throws(function() LibP2PDB:SetKey(db, "invalid", 1, { name = "A" }) end)
+            Assert.Throws(function() LibP2PDB:SetKey(db, 123, 1, { name = "A" }) end)
+            Assert.Throws(function() LibP2PDB:SetKey(db, {}, 1, { name = "A" }) end)
         end,
 
-        Set_DBIsInvalid_Throws = function()
-            Assert.Throws(function() LibP2PDB:Set(nil, "Users", 1, { name = "A" }) end)
-            Assert.Throws(function() LibP2PDB:Set(123, "Users", 1, { name = "A" }) end)
-            Assert.Throws(function() LibP2PDB:Set("", "Users", 1, { name = "A" }) end)
-            Assert.Throws(function() LibP2PDB:Set({}, "Users", 1, { name = "A" }) end)
-        end,
-
-        Set_TableIsInvalid_Throws = function()
+        SetKey_KeyIsInvalid_Throws = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-            Assert.Throws(function() LibP2PDB:Set(db, nil, 1, { name = "A" }) end)
-            Assert.Throws(function() LibP2PDB:Set(db, 123, 1, { name = "A" }) end)
-            Assert.Throws(function() LibP2PDB:Set(db, {}, 1, { name = "A" }) end)
+            do -- check string key type
+                LibP2PDB:NewTable(db, { name = "Users1", keyType = "string" })
+                Assert.Throws(function() LibP2PDB:SetKey(db, "Users1", nil, { name = "A" }) end)
+                Assert.Throws(function() LibP2PDB:SetKey(db, "Users1", true, { name = "A" }) end)
+                Assert.Throws(function() LibP2PDB:SetKey(db, "Users1", false, { name = "A" }) end)
+                Assert.Throws(function() LibP2PDB:SetKey(db, "Users1", "", { name = "A" }) end)
+                Assert.Throws(function() LibP2PDB:SetKey(db, "Users1", 123, { name = "A" }) end)
+                Assert.Throws(function() LibP2PDB:SetKey(db, "Users1", {}, { name = "A" }) end)
+            end
+            do -- check number key type
+                LibP2PDB:NewTable(db, { name = "Users2", keyType = "number" })
+                Assert.Throws(function() LibP2PDB:SetKey(db, "Users2", nil, { name = "A" }) end)
+                Assert.Throws(function() LibP2PDB:SetKey(db, "Users2", true, { name = "A" }) end)
+                Assert.Throws(function() LibP2PDB:SetKey(db, "Users2", false, { name = "A" }) end)
+                Assert.Throws(function() LibP2PDB:SetKey(db, "Users2", "", { name = "A" }) end)
+                Assert.Throws(function() LibP2PDB:SetKey(db, "Users2", "invalid", { name = "A" }) end)
+                Assert.Throws(function() LibP2PDB:SetKey(db, "Users2", {}, { name = "A" }) end)
+            end
         end,
 
-        Set_KeyIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-            LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
-            Assert.Throws(function() LibP2PDB:Set(db, "Users", nil, { name = "A" }) end)
-            Assert.Throws(function() LibP2PDB:Set(db, "Users", {}, { name = "A" }) end)
-        end,
-
-        Set_KeyTypeMismatch_Throws = function()
-            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-            LibP2PDB:NewTable(db, { name = "Users", keyType = "number" })
-            Assert.Throws(function() LibP2PDB:Set(db, "Users", "user1", { name = "A" }) end)
-        end,
-
-        Set_RowIsInvalid_Throws = function()
-            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-            LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
-            Assert.Throws(function() LibP2PDB:Set(db, "Users", "user1", nil) end)
-            Assert.Throws(function() LibP2PDB:Set(db, "Users", "user1", 123) end)
-            Assert.Throws(function() LibP2PDB:Set(db, "Users", "user1", "invalid") end)
-        end,
-
-        Set_RowSchemaMismatch_Throws = function()
+        SetKey_DataIsInvalid_Throws = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
-            Assert.Throws(function() LibP2PDB:Set(db, "Users", 1, { name = "Bob" }) end)
-            Assert.Throws(function() LibP2PDB:Set(db, "Users", 1, { name = "Bob", age = "25" }) end)
+            Assert.Throws(function() LibP2PDB:SetKey(db, "Users", 1, nil) end)
+            Assert.Throws(function() LibP2PDB:SetKey(db, "Users", 1, true) end)
+            Assert.Throws(function() LibP2PDB:SetKey(db, "Users", 1, false) end)
+            Assert.Throws(function() LibP2PDB:SetKey(db, "Users", 1, "") end)
+            Assert.Throws(function() LibP2PDB:SetKey(db, "Users", 1, "invalid") end)
+            Assert.Throws(function() LibP2PDB:SetKey(db, "Users", 1, 123) end)
+            Assert.Throws(function() LibP2PDB:SetKey(db, "Users", 1, {}) end)
+            Assert.Throws(function() LibP2PDB:SetKey(db, "Users", 1, { name = "Bob" }) end)
+            Assert.Throws(function() LibP2PDB:SetKey(db, "Users", 1, { age = 25 }) end)
+        end,
+
+        SetKey_InvokeChangeCallbacks = function()
+            local dbCount, tableCount, subCount = 0, 0, 0
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = function() dbCount = dbCount + 1 end })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", onChange = function() tableCount = tableCount + 1 end })
+            LibP2PDB:Subscribe(db, "Users", function() subCount = subCount + 1 end)
+            Assert.AreEqual(dbCount, 0)
+            Assert.AreEqual(tableCount, 0)
+            Assert.AreEqual(subCount, 0)
+
+            -- check inserting a new key invokes all callbacks
+            Assert.IsTrue(LibP2PDB:SetKey(db, "Users", 1, { name = "Bob", age = 25 }))
+            Assert.AreEqual(dbCount, 1)
+            Assert.AreEqual(tableCount, 1)
+            Assert.AreEqual(subCount, 1)
+
+            -- check inserting the same key again with same data does not invoke any callbacks
+            Assert.IsTrue(LibP2PDB:SetKey(db, "Users", 1, { name = "Bob", age = 25 }))
+            Assert.AreEqual(dbCount, 1)
+            Assert.AreEqual(tableCount, 1)
+            Assert.AreEqual(subCount, 1)
+
+            -- check inserting over a deleted key invokes all callbacks
+            Assert.IsTrue(LibP2PDB:Delete(db, "Users", 1))
+            Assert.IsTrue(LibP2PDB:SetKey(db, "Users", 1, { name = "Bob", age = 25 }))
+            Assert.AreEqual(dbCount, 3)    -- 1 for delete, 1 for insert
+            Assert.AreEqual(tableCount, 3) -- 1 for delete, 1 for insert
+            Assert.AreEqual(subCount, 3)   -- 1 for delete, 1 for insert
         end,
 
         Update = function()
@@ -3116,7 +3167,7 @@ if DEBUG then
             Assert.Throws(function() LibP2PDB:Update({}, "Users", 1, function(data) return data end) end)
         end,
 
-        Update_TableIsInvalid_Throws = function()
+        Update_TableNameIsInvalid_Throws = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:Update(db, nil, 1, function(data) return data end) end)
             Assert.Throws(function() LibP2PDB:Update(db, 123, 1, function(data) return data end) end)
@@ -3166,7 +3217,7 @@ if DEBUG then
             Assert.Throws(function() LibP2PDB:Get({}, "Users", 1) end)
         end,
 
-        Get_TableIsInvalid_Throws = function()
+        Get_TableNameIsInvalid_Throws = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:Get(db, nil, 1) end)
             Assert.Throws(function() LibP2PDB:Get(db, 123, 1) end)
@@ -3195,7 +3246,7 @@ if DEBUG then
             Assert.Throws(function() LibP2PDB:HasKey({}, "Users", 1) end)
         end,
 
-        HasKey_TableIsInvalid_Throws = function()
+        HasKey_TableNameIsInvalid_Throws = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:HasKey(db, nil, 1) end)
             Assert.Throws(function() LibP2PDB:HasKey(db, 123, 1) end)
@@ -3266,7 +3317,7 @@ if DEBUG then
             Assert.Throws(function() LibP2PDB:Delete({}, "Users", 1) end)
         end,
 
-        Delete_TableIsInvalid_Throws = function()
+        Delete_TableNameIsInvalid_Throws = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:Delete(db, nil, 1) end)
             Assert.Throws(function() LibP2PDB:Delete(db, 123, 1) end)
@@ -3320,7 +3371,7 @@ if DEBUG then
             Assert.AreEqual(version.peer, "=")
             Assert.IsNil(version.tombstone)
 
-            LibP2PDB:Set(db, "Users", Private.peerId, { name = "Robert" })
+            LibP2PDB:SetKey(db, "Users", Private.peerId, { name = "Robert" })
             version = Private.databases[db].tables["Users"].rows[Private.peerId].version
             Assert.IsTable(version)
             Assert.AreEqual(version.clock, 2)
@@ -3367,7 +3418,7 @@ if DEBUG then
             Assert.Throws(function() LibP2PDB:Subscribe({}, "Users", function() end) end)
         end,
 
-        Subscribe_TableIsInvalid_Throws = function()
+        Subscribe_TableNameIsInvalid_Throws = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:Subscribe(db, nil, function() end) end)
             Assert.Throws(function() LibP2PDB:Subscribe(db, 123, function() end) end)
@@ -3403,7 +3454,7 @@ if DEBUG then
             Assert.Throws(function() LibP2PDB:Unsubscribe({}, "Users", function() end) end)
         end,
 
-        Unsubscribe_TableIsInvalid_Throws = function()
+        Unsubscribe_TableNameIsInvalid_Throws = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:Unsubscribe(db, nil, function() end) end)
             Assert.Throws(function() LibP2PDB:Unsubscribe(db, 123, function() end) end)
@@ -3741,7 +3792,7 @@ if DEBUG then
             Assert.Throws(function() LibP2PDB:GetTableSchema({}, "Users") end)
         end,
 
-        GetTableSchema_TableIsInvalid_Throws = function()
+        GetTableSchema_TableNameIsInvalid_Throws = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:GetTableSchema(db, nil) end)
             Assert.Throws(function() LibP2PDB:GetTableSchema(db, 123) end)
@@ -3789,7 +3840,7 @@ if DEBUG then
             Assert.Throws(function() LibP2PDB:ListKeys({}, "Users") end)
         end,
 
-        ListKeys_TableIsInvalid_Throws = function()
+        ListKeys_TableNameIsInvalid_Throws = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             Assert.Throws(function() LibP2PDB:ListKeys(db, nil) end)
             Assert.Throws(function() LibP2PDB:ListKeys(db, 123) end)
