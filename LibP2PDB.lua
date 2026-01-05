@@ -9,6 +9,14 @@ local LibP2PDB = LibStub:NewLibrary(MAJOR, MINOR)
 if not LibP2PDB then return end -- no upgrade needed
 
 ------------------------------------------------------------------------------------------------------------------------
+-- Global Configuration
+------------------------------------------------------------------------------------------------------------------------
+
+local DEBUG = false   -- Set to true to enable debug output
+local VERBOSITY = 4   -- 0 = None, 1 = Errors, 2 = Warnings, 3 = Debug, 4 = Spam
+local TESTING = false -- Set to true to enable internal tests
+
+------------------------------------------------------------------------------------------------------------------------
 -- Dependencies
 ------------------------------------------------------------------------------------------------------------------------
 
@@ -48,18 +56,19 @@ local IsInGuild, IsInRaid, IsInGroup, IsInInstance = IsInGuild, IsInRaid, IsInGr
 -- Constants
 ------------------------------------------------------------------------------------------------------------------------
 
-local DEBUG = false
 local NIL_MARKER = strchar(0)
 
 --- @enum LibP2PDB.Color Color codes for console output.
 local Color = {
     Ace = "ff33ff99",
-    Debug = "ff00ffff",
     White = "ffffffff",
+    Gray = "ffc0c0c0",
+    Red = "ffff2020",
     Yellow = "ffffff00",
-    Red = "ffff4040",
     Green = "ff00ff00",
-    Blue = "ff8080ff",
+    Cyan = "ff00ffff",
+    Blue = "ff4040ff",
+    Magenta = "ffff20ff",
 }
 
 --- @enum LibP2PDB.CommMessageType Communication message types.
@@ -106,24 +115,54 @@ local function Print(fmt, ...)
     print(format("%s: %s", C(Color.Ace, "LibP2PDB"), message))
 end
 
---- Debug print function, only outputs if DEBUG is true.
+--- Spam print function.
+--- Requires DEBUG to be true and VERBOSITY >= 4.
 --- @param fmt string Format string.
 --- @param ... any Format arguments.
-local function Debug(fmt, ...)
-    if DEBUG then
+local function Spam(fmt, ...)
+    if DEBUG and VERBOSITY >= 4 then
         local success, message = pcall(format, fmt, ...)
         if not success then
             message = fmt
         end
-        Print("%s %s", C(Color.Debug, "[DEBUG]"), message)
+        Print("%s %s", C(Color.Gray, "[SPAM]"), message)
     end
 end
 
---- Error print function, only outputs if DEBUG is true.
+--- Debug print function.
+--- Requires DEBUG to be true and VERBOSITY >= 3.
+--- @param fmt string Format string.
+--- @param ... any Format arguments.
+local function Debug(fmt, ...)
+    if DEBUG and VERBOSITY >= 3 then
+        local success, message = pcall(format, fmt, ...)
+        if not success then
+            message = fmt
+        end
+        Print("%s %s", C(Color.Cyan, "[DEBUG]"), message)
+    end
+end
+
+--- Warning print function.
+--- Requires DEBUG to be true and VERBOSITY >= 2.
+--- @param fmt string Format string.
+--- @param ... any Format arguments.
+local function Warn(fmt, ...)
+    if DEBUG and VERBOSITY >= 2 then
+        local success, message = pcall(format, fmt, ...)
+        if not success then
+            message = fmt
+        end
+        Print("%s %s", C(Color.Yellow, "[WARNING]"), message)
+    end
+end
+
+--- Error print function.
+--- Requires DEBUG to be true and VERBOSITY >= 1.
 --- @param fmt string Format string.
 --- @param ... any Format arguments.
 local function Error(fmt, ...)
-    if DEBUG and not DISABLE_ERROR_REPORTING then
+    if DEBUG and VERBOSITY >= 1 then
         local success, message = pcall(format, fmt, ...)
         if not success then
             message = fmt
@@ -2015,26 +2054,26 @@ end
 function Private:Send(dbi, data, channel, target, priority)
     local serialized = dbi.serializer:Serialize(data)
     if not serialized then
-        Debug("failed to serialize data for prefix '%s'", tostring(dbi.prefix))
+        Error("failed to serialize data for prefix '%s'", tostring(dbi.prefix))
         return
     end
 
     local compressed = dbi.compressor:Compress(serialized)
     if not compressed then
-        Debug("failed to compress data for prefix '%s'", tostring(dbi.prefix))
+        Error("failed to compress data for prefix '%s'", tostring(dbi.prefix))
         return
     end
 
     local encoded = dbi.encoder:EncodeForChannel(compressed)
     if not encoded then
-        Debug("failed to encode data for prefix '%s'", tostring(dbi.prefix))
+        Error("failed to encode data for prefix '%s'", tostring(dbi.prefix))
         return
     end
 
     if target then
-        Debug("sending %d bytes on prefix '%s' channel '%s' target '%s'", #encoded, tostring(dbi.prefix), tostring(channel), tostring(target))
+        Spam("sending %d bytes on prefix '%s' channel '%s' target '%s'", #encoded, tostring(dbi.prefix), tostring(channel), tostring(target))
     else
-        Debug("sending %d bytes on prefix '%s' channel '%s'", #encoded, tostring(dbi.prefix), tostring(channel))
+        Spam("sending %d bytes on prefix '%s' channel '%s'", #encoded, tostring(dbi.prefix), tostring(channel))
     end
 
     --- @cast priority "ALERT"|"BULK"|"NORMAL"
@@ -2049,23 +2088,23 @@ end
 function Private:Broadcast(dbi, data, channels, priority)
     local serialized = dbi.serializer:Serialize(data)
     if not serialized then
-        Debug("failed to serialize message for prefix '%s'", tostring(dbi.prefix))
+        Error("failed to serialize message for prefix '%s'", tostring(dbi.prefix))
         return
     end
 
     local compressed = dbi.compressor:Compress(serialized)
     if not compressed then
-        Debug("failed to compress message for prefix '%s'", tostring(dbi.prefix))
+        Error("failed to compress message for prefix '%s'", tostring(dbi.prefix))
         return
     end
 
     local encoded = dbi.encoder:EncodeForChannel(compressed)
     if not encoded then
-        Debug("failed to encode message for prefix '%s'", tostring(dbi.prefix))
+        Error("failed to encode message for prefix '%s'", tostring(dbi.prefix))
         return
     end
 
-    Debug("broadcasting %d bytes on prefix '%s'", #encoded, tostring(dbi.prefix))
+    Spam("broadcasting %d bytes on prefix '%s'", #encoded, tostring(dbi.prefix))
 
     if IsInGuild() then
         --- @cast priority "ALERT"|"BULK"|"NORMAL"
@@ -2111,50 +2150,50 @@ function Private:OnCommReceived(prefix, encoded, channel, sender)
     end
 
     -- Get the database instance for this prefix
-    local db = LibP2PDB:GetDatabase(prefix)
+    local db = Private.prefixes[prefix]
     if not db then
-        Debug("received message for unknown prefix '%s' from channel '%s' sender '%s'", tostring(prefix), tostring(channel), tostring(sender))
+        Error("received message for unknown prefix '%s' from channel '%s' sender '%s'", tostring(prefix), tostring(channel), tostring(sender))
         return
     end
 
     local dbi = Private.databases[db]
     if not dbi then
-        Debug("received message for unregistered database prefix '%s' from channel '%s' sender '%s'", tostring(prefix), tostring(channel), tostring(sender))
+        Error("received message for unregistered database prefix '%s' from channel '%s' sender '%s'", tostring(prefix), tostring(channel), tostring(sender))
         return
     end
 
     -- Deserialize message
     local compressed = dbi.encoder:DecodeFromChannel(encoded)
     if not compressed then
-        Debug("failed to decode message from prefix '%s' channel '%s' sender '%s'", tostring(prefix), tostring(channel), tostring(sender))
+        Error("failed to decode message from prefix '%s' channel '%s' sender '%s'", tostring(prefix), tostring(channel), tostring(sender))
         return
     end
 
     local serialized = dbi.compressor:Decompress(compressed)
     if not serialized then
-        Debug("failed to decompress message from prefix '%s' channel '%s' sender '%s'", tostring(prefix), tostring(channel), tostring(sender))
+        Error("failed to decompress message from prefix '%s' channel '%s' sender '%s'", tostring(prefix), tostring(channel), tostring(sender))
         return
     end
 
     local success, obj = dbi.serializer:Deserialize(serialized)
     if not success or not obj then
-        Debug("failed to deserialize message from prefix '%s' channel '%s' sender '%s': %s", tostring(prefix), tostring(channel), tostring(sender), Dump(obj))
+        Error("failed to deserialize message from prefix '%s' channel '%s' sender '%s': %s", tostring(prefix), tostring(channel), tostring(sender), Dump(obj))
         return
     end
 
     -- Validate message structure
     if not IsTable(obj) then
-        Debug("received invalid message structure from '%s' on channel '%s'", tostring(sender), tostring(channel))
+        Error("received invalid message structure from '%s' on channel '%s'", tostring(sender), tostring(channel))
         return
     end
 
     if not IsNumber(obj.type) then
-        Debug("received message with missing or invalid type from '%s' on channel '%s'", tostring(sender), tostring(channel))
+        Error("received message with missing or invalid type from '%s' on channel '%s'", tostring(sender), tostring(channel))
         return
     end
 
     if not IsNonEmptyString(obj.peer) then
-        Debug("received message with missing or invalid peer from '%s' on channel '%s'", tostring(sender), tostring(channel))
+        Error("received message with missing or invalid peer from '%s' on channel '%s'", tostring(sender), tostring(channel))
         return
     end
 
@@ -2214,7 +2253,7 @@ function Private:DispatchMessage(message)
     elseif message.type == CommMessageType.Rows then
         Private:RowsMessageHandler(message)
     else
-        Debug("received unknown message type %d from '%s' on channel '%s'", message.type, tostring(message.sender), tostring(message.channel))
+        Error("received unknown message type %d from '%s' on channel '%s'", message.type, tostring(message.sender), tostring(message.channel))
     end
 end
 
@@ -2389,7 +2428,7 @@ end
 -- Testing
 ------------------------------------------------------------------------------------------------------------------------
 
-if DEBUG then
+if DEBUG and TESTING then
     local Assert = {
         IsNil = function(value, msg) assert(value == nil, msg or "value is not nil") end,
         IsNotNil = function(value, msg) assert(value ~= nil, msg or "value is nil") end,
@@ -2445,12 +2484,13 @@ if DEBUG then
             assert(s == true, msg or format("function threw an error: %s", tostring(r)))
         end,
         ExpectErrors = function(func, report)
+            local originalVerbosity = VERBOSITY
             if not report then
-                DISABLE_ERROR_REPORTING = true
+                VERBOSITY = 0
             end
             func()
             if not report then
-                DISABLE_ERROR_REPORTING = false
+                VERBOSITY = originalVerbosity
             end
             assert(LAST_ERROR ~= nil, "expected an error but none was reported")
             LAST_ERROR = nil
@@ -4138,19 +4178,19 @@ if DEBUG then
         ImportDatabase_SkipInvalidTables = function()
             --- @type LibP2PDB.DBState
             local state = {
-                [1] = 1, -- DBVersion
-                [2] = 3, -- DBClock
-                [3] = { -- Tables
-                    [1] = { -- First table (valid)
-                        [1] = "Users", -- Table name
-                        [2] = { -- Rows
-                            [1] = { -- First row
-                                [1] = 1, -- Key
-                                [2] = { -- Data
-                                    25, -- age
-                                    "Bob" -- name
+                [1] = 1,                              -- DBVersion
+                [2] = 3,                              -- DBClock
+                [3] = {                               -- Tables
+                    [1] = {                           -- First table (valid)
+                        [1] = "Users",                -- Table name
+                        [2] = {                       -- Rows
+                            [1] = {                   -- First row
+                                [1] = 1,              -- Key
+                                [2] = {               -- Data
+                                    25,               -- age
+                                    "Bob"             -- name
                                 },
-                                [3] = 1, -- Version clock
+                                [3] = 1,              -- Version clock
                                 [4] = Private.peerId, -- Version peer
                             },
                         },
@@ -4159,15 +4199,15 @@ if DEBUG then
                         [1] = "InvalidTable",
                         [2] = 0x456,
                     },
-                    [3] = { -- Third table (valid)
-                        [1] = "Posts", -- Table name
-                        [2] = { -- Rows
-                            [1] = { -- First row
-                                [1] = "post1", -- Key
-                                [2] = { -- Data
-                                    "Hello World" -- content
+                    [3] = {                           -- Third table (valid)
+                        [1] = "Posts",                -- Table name
+                        [2] = {                       -- Rows
+                            [1] = {                   -- First row
+                                [1] = "post1",        -- Key
+                                [2] = {               -- Data
+                                    "Hello World"     -- content
                                 },
-                                [3] = 3, -- Version clock
+                                [3] = 3,              -- Version clock
                                 [4] = Private.peerId, -- Version peer
                             },
                         },
@@ -4227,56 +4267,56 @@ if DEBUG then
         ImportDatabase_SkipInvalidRows = function()
             --- @type LibP2PDB.DBState
             local state = {
-                [1] = 1, -- DBVersion
-                [2] = 6, -- DBClock
-                [3] = { -- Tables
-                    [1] = { -- First table
-                        [1] = "Users", -- Table name
-                        [2] = { -- Rows
-                            [1] = { -- First row (valid)
-                                [1] = 1, -- Key
-                                [2] = { -- Data
-                                    25, -- age
-                                    "Bob" -- name
+                [1] = 1,                              -- DBVersion
+                [2] = 6,                              -- DBClock
+                [3] = {                               -- Tables
+                    [1] = {                           -- First table
+                        [1] = "Users",                -- Table name
+                        [2] = {                       -- Rows
+                            [1] = {                   -- First row (valid)
+                                [1] = 1,              -- Key
+                                [2] = {               -- Data
+                                    25,               -- age
+                                    "Bob"             -- name
                                 },
-                                [3] = 1, -- Version clock
+                                [3] = 1,              -- Version clock
                                 [4] = Private.peerId, -- Version peer
                             },
-                            [2] = { -- Second row (invalid row structure)
+                            [2] = {                   -- Second row (invalid row structure)
                                 [1] = "invalid",
                                 [2] = 0x123,
                             },
-                            [3] = { -- Third row (valid)
-                                [1] = 3, -- Key
-                                [2] = { -- Data
-                                    30, -- age
-                                    "Alice" -- name
+                            [3] = {                   -- Third row (valid)
+                                [1] = 3,              -- Key
+                                [2] = {               -- Data
+                                    30,               -- age
+                                    "Alice"           -- name
                                 },
-                                [3] = 3, -- Version clock
+                                [3] = 3,              -- Version clock
                                 [4] = Private.peerId, -- Version peer
                             },
-                            [4] = { -- Fourth row (invalid data)
-                                [1] = 4, -- Key
+                            [4] = {                   -- Fourth row (invalid data)
+                                [1] = 4,              -- Key
                                 [2] = "invalid_data",
-                                [3] = 4, -- Version clock
+                                [3] = 4,              -- Version clock
                                 [4] = Private.peerId, -- Version peer
                             },
-                            [5] = { -- Fifth row (invalid key)
-                                [1] = "5", -- Key
-                                [2] = { -- Data
-                                    28, -- age
-                                    "Eve" -- name
+                            [5] = {                   -- Fifth row (invalid key)
+                                [1] = "5",            -- Key
+                                [2] = {               -- Data
+                                    28,               -- age
+                                    "Eve"             -- name
                                 },
-                                [3] = 5, -- Version clock
+                                [3] = 5,              -- Version clock
                                 [4] = Private.peerId, -- Version peer
                             },
-                            [6] = { -- Sixth row (missing schema required field)
-                                [1] = 6, -- Key
-                                [2] = { -- Data
+                            [6] = {                   -- Sixth row (missing schema required field)
+                                [1] = 6,              -- Key
+                                [2] = {               -- Data
                                     -- age is missing
-                                    "Charlie" -- name
+                                    "Charlie"         -- name
                                 },
-                                [3] = 6, -- Version clock
+                                [3] = 6,              -- Version clock
                                 [4] = Private.peerId, -- Version peer
                             },
                         },
@@ -4627,14 +4667,12 @@ if DEBUG then
             local startTime = debugprofilestop()
             local state = LibP2PDB:ExportDatabase(db)
             local endTime = debugprofilestop()
-            local duration = endTime - startTime
-            Debug("ExportDatabase of %d rows took %.2f ms.", numRows, duration)
+            Print("ExportDatabase (%d rows) took %.2f ms.", numRows, endTime - startTime)
 
             startTime = debugprofilestop()
             LibP2PDB:ImportDatabase(db, state)
             endTime = debugprofilestop()
-            duration = endTime - startTime
-            Debug("ImportDatabase of %d rows took %.2f ms.", numRows, duration)
+            Print("ImportDatabase (%d rows) took %.2f ms.", numRows, endTime - startTime)
         end,
 
         ExportSize = function()
@@ -4642,13 +4680,13 @@ if DEBUG then
             local db = GenerateDatabase(numRows)
             local state = LibP2PDB:ExportDatabase(db)
             local serialized = LibP2PDB:Serialize(db, state)
-            Debug("Exported database with %d rows has serialized size of %.2f KB.", numRows, #serialized / 1024)
+            Print("Exported database (%d rows): %.2f KB serialized.", numRows, #serialized / 1024)
             local compressed = LibP2PDB:Compress(db, serialized)
-            Debug("Exported database with %d rows has compressed size of %.2f KB.", numRows, #compressed / 1024)
+            Print("Exported database (%d rows): %.2f KB compressed.", numRows, #compressed / 1024)
             local encodedForChannel = LibP2PDB:EncodeForChannel(db, compressed)
-            Debug("Exported database with %d rows has encoded for channel size of %.2f KB.", numRows, #encodedForChannel / 1024)
+            Print("Exported database (%d rows): %.2f KB encoded for channel.", numRows, #encodedForChannel / 1024)
             local encodedForPrint = LibP2PDB:EncodeForPrint(db, compressed)
-            Debug("Exported database with %d rows has encoded for print size of %.2f KB.", numRows, #encodedForPrint / 1024)
+            Print("Exported database (%d rows): %.2f KB encoded for print.", numRows, #encodedForPrint / 1024)
         end,
     }
 
@@ -4669,28 +4707,29 @@ if DEBUG then
         Private.databases = originalDatabases
     end
 
+    local GREEN_CHECKMARK = "|TInterface\\RaidFrame\\ReadyCheck-Ready:16|t"
+
     local function RunTests()
-        Debug("Running LibP2PDB tests...")
+        Print("Running LibP2PDB tests...")
         local startTime = debugprofilestop()
         for _, v in pairs(UnitTests) do
             RunTest(v)
         end
         local endTime = debugprofilestop()
-        Debug("All tests %s.", C(Color.Green, "successful"))
-        Debug("Ran all tests in %.2f ms.", endTime - startTime)
+        Print("%sAll tests passed in %.2f ms.", GREEN_CHECKMARK, endTime - startTime)
     end
 
     local function RunPerformanceTests()
-        Debug("Running LibP2PDB performance tests...")
+        Print("Running LibP2PDB performance tests...")
         local startTime = debugprofilestop()
         for _, v in pairs(PerformanceTests) do
             RunTest(v)
         end
         local endTime = debugprofilestop()
-        Debug("Ran all performance tests in %.2f ms.", endTime - startTime)
+        Print("%sAll performance tests completed in %.2f ms.", GREEN_CHECKMARK, endTime - startTime)
     end
 
-    -- add slash command
+    -- Register slash commands
     SLASH_LIBP2PDB1 = "/libp2pdb"
     SlashCmdList["LIBP2PDB"] = function(arg)
         if arg == "runtests" then
@@ -4698,7 +4737,9 @@ if DEBUG then
         elseif arg == "runperformancetests" then
             RunPerformanceTests()
         else
-            print("Usage: /libp2pdb runtests - Runs the LibP2PDB tests.")
+            Print("LibP2PDB Slash Commands:")
+            Print("  /libp2pdb runtests - Run all unit tests.")
+            Print("  /libp2pdb runperformancetests - Run all performance tests.")
         end
     end
 end
