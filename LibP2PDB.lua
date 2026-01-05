@@ -84,6 +84,10 @@ local CommPriority = {
 -- Private Helper Functions
 ------------------------------------------------------------------------------------------------------------------------
 
+if DEBUG then
+    UIParentLoadAddOn("Blizzard_DebugTools")
+end
+
 --- Format text with color codes for console output.
 --- @param color LibP2PDB.Color Color code.
 --- @param text string Text to color
@@ -513,10 +517,14 @@ end)
 -- Public API: Database Instance Creation
 ------------------------------------------------------------------------------------------------------------------------
 
+--- @alias LibP2PDB.DBPrefix string Unique communication prefix for a database (max 16 chars).
+--- @alias LibP2PDB.DBVersion number Database version number.
+
 --- @class LibP2PDB.DBHandle Database handle.
 
 --- @class LibP2PDB.DBDesc Description for creating a new database.
---- @field prefix string Unique communication prefix for the database (max 16 chars).
+--- @field prefix LibP2PDB.DBPrefix Unique communication prefix for the database (max 16 chars).
+--- @field version LibP2PDB.DBVersion? Optional database version number (default: 1).
 --- @field onError LibP2PDB.DBOnErrorCallback? Optional callback function(errMsg, stack) invoked on errors.
 --- @field channels string[]? Optional array of custom channels to use for broadcasts, in addition to default channels (GUILD, RAID, PARTY, YELL).
 --- @field serializer LibP2PDB.Serializer? Optional custom serializer for encoding/decoding data (default: LibSerialize or AceSerializer if available).
@@ -536,13 +544,13 @@ end)
 --- @field Decompress fun(self: LibP2PDB.Compressor, str: string): string? Decompresses a string.
 
 --- @class LibP2PDB.Encoder Encoder interface for encoding/decoding data.
---- @field EncodeChannel fun(self: LibP2PDB.Encoder, str: string): string Encodes a string for safe transmission over chat channels.
---- @field DecodeChannel fun(self: LibP2PDB.Encoder, str: string): string? Decodes a string received from chat channels.
---- @field EncodePrint fun(self: LibP2PDB.Encoder, str: string): string Encodes a string for safe printing in chat windows.
---- @field DecodePrint fun(self: LibP2PDB.Encoder, str: string): string? Decodes a string received from chat windows.
+--- @field EncodeForChannel fun(self: LibP2PDB.Encoder, str: string): string Encodes data for safe transmission over chat channels.
+--- @field DecodeFromChannel fun(self: LibP2PDB.Encoder, str: string): string? Decodes data received from chat channels, restoring the original data.
+--- @field EncodeForPrint fun(self: LibP2PDB.Encoder, str: string): string Encodes data for safe display or persistence in saved variables.
+--- @field DecodeFromPrint fun(self: LibP2PDB.Encoder, str: string): string? Decodes data from display/storage, restoring the original data.
 
 --- @alias LibP2PDB.DBOnErrorCallback fun(errMsg: string, stack: string?) Callback function invoked on errors.
---- @alias LibP2PDB.DBOnChangeCallback fun(tableName: string, key: LibP2PDB.TableKey, data: LibP2PDB.TableRowData?) Callback function invoked on any row change.
+--- @alias LibP2PDB.DBOnChangeCallback fun(tableName: string, key: LibP2PDB.TableKey, data: LibP2PDB.RowData?) Callback function invoked on any row change.
 --- @alias LibP2PDB.DBOnDiscoveryCompleteCallback fun(isInitial: boolean) Callback function invoked when peer discovery completes.
 
 --- Create a new peer-to-peer synchronized database instance.
@@ -554,11 +562,12 @@ end)
 function LibP2PDB:NewDatabase(desc)
     assert(IsNonEmptyTable(desc), "desc must be a non-empty table")
     assert(IsNonEmptyString(desc.prefix, 16), "desc.prefix must be a non-empty string (max 16 chars)")
+    assert(IsNumberOrNil(desc.version, 1), "desc.version must be a number greater or equal to 1 if provided")
     assert(IsFunctionOrNil(desc.onError), "desc.onError must be a function if provided")
     assert(IsNonEmptyTableOrNil(desc.channels), "desc.channels must be a non-empty array of string if provided")
     assert(IsInterfaceOrNil(desc.serializer, "Serialize", "Deserialize"), "desc.serializer must be a serializer interface if provided")
     assert(IsInterfaceOrNil(desc.compressor, "Compress", "Decompress"), "desc.compressor must be a compressor interface if provided")
-    assert(IsInterfaceOrNil(desc.encoder, "EncodeChannel", "DecodeChannel", "EncodePrint", "DecodePrint"), "desc.encoder must be an encoder interface if provided")
+    assert(IsInterfaceOrNil(desc.encoder, "EncodeForChannel", "DecodeFromChannel", "EncodeForPrint", "DecodeFromPrint"), "desc.encoder must be an encoder interface if provided")
     assert(IsFunctionOrNil(desc.onChange), "desc.onChange must be a function if provided")
     assert(IsNumberOrNil(desc.discoveryQuietPeriod, 0), "desc.discoveryQuietPeriod must be a positive number if provided")
     assert(IsNumberOrNil(desc.discoveryMaxTime, 0), "desc.discoveryMaxTime must be a positive number if provided")
@@ -578,6 +587,7 @@ function LibP2PDB:NewDatabase(desc)
     local dbi = {
         -- Identity
         prefix = desc.prefix,
+        version = desc.version or 1,
         clock = 0,
         -- Configuration
         channels = desc.channels,
@@ -652,16 +662,16 @@ function LibP2PDB:NewDatabase(desc)
                 -- This is because SAY/YELL channels cannot handle LF and CR characters in
                 -- addition to NULL and will just truncate the message if they are present.
                 channelCodec = LibDeflate:CreateCodec("\000\010\013", "\001", ""),
-                EncodeChannel = function(self, str)
+                EncodeForChannel = function(self, str)
                     return self.channelCodec:Encode(str)
                 end,
-                DecodeChannel = function(self, str)
+                DecodeFromChannel = function(self, str)
                     return self.channelCodec:Decode(str)
                 end,
-                EncodePrint = function(self, str)
+                EncodeForPrint = function(self, str)
                     return LibDeflate:EncodeForPrint(str)
                 end,
-                DecodePrint = function(self, str)
+                DecodeFromPrint = function(self, str)
                     return LibDeflate:DecodeForPrint(str)
                 end,
             }
@@ -673,12 +683,12 @@ function LibP2PDB:NewDatabase(desc)
     -- Validate encoding works
     do
         local testString = "This is a test string for encoding.\000\010\013"
-        local encodedChannel = dbi.encoder:EncodeChannel(testString)
-        local decodedChannel = dbi.encoder:DecodeChannel(encodedChannel)
+        local encodedChannel = dbi.encoder:EncodeForChannel(testString)
+        local decodedChannel = dbi.encoder:DecodeFromChannel(encodedChannel)
         assert(decodedChannel == testString, "encoder provided in desc.encoder is invalid for channel encoding")
 
-        local encodedPrint = dbi.encoder:EncodePrint(testString)
-        local decodedPrint = dbi.encoder:DecodePrint(encodedPrint)
+        local encodedPrint = dbi.encoder:EncodeForPrint(testString)
+        local decodedPrint = dbi.encoder:DecodeFromPrint(encodedPrint)
         assert(decodedPrint == testString, "encoder provided in desc.encoder is invalid for print encoding")
     end
 
@@ -706,20 +716,35 @@ end
 -- Public API: Table Definition
 ------------------------------------------------------------------------------------------------------------------------
 
+--- @alias LibP2PDB.Clock number Lamport clock value.
+--- @alias LibP2PDB.PeerID string Peer identifier value.
+--- @alias LibP2PDB.Tombstone boolean Flag indicating if a row is a tombstone (deleted).
+--- @alias LibP2PDB.TableName string Name of the table.
+--- @alias LibP2PDB.TableKeyType "string"|"number" Data type of the primary key.
+--- @alias LibP2PDB.TableKey string|number Primary key value.
+--- @alias LibP2PDB.TableSchema table<string|number, string|string[]> Table schema definition.
+--- @alias LibP2PDB.TableSchemaSorted [string|number, string|string[]] Table schema as a sorted array of field name and allowed types pairs.
+--- @alias LibP2PDB.TableOnValidateCallback fun(key: LibP2PDB.TableKey, data: LibP2PDB.RowData):boolean Callback function for custom row validation.
+--- @alias LibP2PDB.TableOnChangeCallback fun(key: LibP2PDB.TableKey, data: LibP2PDB.RowData?) Callback function invoked on row data changes.
+--- @alias LibP2PDB.RowData table<LibP2PDB.RowDataKey, LibP2PDB.RowDataValue> Data for a row in a table.
+--- @alias LibP2PDB.RowDataKey string|number Key of a field in a row.
+--- @alias LibP2PDB.RowDataValue boolean|string|number|nil Value of a field in a row.
+
+--- @class LibP2PDB.Row Row in a table.
+--- @field data LibP2PDB.RowData? Data for the row (nil if tombstone).
+--- @field version LibP2PDB.RowVersion Version metadata for the row.
+
+--- @class LibP2PDB.RowVersion Version metadata for a row in a table.
+--- @field clock LibP2PDB.Clock Lamport clock value.
+--- @field peer LibP2PDB.PeerID Peer ID that last modified the row.
+--- @field tombstone LibP2PDB.Tombstone? Optional flag indicating if the row is a tombstone (deleted).
+
 --- @class LibP2PDB.TableDesc Description for creating a new table in the database.
---- @field name string Name of the table to create.
+--- @field name LibP2PDB.TableName Name of the table to create.
 --- @field keyType LibP2PDB.TableKeyType Data type of the primary key.
 --- @field schema LibP2PDB.TableSchema? Optional table schema defining field names and their allowed data types.
 --- @field onValidate LibP2PDB.TableOnValidateCallback? Optional callback function(key, data) for custom row validation. Must return true if valid, false otherwise. Data is a copy and has not yet been applied when this is called.
 --- @field onChange LibP2PDB.TableOnChangeCallback? Optional callback function(key, data) on row data changes. Data is nil for deletions. Data is a copy, and has already been applied when this is called.
-
---- @alias LibP2PDB.TableKeyType "string"|"number" Data type of the primary key.
---- @alias LibP2PDB.TableKey string|number Primary key value.
---- @alias LibP2PDB.TableRowData table<string|number, boolean|string|number|nil> Row data containing fields.
---- @alias LibP2PDB.TableSchema table<string|number, string|string[]> Table schema definition.
---- @alias LibP2PDB.TableSchemaSorted [string|number, string|string[]] Table schema as a sorted array of field name and allowed types pairs.
---- @alias LibP2PDB.TableOnValidateCallback fun(key: LibP2PDB.TableKey, data: LibP2PDB.TableRowData):boolean Callback function for custom row validation.
---- @alias LibP2PDB.TableOnChangeCallback fun(key: LibP2PDB.TableKey, data: LibP2PDB.TableRowData?) Callback function invoked on row data changes.
 
 --- Create a new table in the database with an optional schema.
 --- If no schema is provided, the table accepts any fields.
@@ -776,6 +801,7 @@ end
 --- Insert a new key into a table.
 --- Validates the key type and row schema against the table definition.
 --- If a schema is defined, extra fields in the row are ignored.
+--- If no schema is defined, all primitive fields are accepted.
 --- Fails if the key already exists (use SetKey to overwrite).
 --- @param db LibP2PDB.DBHandle Database handle.
 --- @param tableName string Name of the table to insert into.
@@ -803,13 +829,17 @@ function LibP2PDB:InsertKey(db, tableName, key, data)
         error("key '" .. tostring(key) .. "' already exists in table '" .. tableName .. "'")
     end
 
+    -- Prepare the row data
+    local rowData = Private:PrepareRowData(tableName, ti, data)
+
     -- Set the row
-    return Private:SetKey(dbi, tableName, ti, key, data)
+    return Private:SetKey(dbi, tableName, ti, key, rowData)
 end
 
 --- Create or replace a key in a table.
 --- Validates the key type and row schema against the table definition.
 --- If a schema is defined, extra fields in the row are ignored.
+--- If no schema is defined, all primitive fields are accepted.
 --- @param db LibP2PDB.DBHandle Database handle.
 --- @param tableName string Name of the table to set into.
 --- @param key LibP2PDB.TableKey Primary key value for the row (must match table's keyType).
@@ -830,15 +860,20 @@ function LibP2PDB:SetKey(db, tableName, key, data)
     assert(ti, "table '" .. tableName .. "' is not defined in the database")
     assert(type(key) == ti.keyType, "expected key of type '" .. ti.keyType .. "' for table '" .. tableName .. "', but was '" .. type(key) .. "'")
 
+    -- Prepare the row data
+    local rowData = Private:PrepareRowData(tableName, ti, data)
+
     -- Set the row
-    return Private:SetKey(dbi, tableName, ti, key, data)
+    return Private:SetKey(dbi, tableName, ti, key, rowData)
 end
 
---- @alias LibP2PDB.TableUpdateFunction fun(data: LibP2PDB.TableRowData?): LibP2PDB.TableRowData Function invoked to produce updated row data.
+--- @alias LibP2PDB.TableUpdateFunction fun(data: LibP2PDB.RowData?): LibP2PDB.RowData Function invoked to produce updated row data.
 
 --- Create or update a key in a table.
 --- Validates the key type against the table definition.
 --- The update function is called with the current row data and must return the updated row data.
+--- If a schema is defined, extra fields in the updated row are ignored.
+--- If no schema is defined, all primitive fields are accepted.
 --- @param db LibP2PDB.DBHandle Database handle.
 --- @param tableName string Name of the table to update.
 --- @param key LibP2PDB.TableKey Primary key value for the row (must match table's keyType).
@@ -867,8 +902,11 @@ function LibP2PDB:UpdateKey(db, tableName, key, updateFn)
     end
     assert(IsTable(updatedRow), "updateFn must return a table")
 
+    -- Prepare the row data
+    local rowData = Private:PrepareRowData(tableName, ti, updatedRow)
+
     -- Set the row
-    return Private:SetKey(dbi, tableName, ti, key, updatedRow)
+    return Private:SetKey(dbi, tableName, ti, key, rowData)
 end
 
 --- Delete a key from a table.
@@ -902,6 +940,7 @@ end
 --- @param db LibP2PDB.DBHandle Database handle.
 --- @param tableName string Name of the table to check.
 --- @param key LibP2PDB.TableKey Primary key value for the row (must match table's keyType).
+--- @return boolean exists True if the key exists and is not marked as a tombstone (deleted), false otherwise.
 function LibP2PDB:HasKey(db, tableName, key)
     assert(IsEmptyTable(db), "db must be an empty table")
     assert(IsNonEmptyString(tableName), "table name must be a non-empty string")
@@ -930,7 +969,7 @@ end
 --- @param db LibP2PDB.DBHandle Database handle.
 --- @param tableName string Name of the table to get from.
 --- @param key LibP2PDB.TableKey Primary key value for the row (must match table's keyType).
---- @return LibP2PDB.TableRowData? rowData The row data if found, or nil if not found.
+--- @return LibP2PDB.RowData? rowData The row data if found, or nil if not found or tombstone (deleted).
 function LibP2PDB:GetKey(db, tableName, key)
     assert(IsEmptyTable(db), "db must be an empty table")
     assert(IsNonEmptyString(tableName), "table name must be a non-empty string")
@@ -1006,18 +1045,18 @@ end
 -- Public API: Persistence
 ------------------------------------------------------------------------------------------------------------------------
 
---- @class LibP2PDB.DBState Database state.
---- @field clock number Lamport clock of the exported database.
---- @field tables table<string, LibP2PDB.TableState>? Registry of tables, or nil if no tables.
+--- @alias LibP2PDB.DBState [LibP2PDB.DBVersion, LibP2PDB.Clock, [LibP2PDB.TableState]]
+--- @alias LibP2PDB.TableState [LibP2PDB.TableName, [LibP2PDB.RowState]]
+--- @alias LibP2PDB.RowState [LibP2PDB.TableKey, LibP2PDB.RowDataState, LibP2PDB.Clock, LibP2PDB.PeerID, LibP2PDB.Tombstone?]
+--- @alias LibP2PDB.RowDataState [LibP2PDB.RowDataValue]|LibP2PDB.RowData
 
---- @class LibP2PDB.TableState Table state.
---- @field rows table<LibP2PDB.TableKey, LibP2PDB.TableRow> Registry of table rows.
-
---- Export the database state to a table.
---- Empty tables are omitted from the exported state.
+--- Export the database state to a compact table format.
+--- If a table has a schema, fields are exported in alphabetical order without names.
+--- If no schema is defined, all fields are exported in arbitrary order with names.
+--- Empty tables are omitted from the exported output.
 --- @param db LibP2PDB.DBHandle Database handle.
---- @return LibP2PDB.DBState state The exported database state.
-function LibP2PDB:Export(db)
+--- @return LibP2PDB.DBState state The exported database state in compact format.
+function LibP2PDB:ExportDatabase(db)
     assert(IsEmptyTable(db), "db must be an empty table")
 
     -- Validate db instance
@@ -1028,63 +1067,22 @@ function LibP2PDB:Export(db)
     return Private:ExportDatabase(dbi)
 end
 
---- Import a database state from a table.
+--- Import a database state from a compact table format.
 --- Merges the imported state with existing data based on version metadata.
 --- Validates incoming data against table definitions, skipping invalid entries.
 --- @param db LibP2PDB.DBHandle Database handle.
 --- @param state LibP2PDB.DBState The database state to import.
-function LibP2PDB:Import(db, state)
+--- @return boolean success Returns true on success, false otherwise.
+function LibP2PDB:ImportDatabase(db, state)
     assert(IsEmptyTable(db), "db must be an empty table")
-    assert(IsTable(state), "state must be a table")
+    assert(IsNonEmptyTable(state), "state must be a non-empty table")
 
     -- Validate db instance
     local dbi = Private.databases[db]
     assert(dbi, "db is not a recognized database handle")
 
     -- Import database state
-    Private:ImportDatabase(dbi, state)
-end
-
---- Serialize the database state to a compact binary string format.
---- If a table has a schema, fields are serialized in alphabetical order without names.
---- If no schema is defined, all fields are serialized in arbitrary order with names.
---- Empty tables are omitted from the serialized output.
---- @param db LibP2PDB.DBHandle Database handle.
---- @return string serialized The serialized database state.
-function LibP2PDB:Serialize(db)
-    assert(IsEmptyTable(db), "db must be an empty table")
-
-    -- Validate db instance
-    local dbi = Private.databases[db]
-    assert(dbi, "db is not a recognized database handle")
-
-    -- Serialize database state
-    return Private:SerializeDatabase(dbi)
-end
-
---- Deserialize a database state from a compact binary string format.
---- Merges the deserialized data with existing data based on version metadata.
---- Validates incoming data against table definitions, skipping invalid entries.
---- @param db LibP2PDB.DBHandle Database handle.
---- @param str string The serialized database string to deserialize.
-function LibP2PDB:Deserialize(db, str)
-    assert(IsEmptyTable(db), "db must be an empty table")
-    assert(IsNonEmptyString(str), "str must be a non-empty string")
-
-    -- Validate db instance
-    local dbi = Private.databases[db]
-    assert(dbi, "db is not a recognized database handle")
-
-    -- Deserialize the serialized database
-    local state = Private:DeserializeDatabase(dbi, str)
-    if not state then
-        ReportError(dbi, "failed to deserialize database state")
-        return
-    end
-
-    -- Import the database state
-    --- @cast state LibP2PDB.DBState
-    Private:ImportDatabase(dbi, state)
+    return Private:ImportDatabase(dbi, state)
 end
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -1168,15 +1166,15 @@ end
 -- Public API: Utility / Metadata
 ------------------------------------------------------------------------------------------------------------------------
 
---- Return the local peer's unique ID
---- @return string peerId The local peer ID
+--- Return the local peer's unique ID.
+--- @return LibP2PDB.PeerID peerId The local peer ID.
 function LibP2PDB:GetPeerId()
     return Private.peerId
 end
 
---- Return a remote peer's unique ID from its GUID
---- @param guid string Full GUID of the remote peer
---- @return string? peerId The remote peer ID if valid, or nil if not
+--- Return a remote peer's unique ID from its GUID.
+--- @param guid string Full GUID of the remote peer.
+--- @return LibP2PDB.PeerID? peerId The remote peer ID if valid, or nil if not a player GUID.
 function LibP2PDB:GetPeerIdFromGUID(guid)
     assert(IsNonEmptyString(guid), "guid must be a non-empty string")
     if strsub(guid, 1, 7) ~= "Player-" then
@@ -1187,7 +1185,7 @@ end
 
 --- List all defined tables in the database.
 --- @param db LibP2PDB.DBHandle Database handle.
---- @return table<string> tables Array of table names defined in the database
+--- @return table<LibP2PDB.TableName> tables Array of table names defined in the database
 function LibP2PDB:ListTables(db)
     assert(IsEmptyTable(db), "db must be an empty table")
 
@@ -1232,7 +1230,7 @@ end
 --- List all discovered peers for this database.
 --- This list is not persisted and is reset on logout/reload.
 --- @param db LibP2PDB.DBHandle Database handle.
---- @return table<string, table> peers Table of peerId -> peer data
+--- @return table<LibP2PDB.PeerID, table> peers Table of peerId -> peer data
 function LibP2PDB:ListPeers(db)
     assert(IsEmptyTable(db), "db must be an empty table")
 
@@ -1245,6 +1243,131 @@ function LibP2PDB:ListPeers(db)
         peers[peerId] = DeepCopy(data)
     end
     return peers
+end
+
+--- Serialize a value using the database's serializer.
+--- @param db LibP2PDB.DBHandle Database handle.
+--- @param value any Value to serialize.
+--- @return string serialized The serialized string representation of the value.
+function LibP2PDB:Serialize(db, value)
+    assert(IsEmptyTable(db), "db must be an empty table")
+
+    -- Validate db instance
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database handle")
+
+    -- Serialize the data
+    return dbi.serializer:Serialize(value)
+end
+
+--- Deserialize a value using the database's serializer.
+--- @param db LibP2PDB.DBHandle Database handle.
+--- @param str string Serialized string representation of the value.
+--- @return boolean success True if deserialization succeeded, false otherwise.
+--- @return any value The deserialized value if successful, or nil if failed.
+function LibP2PDB:Deserialize(db, str)
+    assert(IsEmptyTable(db), "db must be an empty table")
+
+    -- Validate db instance
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database handle")
+
+    -- Deserialize the data
+    return dbi.serializer:Deserialize(str)
+end
+
+--- Decompress a string using the database's compressor.
+--- @param db LibP2PDB.DBHandle Database handle.
+--- @param str string Compressed string to decompress.
+--- @return string decompressed The decompressed string.
+function LibP2PDB:Compress(db, str)
+    assert(IsEmptyTable(db), "db must be an empty table")
+
+    -- Validate db instance
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database handle")
+
+    -- Compress the data
+    return dbi.compressor:Compress(str)
+end
+
+--- Decompress a string using the database's compressor.
+--- @param db LibP2PDB.DBHandle Database handle.
+--- @param str string Compressed string to decompress.
+--- @return string? decompressed The decompressed string, or nil if decompression failed.
+function LibP2PDB:Decompress(db, str)
+    assert(IsEmptyTable(db), "db must be an empty table")
+
+    -- Validate db instance
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database handle")
+
+    -- Decompress the data
+    return dbi.compressor:Decompress(str)
+end
+
+--- Encode a string for safe transmission over WoW chat channels, using the database's encoder.
+--- This prepares data for sending via chat channels by escaping unsafe characters.
+--- @param db LibP2PDB.DBHandle Database handle.
+--- @param str string Input string to encode.
+--- @return string encoded The encoded string safe for transmission.
+function LibP2PDB:EncodeForChannel(db, str)
+    assert(IsEmptyTable(db), "db must be an empty table")
+
+    -- Validate db instance
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database handle")
+
+    -- Encode the data
+    return dbi.encoder:EncodeForChannel(str)
+end
+
+--- Decode a string received from WoW chat channels, using the database's encoder.
+--- This reverses the encoding applied by EncodeForChannel to restore the original data.
+--- @param db LibP2PDB.DBHandle Database handle.
+--- @param str string Encoded string to decode.
+--- @return string? decoded The decoded string if successful, or nil if decoding failed.
+function LibP2PDB:DecodeFromChannel(db, str)
+    assert(IsEmptyTable(db), "db must be an empty table")
+
+    -- Validate db instance
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database handle")
+
+    -- Decode the data
+    return dbi.encoder:DecodeFromChannel(str)
+end
+
+--- Encode a string for safe display or persistence, using the database's encoder.
+--- This prepares data for printing to chat windows or saving in saved variables.
+--- @param db LibP2PDB.DBHandle Database handle.
+--- @param str string Input string to encode.
+--- @return string encoded The encoded string safe for printing.
+function LibP2PDB:EncodeForPrint(db, str)
+    assert(IsEmptyTable(db), "db must be an empty table")
+
+    -- Validate db instance
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database handle")
+
+    -- Encode the data
+    return dbi.encoder:EncodeForPrint(str)
+end
+
+--- Decode a string previously encoded for display or persistence, using the database's encoder.
+--- This reverses the encoding applied by EncodeForPrint to restore the original data.
+--- @param db LibP2PDB.DBHandle Database handle.
+--- @param str string Encoded string to decode.
+--- @return string? decoded The decoded string if successful, or nil if decoding failed.
+function LibP2PDB:DecodeFromPrint(db, str)
+    assert(IsEmptyTable(db), "db must be an empty table")
+
+    -- Validate db instance
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database handle")
+
+    -- Decode the data
+    return dbi.encoder:DecodeFromPrint(str)
 end
 
 --- Sanitize a string for printing in WoW chat channels.
@@ -1280,6 +1403,7 @@ end
 
 --- @class LibP2PDB.DBInstance Database instance.
 --- @field prefix string Unique communication prefix.
+--- @field version number Database version.
 --- @field clock number Lamport clock for versioning.
 --- @field channels string[]? List of custom channels for broadcasts.
 --- @field discoveryQuietPeriod number Seconds of quiet time for discovery completion.
@@ -1311,13 +1435,17 @@ end
 --- @field rows table<LibP2PDB.TableKey, LibP2PDB.TableRow> Registry of rows in the table.
 
 --- @class LibP2PDB.TableRow Table row definition.
---- @field data LibP2PDB.TableRowData? Data for the row, or nil if the row is a tombstone (deleted).
---- @field version LibP2PDB.TableRowVersion Version metadata for the row.
+--- @field data LibP2PDB.RowData? Data for the row, or nil if the row is a tombstone (deleted).
+--- @field version LibP2PDB.RowVersion Version metadata for the row.
 
---- @class LibP2PDB.TableRowVersion Table row version metadata.
---- @field clock number Lamport clock value.
---- @field peer string Peer ID that last modified the row.
---- @field tombstone boolean? Optional flag indicating if the row is a tombstone (deleted).
+--- @class LibP2PDB.ImportedTable Table imported from a DBState.
+--- @field name string Name of the table.
+--- @field rows table<LibP2PDB.TableKey, LibP2PDB.RowData> rows Table rows mapped by their primary keys.
+
+--- @class LibP2PDB.ImportedRow Row imported from a DBState.
+--- @field key LibP2PDB.TableKey Primary key of the row.
+--- @field data LibP2PDB.RowData? Data for the row, or nil if the row is a tombstone.
+--- @field version LibP2PDB.RowVersion Version metadata for the row.
 
 --- Retrieve the schema definition for a specific table instance.
 --- @param ti LibP2PDB.TableInstance Table instance.
@@ -1345,17 +1473,13 @@ function Private:GetTableSchema(ti, sorted)
 end
 
 --- Set a row in a table, overwriting any existing row.
---- Validates the row schema against the table definition.
 --- @param dbi LibP2PDB.DBInstance Database instance.
 --- @param tableName string Name of the table.
 --- @param ti LibP2PDB.TableInstance Table instance.
 --- @param key LibP2PDB.TableKey Primary key value for the row.
---- @param data table? Row data containing fields defined in the table schema (or nil for tombstone).
+--- @param rowData LibP2PDB.RowData? Row data containing fields defined in the table schema (or nil for tombstone).
 --- @return boolean success Returns true on success, false otherwise.
-function Private:SetKey(dbi, tableName, ti, key, data)
-    -- Prepare the row data
-    local rowData = Private:PrepareRowData(tableName, ti, data)
-
+function Private:SetKey(dbi, tableName, ti, key, rowData)
     -- Run custom validation if provided
     if rowData and ti.onValidate then
         local success, result = SafeCall(dbi, ti.onValidate, key, rowData)
@@ -1386,16 +1510,81 @@ function Private:SetKey(dbi, tableName, ti, key, data)
         -- Versioning (Lamport clock)
         dbi.clock = dbi.clock + 1
 
-        -- Determine peer value for version metadata
-        local peerValue = (key == Private.peerId) and "=" or Private.peerId
-
         -- Store the row
         ti.rows[key] = {
             data = rowData,
             version = {
                 clock = dbi.clock,
-                peer = peerValue,
+                peer = (key == Private.peerId) and "=" or Private.peerId,
                 tombstone = (rowData == nil) and true or nil,
+            },
+        }
+
+        -- Invoke row changed callbacks
+        Private:InvokeChangeCallbacks(dbi, tableName, ti, key, rowData)
+    end
+
+    return true
+end
+
+--- Merge a row in a table, overwriting any existing row, based on version metadata.
+--- @param dbi LibP2PDB.DBInstance Database instance.
+--- @param incomingDBClock number Incoming database Lamport clock.
+--- @param tableName string Name of the table.
+--- @param ti LibP2PDB.TableInstance Table instance.
+--- @param key LibP2PDB.TableKey Primary key value for the row.
+--- @param rowData LibP2PDB.RowData? Row data containing fields defined in the table schema (or nil for tombstone).
+--- @param rowVersion LibP2PDB.RowVersion Version metadata for the row.
+--- @return boolean success Returns true on success, false otherwise.
+function Private:MergeKey(dbi, incomingDBClock, tableName, ti, key, rowData, rowVersion)
+    -- Determine if the incoming row is newer
+    local existingRow = ti.rows[key]
+    if existingRow then
+        if existingRow.version.clock > rowVersion.clock then
+            return true -- existing row is newer, skip
+        elseif existingRow.version.clock == rowVersion.clock then
+            if existingRow.version.peer >= rowVersion.peer then
+                return true -- existing row is same or newer, skip
+            end
+        end
+    end
+
+    -- Run custom validation if provided
+    if rowData and ti.onValidate then
+        local success, result = SafeCall(dbi, ti.onValidate, key, rowData)
+        if not success then
+            return false -- validation threw an error
+        end
+        assert(IsBoolean(result), "onValidate must return a boolean")
+        if not result then
+            return false -- validation failed
+        end
+    end
+
+    -- Determine if the row will change
+    local changes = false
+    if rowData then
+        if not existingRow or existingRow.version.tombstone or not ShallowEqual(existingRow.data, rowData) then
+            changes = true -- new row or data changes
+        end
+    else
+        if not existingRow or not existingRow.version.tombstone then
+            changes = true -- new tombstone row or existing row is not a tombstone
+        end
+    end
+
+    -- Apply changes if any
+    if changes then
+        -- Versioning (Lamport clock)
+        dbi.clock = max(dbi.clock, incomingDBClock)
+
+        -- Store the row
+        ti.rows[key] = {
+            data = rowData,
+            version = {
+                clock = rowVersion.clock,
+                peer = rowVersion.peer,
+                tombstone = rowVersion.tombstone,
             },
         }
 
@@ -1412,7 +1601,7 @@ end
 --- @param tableName string Name of the table.
 --- @param ti LibP2PDB.TableInstance Table instance.
 --- @param data table? Row data to prepare (or nil for tombstone).
---- @return LibP2PDB.TableRowData? rowData The processed row data.
+--- @return LibP2PDB.RowData? rowData The processed row data.
 function Private:PrepareRowData(tableName, ti, data)
     if data == nil then
         return nil -- Tombstone
@@ -1446,37 +1635,13 @@ function Private:PrepareRowData(tableName, ti, data)
     return rowData
 end
 
---- Prepare version metadata for a row.
---- @param version table LibP2PDB.TableRowVersion Input version metadata.
---- @return LibP2PDB.TableRowVersion rowVersion The sanitized version metadata.
-function Private:PrepareRowVersion(version)
-    assert(IsNonEmptyTable(version), "version must be a non-empty table")
-    assert(IsNumber(version.clock, 0), "clock must be a positive number")
-    assert(IsNonEmptyString(version.peer), "peer must be a non-empty string")
-    assert(IsBooleanOrNil(version.tombstone), "tombstone must be a boolean or nil")
-    local rowVersion = {
-        clock = version.clock,
-        peer = version.peer,
-    }
-    if version.tombstone then
-        rowVersion.tombstone = true
-    end
-    return rowVersion
-end
-
 --- Invoke change callbacks for a row change.
---- Skips callbacks during import operations.
 --- @param dbi LibP2PDB.DBInstance Database instance.
 --- @param tableName string Name of the table.
 --- @param ti LibP2PDB.TableInstance Table instance.
 --- @param key LibP2PDB.TableKey Primary key value for the row.
---- @param rowData LibP2PDB.TableRowData? New row data (or nil for tombstone).
+--- @param rowData LibP2PDB.RowData? New row data (or nil for tombstone).
 function Private:InvokeChangeCallbacks(dbi, tableName, ti, key, rowData)
-    -- Skip callbacks during import
-    if Private.isImporting then
-        return
-    end
-
     -- Invoke database global change callback
     if dbi.onChange then
         SafeCall(dbi, dbi.onChange, tableName, key, rowData)
@@ -1493,161 +1658,302 @@ function Private:InvokeChangeCallbacks(dbi, tableName, ti, key, rowData)
     end
 end
 
---- Export the database state to a table.
---- Empty tables are omitted from the exported state.
+--- Export the database state to a compact format.
+--- If a table has a schema, fields are exported in alphabetical order without names.
+--- If no schema is defined, all fields are exported in arbitrary order with names.
+--- Empty tables are omitted from the exported output.
 --- @param dbi LibP2PDB.DBInstance Database instance.
---- @return LibP2PDB.DBState state The exported database state.
+--- @return LibP2PDB.DBState databaseState The exported database state in compact format.
 function Private:ExportDatabase(dbi)
-    local state = {
-        clock = dbi.clock,
-    }
+    local databaseState = {}
+    databaseState[1] = dbi.version
+    databaseState[2] = dbi.clock
 
-    local tables = {}
-    for tableName, tableData in pairs(dbi.tables) do
-        local rows = {}
-        for key, row in pairs(tableData.rows) do
-            rows[key] = {
-                data = ShallowCopy(row.data),
-                version = ShallowCopy(row.version),
-            }
+    -- Export each table
+    local tablesArray = {}
+    local tablesIndex = 1
+    local tables = dbi.tables
+    for tableName, ti in pairs(tables) do
+        -- Get the table schema in sorted order
+        --- @type LibP2PDB.TableSchemaSorted?
+        local schemaSorted = Private:GetTableSchema(ti, true)
+
+        -- Export each row
+        local rowsArray = {}
+        local rowsIndex = 1
+        local rows = ti.rows
+        for key, row in pairs(rows) do
+            -- Export each row's data
+            local rowDataState = nil
+            local rowData = row.data
+            if rowData then
+                --- @type LibP2PDB.RowDataState
+                rowDataState = {}
+                local rowDataIndex = 1
+                if schemaSorted then
+                    -- Schema defined: export field values in schema sorted order without names
+                    --- @cast rowDataState [LibP2PDB.RowDataValue]
+                    for _, fieldData in ipairs(schemaSorted) do
+                        local fieldKey = fieldData[1]
+                        local fieldValue = rowData and rowData[fieldKey] or nil
+                        if fieldValue == nil then
+                            fieldValue = NIL_MARKER
+                        end
+                        rowDataState[rowDataIndex] = fieldValue
+                        rowDataIndex = rowDataIndex + 1
+                    end
+                else
+                    -- No schema: export field key and value pairs in arbitrary order
+                    --- @cast rowDataState LibP2PDB.RowData
+                    for k, v in pairs(rowData or {}) do
+                        rowDataState[k] = v
+                    end
+                end
+            else
+                rowDataState = NIL_MARKER
+            end
+
+            -- Export the row state
+            --- @type LibP2PDB.RowState
+            local rowState = {}
+            rowState[1] = key
+            rowState[2] = rowDataState
+            rowState[3] = row.version.clock
+            rowState[4] = row.version.peer
+            if row.version.tombstone then
+                rowState[5] = true
+            end
+            rowsArray[rowsIndex] = rowState
+            rowsIndex = rowsIndex + 1
         end
 
         -- Include table only if it has rows
-        if next(rows) ~= nil then
-            tables[tableName] = {
-                rows = rows
-            }
+        if #rowsArray > 0 then
+            -- Export the table state
+            --- @type LibP2PDB.TableState
+            local tableState = {}
+            tableState[1] = tableName
+            tableState[2] = rowsArray
+            tablesArray[tablesIndex] = tableState
+            tablesIndex = tablesIndex + 1
         end
     end
 
     -- Include tables only if there are any
-    if next(tables) ~= nil then
-        state.tables = tables
+    if #tablesArray > 0 then
+        databaseState[3] = tablesArray
     end
 
-    return state
+    return databaseState
 end
 
---- Import a database state into the database instance.
+--- Import the database state from a compact format.
 --- Merges the imported state with existing data based on version metadata.
 --- Validates incoming data against table definitions, skipping invalid entries.
 --- @param dbi LibP2PDB.DBInstance Database instance.
 --- @param state LibP2PDB.DBState The database state to import.
+--- @return boolean success Returns true on success, false otherwise.
 function Private:ImportDatabase(dbi, state)
-    if not IsNumber(state.clock, 0) then
-        return -- invalid clock
+    -- Validate database state format
+    if not IsNonEmptyTable(state) then
+        ReportError(dbi, "invalid database state format")
+        return false
     end
 
-    -- Verify if there's any valid tables with rows to import
-    local hasRowsToImport = false
-    for tableName, tableData in pairs(state.tables or {}) do
-        -- Is valid table structure
-        if IsNonEmptyString(tableName) and dbi.tables[tableName] and IsNonEmptyTable(tableData) and IsNonEmptyTable(tableData.rows) then
-            -- Check for at least one valid row
-            for key, row in pairs(tableData.rows) do
-                -- Is valid row structure
-                if (IsNonEmptyString(key) or IsNumber(key)) and IsTable(row) and IsTableOrNil(row.data) and
-                    IsTable(row.version) and IsNumber(row.version.clock, 0) and IsNonEmptyString(row.version.peer) and IsBooleanOrNil(row.version.tombstone) then
-                    hasRowsToImport = true
-                    break
-                end
-            end
-        end
-        if hasRowsToImport then
-            break
-        end
-    end
-    if not hasRowsToImport then
-        return -- no valid rows to import
+    -- Validate database state version
+    local incomingDBVersion = state[1]
+    if not IsNumber(incomingDBVersion, 1) then
+        ReportError(dbi, "invalid database version in state")
+        return false
     end
 
-    -- Begin import
-    Private.isImporting = true
-
-    -- Merge Lamport clock
-    dbi.clock = max(dbi.clock, state.clock)
-
-    -- Import database
-    for tableName, tableData in pairs(state.tables or {}) do
-        local ti = dbi.tables[tableName]
-        if ti then -- only import defined tables
-            for key, row in pairs(tableData.rows or {}) do
-                -- Ignore invalid rows during import
-                SafeCall(dbi, Private.ImportRow, Private, dbi, tableName, ti, key, row)
-            end
-        end
+    -- Validate database state clock
+    local incomingDBClock = state[2]
+    if not IsNumber(incomingDBClock, 0) then
+        ReportError(dbi, "invalid database clock in state")
+        return false
     end
 
-    -- End import
-    Private.isImporting = false
+    -- Validate database tables
+    local incomingTables = state[3]
+    if not IsTableOrNil(incomingTables) then
+        ReportError(dbi, "invalid database tables in state")
+        return false
+    end
+
+    -- Import each table (skipping invalid table entries)
+    for _, tableState in ipairs(incomingTables) do
+        Private:ImportTable(dbi, incomingDBClock, tableState)
+    end
+
+    return true
 end
 
---- Import a single row into a table instance.
---- Merges the row with existing data based on version metadata.
---- Validates incoming data against table definitions, skipping invalid entries.
+--- Import a single table from the table state.
 --- @param dbi LibP2PDB.DBInstance Database instance.
---- @param tableName string Name of the table.
+--- @param incomingDBClock LibP2PDB.Clock Incoming database clock from the state.
+--- @param tableState LibP2PDB.TableState Table state to import.
+function Private:ImportTable(dbi, incomingDBClock, tableState)
+    -- Validate table state format
+    if not IsNonEmptyTable(tableState) then
+        ReportError(dbi, "invalid table state format")
+        return nil
+    end
+
+    -- Validate table name
+    local incomingTableName = tableState[1]
+    if not IsNonEmptyString(incomingTableName) then
+        ReportError(dbi, "invalid table name in table state")
+        return nil
+    end
+
+    -- Check if table is defined in the database
+    local ti = dbi.tables[incomingTableName]
+    if not ti then
+        ReportError(dbi, "table '" .. incomingTableName .. "' is not defined in the database")
+        return nil
+    end
+
+    -- Validate table rows
+    local incomingRows = tableState[2]
+    if not IsTableOrNil(incomingRows) then
+        ReportError(dbi, "invalid rows in table state for table '" .. incomingTableName .. "'")
+        return nil
+    end
+
+    -- Get sorted schema for the table (if any)
+    --- @type LibP2PDB.TableSchemaSorted?
+    local schemaSorted = Private:GetTableSchema(ti, true)
+
+    -- Import each row (skipping invalid row entries)
+    for _, rowState in ipairs(incomingRows) do
+        Private:ImportRow(dbi, incomingDBClock, incomingTableName, ti, schemaSorted, rowState)
+    end
+end
+
+--- Import a single row from the row entry.
+--- @param dbi LibP2PDB.DBInstance Database instance.
+--- @param incomingDBClock LibP2PDB.Clock Incoming database clock from the state.
+--- @param incomingTableName LibP2PDB.TableName Name of the table.
 --- @param ti LibP2PDB.TableInstance Table instance.
---- @param key LibP2PDB.TableKey Primary key value for the row.
---- @param row LibP2PDB.TableRow Incoming row data with version metadata.
-function Private:ImportRow(dbi, tableName, ti, key, row)
-    -- Validate key
-    assert(type(key) == ti.keyType, "expected key of type '" .. ti.keyType .. "' for table '" .. tableName .. "', but was '" .. type(key) .. "'")
-
-    -- Validate row
-    assert(IsNonEmptyTable(row), "row must be a non-empty table")
-
-    -- Determine if the incoming row is newer
-    local rowVersion = Private:PrepareRowVersion(row.version)
-    local existingRow = ti.rows[key]
-    if existingRow and not Private:IsIncomingNewer(existingRow.version, rowVersion) then
-        return -- existing row is newer, do not import
+--- @param schemaSorted LibP2PDB.TableSchemaSorted? Sorted schema for the table (if any).
+--- @param rowState LibP2PDB.RowState Row state to import.
+function Private:ImportRow(dbi, incomingDBClock, incomingTableName, ti, schemaSorted, rowState)
+    -- Validate row state format
+    if not IsNonEmptyTable(rowState) then
+        ReportError(dbi, "invalid row state format for table '%s'", incomingTableName)
+        return
     end
 
-    -- Prepare the row data and version
-    local rowData = Private:PrepareRowData(tableName, ti, not rowVersion.tombstone and row.data or nil)
-
-    -- Run custom validation if provided
-    if rowData and ti.onValidate then
-        local success, result = SafeCall(dbi, ti.onValidate, key, rowData)
-        if not success then
-            return -- validation threw an error
-        end
-        assert(IsBoolean(result), "onValidate must return a boolean")
-        if not result then
-            return -- validation failed
-        end
+    -- Validate row key
+    local incomingKey = rowState[1]
+    if not (IsNonEmptyString(incomingKey) or IsNumber(incomingKey)) then
+        ReportError(dbi, "invalid key in row state for table '%s'", incomingTableName)
+        return
     end
 
-    -- Determine if the row will change
-    local changes = false
-    local existingRow = ti.rows[key]
-    if rowData then
-        if not existingRow or existingRow.version.tombstone or not ShallowEqual(existingRow.data, rowData) then
-            changes = true -- new row or data changes
+    -- Check key type matches table definition
+    if type(incomingKey) ~= ti.keyType then
+        ReportError(dbi, "expected key of type '%s' for table '%s', but was '%s'", ti.keyType, incomingTableName, type(incomingKey))
+        return
+    end
+
+    -- Validate row data (skipped for tombstone rows)
+    local incomingData = rowState[2]
+    if not IsTableOrNil(incomingData) and incomingData ~= NIL_MARKER then
+        ReportError(dbi, "invalid data in row state for key '%s' in table '%s'", tostring(incomingKey), incomingTableName)
+        return
+    end
+
+    -- Validate version clock
+    local incomingVersionClock = rowState[3]
+    if not IsNumber(incomingVersionClock, 0) then
+        ReportError(dbi, "invalid clock in row version state for key '%s' in table '%s'", tostring(incomingKey), incomingTableName)
+        return
+    end
+
+    -- Validate version peer
+    local incomingVersionPeer = rowState[4]
+    if not IsNonEmptyString(incomingVersionPeer) then
+        ReportError(dbi, "invalid peer in row version state for key '%s' in table '%s'", tostring(incomingKey), incomingTableName)
+        return
+    end
+
+    -- Validate tombstone flag
+    local incomingVersionTombstone = rowState[5]
+    if not IsBooleanOrNil(incomingVersionTombstone) then
+        ReportError(dbi, "invalid tombstone flag in row version state for key '%s' in table '%s'", tostring(incomingKey), incomingTableName)
+        return
+    end
+
+    -- Prepare the imported row version
+    --- @type LibP2PDB.RowVersion
+    local importedVersion = {
+        clock = incomingVersionClock,
+        peer = incomingVersionPeer,
+        tombstone = incomingVersionTombstone and true or nil,
+    }
+
+    -- Merge the incoming row
+    if incomingVersionTombstone then
+        -- Merge the tombstone row (no data)
+        SafeCall(dbi, Private.MergeKey, Private, dbi, incomingDBClock, incomingTableName, ti, incomingKey, nil, importedVersion)
+    else
+        -- Import the row data
+        local importedRowData = Private:ImportRowData(dbi, schemaSorted, incomingData)
+        if importedRowData then
+            -- Merge the row data
+            SafeCall(dbi, Private.MergeKey, Private, dbi, incomingDBClock, incomingTableName, ti, incomingKey, importedRowData, importedVersion)
+        end
+    end
+end
+
+--- Import row data from the row data state.
+--- @param dbi LibP2PDB.DBInstance Database instance.
+--- @param schemaSorted LibP2PDB.TableSchemaSorted? Sorted schema for the table (if any).
+--- @param rowDataState LibP2PDB.RowDataState Row data state to import.
+--- @return LibP2PDB.RowData? importedRowData The imported row data, or nil on error.
+function Private:ImportRowData(dbi, schemaSorted, rowDataState)
+    -- Validate row data state format
+    if not IsTableOrNil(rowDataState) then
+        ReportError(dbi, "invalid row data state format")
+        return nil
+    end
+
+    -- Reconstruct row data
+    --- @type LibP2PDB.RowData
+    local importedRowData = {}
+    if schemaSorted then
+        -- Schema defined: reconstruct data from ordered array
+        --- @cast rowDataState [LibP2PDB.RowDataValue]
+        if #rowDataState ~= #schemaSorted then
+            ReportError(dbi, "row data state length does not match schema length")
+            return nil
+        end
+        for i, fieldData in ipairs(schemaSorted) do
+            local fieldKey = fieldData[1]
+            local fieldValue = rowDataState[i]
+            if fieldValue == NIL_MARKER then
+                fieldValue = nil
+            end
+            importedRowData[fieldKey] = fieldValue
         end
     else
-        if not existingRow or not existingRow.version.tombstone then
-            changes = true -- new tombstone row or existing row is not a tombstone
+        -- No schema: copy all primitive fields with string or number keys
+        for k, v in pairs(rowDataState or {}) do
+            if (IsString(k) or IsNumber(k)) and IsPrimitive(v) then
+                importedRowData[k] = v
+            end
         end
     end
 
-    -- Apply changes if any
-    if changes then
-        -- Store the row
-        ti.rows[key] = {
-            data = rowData,
-            version = rowVersion,
-        }
-
-        -- Invoke row changed callbacks
-        Private:InvokeChangeCallbacks(dbi, tableName, ti, key, rowData)
-    end
+    -- Return row data
+    return importedRowData
 end
 
 --- Determine if incoming version metadata is newer than existing version metadata.
---- @param existing LibP2PDB.TableRowVersion Existing version metadata.
---- @param incoming LibP2PDB.TableRowVersion Incoming version metadata.
+--- @param existing LibP2PDB.RowVersion Existing version metadata.
+--- @param incoming LibP2PDB.RowVersion Incoming version metadata.
 --- @return boolean isNewer Returns true if incoming is newer, false otherwise.
 function Private:IsIncomingNewer(existing, incoming)
     if not existing then
@@ -1660,242 +1966,6 @@ function Private:IsIncomingNewer(existing, incoming)
     else
         return incoming.peer > existing.peer -- clocks are equal, use peer ID as tiebreaker
     end
-end
-
---- Serialize the database state to a compact binary string format.
---- If a table has a schema, fields are serialized in alphabetical order without names.
---- If no schema is defined, all fields are serialized in arbitrary order with names.
---- Empty tables are omitted from the serialized output.
---- @param dbi LibP2PDB.DBInstance Database instance.
---- @return string serialized The serialized database state.
-function Private:SerializeDatabase(dbi)
-    -- Preprocess database into array structure
-    local rootArray = { dbi.clock }
-    local rootIdx = 1
-    for tableName, tableData in pairs(dbi.tables) do
-        local rows = tableData.rows
-
-        -- Serialize only if the table has rows
-        if next(rows) then
-            local tableArray = { tableName }
-            local tableIdx = 1
-
-            -- Get sorted schema once for this table
-            --- @type LibP2PDB.TableSchemaSorted?
-            local schemaSorted = Private:GetTableSchema(tableData, true)
-
-            -- Serialize rows
-            for key, row in pairs(rows) do
-                -- Add row data
-                local data = row.data
-                local version = row.version
-                local rowArray, rowIdx
-                if schemaSorted then
-                    -- Schema defined: serialize fields in alphabetical order without names
-                    local dataArray = {}
-                    local dataIdx = 0
-                    if data then
-                        for i = 1, #schemaSorted do
-                            local fieldName = schemaSorted[i][1]
-                            local fieldValue = data[fieldName]
-                            dataIdx = dataIdx + 1
-                            dataArray[dataIdx] = fieldValue == nil and NIL_MARKER or fieldValue
-                        end
-                    else
-                        for i = 1, #schemaSorted do
-                            dataIdx = dataIdx + 1
-                            dataArray[dataIdx] = NIL_MARKER
-                        end
-                    end
-                    rowArray = { key, dataArray, version.clock, version.peer }
-                    rowIdx = 4
-                else
-                    -- No schema: serialize all fields in arbitrary order
-                    rowArray = { key, data or {}, version.clock, version.peer }
-                    rowIdx = 4
-                end
-
-                -- Add tombstone flag if present
-                if version.tombstone then
-                    rowIdx = rowIdx + 1
-                    rowArray[rowIdx] = true
-                end
-
-                tableIdx = tableIdx + 1
-                tableArray[tableIdx] = rowArray
-            end
-
-            rootIdx = rootIdx + 1
-            rootArray[rootIdx] = tableArray
-        end
-    end
-
-    -- Serialize the root array to a compact binary string format
-    return dbi.serializer:Serialize(rootArray)
-end
-
---- Deserialize an entire database from a compact binary string format.
---- @param dbi LibP2PDB.DBInstance Database instance.
---- @param str string The serialized database string to deserialize.
---- @return LibP2PDB.DBState? state The deserialized database state on success, or an error message on failure.
-function Private:DeserializeDatabase(dbi, str)
-    local success, rootArray = dbi.serializer:Deserialize(str)
-    if not success or not rootArray then
-        ReportError(dbi, "failed to deserialize binary string")
-        return
-    end
-    if not IsNonEmptyTable(rootArray) then
-        ReportError(dbi, "root array must be a non-empty table")
-        return
-    end
-
-    -- Process the array structure into a state that can be imported later
-    local clock = rootArray[1]
-    if not IsNumber(clock, 0) then
-        ReportError(dbi, "clock must be a positive number")
-        return
-    end
-
-    --- @type LibP2PDB.DBState
-    local state = {
-        clock = clock,
-    }
-
-    -- Parse tables (format: clock, tableArray1, tableArray2, ...)
-    local rootLen = #rootArray
-    local tables = {}
-    for i = 2, rootLen do
-        local tableArray = rootArray[i]
-        local tableLen = tableArray and #tableArray or 0
-
-        if not IsTable(tableArray) or tableLen < 1 then
-            ReportError(dbi, "table array must be a non-empty table")
-            return
-        end
-
-        local tableName = tableArray[1]
-        if not IsNonEmptyString(tableName) then
-            ReportError(dbi, "table name must be a non-empty string")
-            return
-        end
-
-        local ti = dbi.tables[tableName]
-        if not ti then
-            ReportError(dbi, "table '%s' is not defined in the database", tostring(tableName))
-            return
-        end
-
-        -- Get sorted schema once for this table
-        --- @type LibP2PDB.TableSchemaSorted?
-        local schemaSorted = Private:GetTableSchema(ti, true)
-
-        -- Parse rows (format: tableName, rowArray1, rowArray2, ...)
-        local rows = {}
-        local keyType = ti.keyType
-        for rowIndex = 2, tableLen do
-            local rowArray = tableArray[rowIndex]
-            local rowLen = rowArray and #rowArray or 0
-            local row = Private:DeserializeRow(dbi, keyType, tableName, rowArray, rowLen, schemaSorted)
-            if row then
-                local key = rowArray[1]
-                rows[key] = row
-            end
-        end
-
-        -- Include table only if it has rows
-        if next(rows) ~= nil then
-            tables[tableName] = {
-                rows = rows,
-            }
-        end
-    end
-
-    -- Include tables only if there are any
-    if next(tables) ~= nil then
-        state.tables = tables
-    end
-
-    return state
-end
-
---- Deserialize a single row from an array structure.
---- @param dbi LibP2PDB.DBInstance Database instance.
---- @param keyType LibP2PDB.TableKeyType Expected key type for the table.
---- @param tableName string Name of the table (for error messages).
---- @param rowArray table The array structure representing the row.
---- @param rowLen number Length of the row array.
---- @param schemaSorted LibP2PDB.TableSchemaSorted? Optional sorted schema for the table.
---- @return LibP2PDB.TableRow? row The deserialized row on success, or an error message on failure.
-function Private:DeserializeRow(dbi, keyType, tableName, rowArray, rowLen, schemaSorted)
-    if not IsTable(rowArray) or rowLen < 3 then
-        ReportError(dbi, "skipping row with invalid structure in table '%s'", tableName)
-        return
-    end
-
-    -- Validate key type
-    local key = rowArray[1]
-    if type(key) ~= keyType then
-        ReportError(dbi, "skipping row with invalid key type '%s' in table '%s'", tostring(key), tableName)
-        return
-    end
-
-    local dataArray = rowArray[2]
-    local data = {}
-    if IsTable(dataArray) then
-        if schemaSorted then
-            -- Schema defined: map array indices back to field names
-            local dataLen = #dataArray
-            for fieldIndex = 1, dataLen do
-                local fieldValue = dataArray[fieldIndex]
-                local fieldInfo = schemaSorted[fieldIndex]
-
-                if fieldInfo then
-                    local fieldName = fieldInfo[1]
-
-                    -- Check for nil marker
-                    if fieldValue == NIL_MARKER then
-                        fieldValue = nil
-                    end
-
-                    data[fieldName] = fieldValue
-                end
-            end
-        else
-            -- No schema: use the data table as-is
-            data = dataArray
-        end
-    end
-
-    local versionClock = rowArray[3]
-    if not IsNumber(versionClock, 0) then
-        ReportError(dbi, "skipping row with invalid version clock '%s' in table '%s'", tostring(versionClock), tableName)
-        return
-    end
-
-    local versionPeer = rowArray[4]
-    if not IsNonEmptyString(versionPeer) then
-        ReportError(dbi, "skipping row with invalid version peer '%s' in table '%s'", tostring(versionPeer), tableName)
-        return
-    end
-
-    local versionTombstone = false
-    if rowLen >= 5 and rowArray[5] == true then
-        versionTombstone = true
-    end
-
-    local version = {
-        clock = versionClock,
-        peer = versionPeer,
-    }
-    if versionTombstone then
-        version.tombstone = true
-    end
-
-    -- Return row object
-    return {
-        data = not versionTombstone and data or nil,
-        version = version,
-    }
 end
 
 --- Build a digest of the current database state for gossip sync.
@@ -1955,7 +2025,7 @@ function Private:Send(dbi, data, channel, target, priority)
         return
     end
 
-    local encoded = dbi.encoder:EncodeChannel(compressed)
+    local encoded = dbi.encoder:EncodeForChannel(compressed)
     if not encoded then
         Debug("failed to encode data for prefix '%s'", tostring(dbi.prefix))
         return
@@ -1989,7 +2059,7 @@ function Private:Broadcast(dbi, data, channels, priority)
         return
     end
 
-    local encoded = dbi.encoder:EncodeChannel(compressed)
+    local encoded = dbi.encoder:EncodeForChannel(compressed)
     if not encoded then
         Debug("failed to encode message for prefix '%s'", tostring(dbi.prefix))
         return
@@ -2054,7 +2124,7 @@ function Private:OnCommReceived(prefix, encoded, channel, sender)
     end
 
     -- Deserialize message
-    local compressed = dbi.encoder:DecodeChannel(encoded)
+    local compressed = dbi.encoder:DecodeFromChannel(encoded)
     if not compressed then
         Debug("failed to decode message from prefix '%s' channel '%s' sender '%s'", tostring(prefix), tostring(channel), tostring(sender))
         return
@@ -2289,17 +2359,7 @@ end
 --- @param message LibP2PDB.Message
 function Private:RowsMessageHandler(message)
     -- Import received rows
-    for incomingTableName, incomingTableData in pairs(message.data or {}) do
-        local ti = message.dbi.tables[incomingTableName]
-        if ti then
-            for incomingKey, incomingRow in pairs(incomingTableData or {}) do
-                local importResult, importError = Private:ImportRow(message.dbi, incomingTableName, ti, incomingKey, incomingRow)
-                if not importResult then
-                    Debug("failed to import row with key '%s' in table '%s' from '%s' on channel '%s': %s", tostring(incomingKey), incomingTableName, tostring(message.sender), tostring(message.channel), tostring(importError))
-                end
-            end
-        end
-    end
+    -- todo
 end
 
 --- OnUpdate handler called periodically to handle time-based events.
@@ -2384,10 +2444,14 @@ if DEBUG then
             local s, r = pcall(fn)
             assert(s == true, msg or format("function threw an error: %s", tostring(r)))
         end,
-        ExpectErrors = function(func)
-            DISABLE_ERROR_REPORTING = true
+        ExpectErrors = function(func, report)
+            if not report then
+                DISABLE_ERROR_REPORTING = true
+            end
             func()
-            DISABLE_ERROR_REPORTING = false
+            if not report then
+                DISABLE_ERROR_REPORTING = false
+            end
             assert(LAST_ERROR ~= nil, "expected an error but none was reported")
             LAST_ERROR = nil
         end,
@@ -2412,7 +2476,7 @@ if DEBUG then
                 Assert.AreEqual(dbi.discoveryMaxTime, 3)
                 Assert.IsInterface(dbi.serializer, { "Serialize", "Deserialize" })
                 Assert.IsInterface(dbi.compressor, { "Compress", "Decompress" })
-                Assert.IsInterface(dbi.encoder, { "EncodeChannel", "DecodeChannel", "EncodePrint", "DecodePrint" })
+                Assert.IsInterface(dbi.encoder, { "EncodeForChannel", "DecodeFromChannel", "EncodeForPrint", "DecodeFromPrint" })
                 Assert.IsEmptyTable(dbi.peers)
                 Assert.IsEmptyTable(dbi.buckets)
                 Assert.IsEmptyTable(dbi.tables)
@@ -2435,10 +2499,10 @@ if DEBUG then
                         Decompress = function(self, str) return str end
                     },
                     encoder = {
-                        EncodeChannel = function(self, str) return str end,
-                        DecodeChannel = function(self, str) return str end,
-                        EncodePrint = function(self, str) return str end,
-                        DecodePrint = function(self, str) return str end
+                        EncodeForChannel = function(self, str) return str end,
+                        DecodeFromChannel = function(self, str) return str end,
+                        EncodeForPrint = function(self, str) return str end,
+                        DecodeFromPrint = function(self, str) return str end
                     },
                     onChange = function(table, key, row) end,
                     discoveryQuietPeriod = 5,
@@ -2458,7 +2522,7 @@ if DEBUG then
                 Assert.AreEqual(dbi.discoveryMaxTime, 30)
                 Assert.IsInterface(dbi.serializer, { "Serialize", "Deserialize" })
                 Assert.IsInterface(dbi.compressor, { "Compress", "Decompress" })
-                Assert.IsInterface(dbi.encoder, { "EncodeChannel", "DecodeChannel", "EncodePrint", "DecodePrint" })
+                Assert.IsInterface(dbi.encoder, { "EncodeForChannel", "DecodeFromChannel", "EncodeForPrint", "DecodeFromPrint" })
                 Assert.IsEmptyTable(dbi.peers)
                 Assert.IsEmptyTable(dbi.buckets)
                 Assert.IsEmptyTable(dbi.tables)
@@ -2597,10 +2661,10 @@ if DEBUG then
                 LibP2PDB:NewDatabase({
                     prefix = "LibP2PDBTests",
                     encoder = {
-                        EncodeChannel = function(self, str) return str end,
-                        DecodeChannel = function(self, str) return nil end,
-                        EncodePrint = function(self, str) return str end,
-                        DecodePrint = function(self, str) return nil end,
+                        EncodeForChannel = function(self, str) return str end,
+                        DecodeFromChannel = function(self, str) return nil end,
+                        EncodeForPrint = function(self, str) return str end,
+                        DecodeFromPrint = function(self, str) return nil end,
                     },
                 })
             end)
@@ -3857,309 +3921,412 @@ if DEBUG then
             Assert.Throws(function() LibP2PDB:Unsubscribe(db, "Users", "invalid") end)
         end,
 
-        Export = function()
+        ExportDatabase = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
             LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
             LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 })
             LibP2PDB:InsertKey(db, "Users", 2, { name = "Alice", age = 30 })
 
-            local exported = LibP2PDB:Export(db)
-            Assert.IsTable(exported)
-            Assert.IsTable(exported.tables)
-            Assert.IsTable(exported.tables["Users"])
-            Assert.IsTable(exported.tables["Users"].rows)
-            Assert.AreEqual(exported.tables["Users"].rows[1].data, { name = "Bob", age = 25 })
-            Assert.AreEqual(exported.tables["Users"].rows[1].version, { clock = 1, peer = Private.peerId })
-            Assert.AreEqual(exported.tables["Users"].rows[2].data, { name = "Alice", age = 30 })
-            Assert.AreEqual(exported.tables["Users"].rows[2].version, { clock = 2, peer = Private.peerId })
+            local state = LibP2PDB:ExportDatabase(db)
+            Assert.IsNonEmptyTable(state)
         end,
 
-        Export_DBIsInvalid_Throws = function()
-            Assert.Throws(function() LibP2PDB:Export(nil) end)
-            Assert.Throws(function() LibP2PDB:Export(123) end)
-            Assert.Throws(function() LibP2PDB:Export("") end)
-            Assert.Throws(function() LibP2PDB:Export({}) end)
+        ExportDatabase_DBIsInvalid_Throws = function()
+            Assert.Throws(function() LibP2PDB:ExportDatabase(nil) end)
+            Assert.Throws(function() LibP2PDB:ExportDatabase(true) end)
+            Assert.Throws(function() LibP2PDB:ExportDatabase(false) end)
+            Assert.Throws(function() LibP2PDB:ExportDatabase("") end)
+            Assert.Throws(function() LibP2PDB:ExportDatabase("invalid") end)
+            Assert.Throws(function() LibP2PDB:ExportDatabase(123) end)
+            Assert.Throws(function() LibP2PDB:ExportDatabase({}) end)
         end,
 
-        Import = function()
-            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
-            LibP2PDB:NewTable(db1, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
-            LibP2PDB:InsertKey(db1, "Users", 1, { name = "Bob", age = 25 })
-            LibP2PDB:InsertKey(db1, "Users", 2, { name = "Alice", age = 30 })
-            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
-            LibP2PDB:NewTable(db2, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+        ImportDatabase = function()
+            do -- test with string key type and no schema
+                local dbExport = LibP2PDB:NewDatabase({ prefix = "LibP2PDBExport1" })
+                local tableDesc = {
+                    name = "Users",
+                    keyType = "string",
+                    onValidate = function(key, data)
+                        return not data or not data.age or data.age >= 0
+                    end
+                }
+                LibP2PDB:NewTable(dbExport, tableDesc)
+                LibP2PDB:InsertKey(dbExport, "Users", "user1", { name = "Bob", age = 25, city = "NY" })
+                LibP2PDB:InsertKey(dbExport, "Users", "user2", { name = "Alice", age = 30, town = "LA" })
+                LibP2PDB:InsertKey(dbExport, "Users", "user3", { name = "Eve", age = -1 })
+                LibP2PDB:InsertKey(dbExport, "Users", "user4", {})
+                LibP2PDB:InsertKey(dbExport, "Users", "user5", { name = "Charlie", age = 28 })
+                LibP2PDB:DeleteKey(dbExport, "Users", "user5")
+                LibP2PDB:DeleteKey(dbExport, "Users", "user6")
 
-            local exported = LibP2PDB:Export(db1)
-            LibP2PDB:Import(db2, exported)
+                local state = LibP2PDB:ExportDatabase(dbExport)
+                Assert.IsNonEmptyTable(state)
 
-            Assert.AreEqual(LibP2PDB:GetKey(db2, "Users", 1), LibP2PDB:GetKey(db1, "Users", 1))
-            Assert.AreEqual(LibP2PDB:GetKey(db2, "Users", 2), LibP2PDB:GetKey(db1, "Users", 2))
+                local dbImport = LibP2PDB:NewDatabase({ prefix = "LibP2PDBImport1" })
+                LibP2PDB:NewTable(dbImport, tableDesc)
+
+                Assert.IsTrue(LibP2PDB:ImportDatabase(dbImport, state))
+
+                local dbi = Private.databases[dbImport]
+                Assert.IsNonEmptyTable(dbi)
+                Assert.AreEqual(dbi.clock, 6) -- 6 changes performed (1 rejected)
+                Assert.IsNonEmptyTable(dbi.tables)
+
+                local ti = dbi.tables["Users"]
+                Assert.IsNonEmptyTable(ti)
+
+                local rows = ti.rows
+                Assert.IsNonEmptyTable(rows)
+
+                Assert.AreEqual(rows["user1"], {
+                    data = {
+                        name = "Bob",
+                        age = 25,
+                        city = "NY"
+                    },
+                    version = {
+                        clock = 1,
+                        peer = Private.peerId,
+                        tombstone = nil
+                    },
+                })
+                Assert.AreEqual(rows["user2"], {
+                    data = {
+                        name = "Alice",
+                        age = 30,
+                        town = "LA"
+                    },
+                    version = {
+                        clock = 2,
+                        peer = Private.peerId,
+                        tombstone = nil
+                    },
+                })
+                Assert.IsNil(rows["user3"])
+                Assert.AreEqual(rows["user4"], {
+                    data = {},
+                    version = {
+                        clock = 3,
+                        peer = Private.peerId,
+                        tombstone = nil
+                    },
+                })
+                Assert.AreEqual(rows["user5"], {
+                    data = nil,
+                    version = {
+                        clock = 5,
+                        peer = Private.peerId,
+                        tombstone = true
+                    },
+                })
+                Assert.AreEqual(rows["user6"], {
+                    data = nil,
+                    version = {
+                        clock = 6,
+                        peer = Private.peerId,
+                        tombstone = true
+                    },
+                })
+            end
+            do -- test with number key type and schema
+                local dbExport = LibP2PDB:NewDatabase({ prefix = "LibP2PDBExport2" })
+                local tableDesc = {
+                    name = "Users",
+                    keyType = "number",
+                    schema = {
+                        name = "string",
+                        age = {
+                            "number",
+                            "nil"
+                        }
+                    },
+                    onValidate = function(key, data)
+                        return not data or not data.age or data.age >= 0
+                    end
+                }
+                LibP2PDB:NewTable(dbExport, tableDesc)
+                LibP2PDB:InsertKey(dbExport, "Users", 1, { name = "Bob", age = 25 })
+                LibP2PDB:InsertKey(dbExport, "Users", 2, { name = "Alice" })
+                LibP2PDB:InsertKey(dbExport, "Users", 3, { name = "Eve", age = -1 })
+                LibP2PDB:InsertKey(dbExport, "Users", 4, { name = "Charlie", age = 28 })
+                LibP2PDB:DeleteKey(dbExport, "Users", 4)
+                LibP2PDB:DeleteKey(dbExport, "Users", 5)
+
+                local state = LibP2PDB:ExportDatabase(dbExport)
+                Assert.IsNonEmptyTable(state)
+
+                local dbImport = LibP2PDB:NewDatabase({ prefix = "LibP2PDBImport2" })
+                LibP2PDB:NewTable(dbImport, tableDesc)
+
+                Assert.IsTrue(LibP2PDB:ImportDatabase(dbImport, state))
+
+                local dbi = Private.databases[dbImport]
+                Assert.IsNonEmptyTable(dbi)
+                Assert.AreEqual(dbi.clock, 5) -- 5 changes performed (1 rejected)
+                Assert.IsNonEmptyTable(dbi.tables)
+
+                local ti = dbi.tables["Users"]
+                Assert.IsNonEmptyTable(ti)
+
+                local rows = ti.rows
+                Assert.IsNonEmptyTable(rows)
+                Assert.AreEqual(rows[1], {
+                    data = {
+                        name = "Bob",
+                        age = 25
+                    },
+                    version = {
+                        clock = 1,
+                        peer = Private.peerId,
+                        tombstone = nil
+                    },
+                })
+                Assert.AreEqual(rows[2], {
+                    data = {
+                        name = "Alice"
+                    },
+                    version = {
+                        clock = 2,
+                        peer = Private.peerId,
+                        tombstone = nil
+                    },
+                })
+                Assert.IsNil(rows[3])
+                Assert.AreEqual(rows[4], {
+                    data = nil,
+                    version = {
+                        clock = 4,
+                        peer = Private.peerId,
+                        tombstone = true
+                    },
+                })
+                Assert.AreEqual(rows[5], {
+                    data = nil,
+                    version = {
+                        clock = 5,
+                        peer = Private.peerId,
+                        tombstone = true
+                    },
+                })
+            end
         end,
 
-        Import_DBIsInvalid_Throws = function()
+        ImportDatabase_DBIsInvalid_Throws = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-            local exported = LibP2PDB:Export(db)
-            Assert.Throws(function() LibP2PDB:Import(nil, exported) end)
-            Assert.Throws(function() LibP2PDB:Import(123, exported) end)
-            Assert.Throws(function() LibP2PDB:Import("", exported) end)
-            Assert.Throws(function() LibP2PDB:Import({}, exported) end)
+            local exported = LibP2PDB:ExportDatabase(db)
+            Assert.Throws(function() LibP2PDB:ImportDatabase(nil, exported) end)
+            Assert.Throws(function() LibP2PDB:ImportDatabase(true, exported) end)
+            Assert.Throws(function() LibP2PDB:ImportDatabase(false, exported) end)
+            Assert.Throws(function() LibP2PDB:ImportDatabase("", exported) end)
+            Assert.Throws(function() LibP2PDB:ImportDatabase("invalid", exported) end)
+            Assert.Throws(function() LibP2PDB:ImportDatabase(123, exported) end)
+            Assert.Throws(function() LibP2PDB:ImportDatabase({}, exported) end)
         end,
 
-        Import_ExportedIsInvalid_Throws = function()
+        ImportDatabase_StateIsInvalid_Throws = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-            Assert.Throws(function() LibP2PDB:Import(db, nil) end)
-            Assert.Throws(function() LibP2PDB:Import(db, 123) end)
-            Assert.Throws(function() LibP2PDB:Import(db, "invalid") end)
+            Assert.Throws(function() LibP2PDB:ImportDatabase(db, nil) end)
+            Assert.Throws(function() LibP2PDB:ImportDatabase(db, true) end)
+            Assert.Throws(function() LibP2PDB:ImportDatabase(db, false) end)
+            Assert.Throws(function() LibP2PDB:ImportDatabase(db, "") end)
+            Assert.Throws(function() LibP2PDB:ImportDatabase(db, "invalid") end)
+            Assert.Throws(function() LibP2PDB:ImportDatabase(db, 123) end)
+            Assert.Throws(function() LibP2PDB:ImportDatabase(db, {}) end)
         end,
 
-        Import_SkipInvalidRows = function()
-            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
-            LibP2PDB:NewTable(db1, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
-            LibP2PDB:InsertKey(db1, "Users", 1, { name = "Bob", age = 25 })
+        ImportDatabase_SkipInvalidTables = function()
+            --- @type LibP2PDB.DBState
+            local state = {
+                [1] = 1, -- DBVersion
+                [2] = 3, -- DBClock
+                [3] = { -- Tables
+                    [1] = { -- First table (valid)
+                        [1] = "Users", -- Table name
+                        [2] = { -- Rows
+                            [1] = { -- First row
+                                [1] = 1, -- Key
+                                [2] = { -- Data
+                                    25, -- age
+                                    "Bob" -- name
+                                },
+                                [3] = 1, -- Version clock
+                                [4] = Private.peerId, -- Version peer
+                            },
+                        },
+                    },
+                    [2] = { -- Second table (invalid table structure)
+                        [1] = "InvalidTable",
+                        [2] = 0x456,
+                    },
+                    [3] = { -- Third table (valid)
+                        [1] = "Posts", -- Table name
+                        [2] = { -- Rows
+                            [1] = { -- First row
+                                [1] = "post1", -- Key
+                                [2] = { -- Data
+                                    "Hello World" -- content
+                                },
+                                [3] = 3, -- Version clock
+                                [4] = Private.peerId, -- Version peer
+                            },
+                        },
+                    },
+                },
+            }
 
-            local exported = LibP2PDB:Export(db1)
-
-            -- Corrupt the exported state by adding a row with invalid schema
-            exported.tables["Users"].rows[2] = { data = { name = "Alice" }, version = { clock = 2, peer = Private.peerId } }
-
-            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
-            LibP2PDB:NewTable(db2, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
-
-            Assert.ExpectErrors(function() LibP2PDB:Import(db2, exported) end)
-            Assert.AreEqual(LibP2PDB:GetKey(db2, "Users", 1), LibP2PDB:GetKey(db1, "Users", 1))
-            Assert.IsNil(LibP2PDB:GetKey(db2, "Users", 2))
-        end,
-
-        Serialize = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-            LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
-            LibP2PDB:InsertKey(db, "Users", "1", { name = "Bob", age = 25 })
-            LibP2PDB:InsertKey(db, "Users", "2", { name = "Alice", age = 30 })
-            LibP2PDB:DeleteKey(db, "Users", "2")
-            LibP2PDB:InsertKey(db, "Users", Private.peerId, { name = "Eve", age = 35 })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            LibP2PDB:NewTable(db, { name = "Posts", keyType = "string", schema = { content = "string" } })
 
-            local serialized = LibP2PDB:Serialize(db)
-            Assert.IsNonEmptyString(serialized)
+            Assert.ExpectErrors(function() LibP2PDB:ImportDatabase(db, state) end)
+
+            local dbi = Private.databases[db]
+            Assert.IsNonEmptyTable(dbi)
+            Assert.AreEqual(dbi.clock, 3) -- State pretends 3 changes performed
+            Assert.IsNonEmptyTable(dbi.tables)
+
+            local usersTable = dbi.tables["Users"]
+            Assert.IsNonEmptyTable(usersTable)
+
+            local usersRows = usersTable.rows
+            Assert.IsNonEmptyTable(usersRows)
+
+            Assert.AreEqual(usersRows[1], {
+                data = {
+                    name = "Bob",
+                    age = 25,
+                },
+                version = {
+                    clock = 1,
+                    peer = Private.peerId,
+                    tombstone = nil
+                },
+            })
+
+            local invalidTable = dbi.tables["InvalidTable"]
+            Assert.IsNil(invalidTable)
+
+            local postsTable = dbi.tables["Posts"]
+            Assert.IsNonEmptyTable(postsTable)
+
+            local postsRows = postsTable.rows
+            Assert.IsNonEmptyTable(postsRows)
+            Assert.AreEqual(postsRows["post1"], {
+                data = {
+                    content = "Hello World",
+                },
+                version = {
+                    clock = 3,
+                    peer = Private.peerId,
+                    tombstone = nil
+                },
+            })
         end,
 
-        Serialize_DBIsInvalid_Throws = function()
-            Assert.Throws(function() LibP2PDB:Serialize(nil) end)
-            Assert.Throws(function() LibP2PDB:Serialize(123) end)
-            Assert.Throws(function() LibP2PDB:Serialize("") end)
-            Assert.Throws(function() LibP2PDB:Serialize({}) end)
-        end,
+        ImportDatabase_SkipInvalidRows = function()
+            --- @type LibP2PDB.DBState
+            local state = {
+                [1] = 1, -- DBVersion
+                [2] = 6, -- DBClock
+                [3] = { -- Tables
+                    [1] = { -- First table
+                        [1] = "Users", -- Table name
+                        [2] = { -- Rows
+                            [1] = { -- First row (valid)
+                                [1] = 1, -- Key
+                                [2] = { -- Data
+                                    25, -- age
+                                    "Bob" -- name
+                                },
+                                [3] = 1, -- Version clock
+                                [4] = Private.peerId, -- Version peer
+                            },
+                            [2] = { -- Second row (invalid row structure)
+                                [1] = "invalid",
+                                [2] = 0x123,
+                            },
+                            [3] = { -- Third row (valid)
+                                [1] = 3, -- Key
+                                [2] = { -- Data
+                                    30, -- age
+                                    "Alice" -- name
+                                },
+                                [3] = 3, -- Version clock
+                                [4] = Private.peerId, -- Version peer
+                            },
+                            [4] = { -- Fourth row (invalid data)
+                                [1] = 4, -- Key
+                                [2] = "invalid_data",
+                                [3] = 4, -- Version clock
+                                [4] = Private.peerId, -- Version peer
+                            },
+                            [5] = { -- Fifth row (invalid key)
+                                [1] = "5", -- Key
+                                [2] = { -- Data
+                                    28, -- age
+                                    "Eve" -- name
+                                },
+                                [3] = 5, -- Version clock
+                                [4] = Private.peerId, -- Version peer
+                            },
+                            [6] = { -- Sixth row (missing schema required field)
+                                [1] = 6, -- Key
+                                [2] = { -- Data
+                                    -- age is missing
+                                    "Charlie" -- name
+                                },
+                                [3] = 6, -- Version clock
+                                [4] = Private.peerId, -- Version peer
+                            },
+                        },
+                    }
+                },
+            }
 
-        Deserialize = function()
-            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
-            LibP2PDB:NewTable(db1, { name = "Users", keyType = "string", schema = { name = "string", age = "number", gender = { "string", "nil" } } })
-            LibP2PDB:InsertKey(db1, "Users", "1", { name = "Bob", age = 25, gender = "male" })
-            LibP2PDB:InsertKey(db1, "Users", "2", { name = "Alice", age = 30, gender = "female" })
-            LibP2PDB:DeleteKey(db1, "Users", "2")
-            LibP2PDB:InsertKey(db1, "Users", Private.peerId, { name = "Eve", age = 35, gender = nil })
-            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
-            LibP2PDB:NewTable(db2, { name = "Users", keyType = "string", schema = { name = "string", age = "number", gender = { "string", "nil" } } })
-
-            local serialized = LibP2PDB:Serialize(db1)
-            LibP2PDB:Deserialize(db2, serialized)
-            Assert.AreEqual(LibP2PDB:GetKey(db2, "Users", "1"), { name = "Bob", age = 25, gender = "male" })
-            Assert.IsNil(LibP2PDB:GetKey(db2, "Users", "2"))
-            Assert.AreEqual(LibP2PDB:GetKey(db2, "Users", Private.peerId), { name = "Eve", age = 35, gender = nil })
-        end,
-
-        Deserialize_InvalidClock_Fails = function()
-            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
-            LibP2PDB:NewTable(db1, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
-            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
-            LibP2PDB:NewTable(db2, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
-
-            -- Test with invalid binary data
-            Assert.ExpectErrors(function() LibP2PDB:Deserialize(db2, "invalid_binary_data") end)
-        end,
-
-        Deserialize_InvalidTableStructure_Fails = function()
-            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
-            LibP2PDB:NewTable(db1, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
-            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
-            LibP2PDB:NewTable(db2, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
-
-            -- Test with malformed serialized data
-            Assert.ExpectErrors(function() LibP2PDB:Deserialize(db2, "\1\2\3") end)
-        end,
-
-        Deserialize_UndefinedTable_Fails = function()
-            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
-            LibP2PDB:NewTable(db1, { name = "Products", keyType = "string", schema = { name = "string" } })
-            LibP2PDB:InsertKey(db1, "Products", "1", { name = "Widget" })
-
-            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
-            LibP2PDB:NewTable(db2, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
-
-            -- Serialize from db1 (has Products table), deserialize to db2 (only has Users table)
-            local serialized = LibP2PDB:Serialize(db1)
-            Assert.ExpectErrors(function() LibP2PDB:Deserialize(db2, serialized) end)
-        end,
-
-        Deserialize_InvalidKeyType_SkipsRow = function()
-            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
-            LibP2PDB:NewTable(db1, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
-            LibP2PDB:InsertKey(db1, "Users", "stringkey", { name = "Alice", age = 30 })
-            LibP2PDB:InsertKey(db1, "Users", "5", { name = "Bob", age = 25 })
-
-            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
-            LibP2PDB:NewTable(db2, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
-
-            -- Serialize from db1 (string keys), deserialize to db2 (expects number keys)
-            local serialized = LibP2PDB:Serialize(db1)
-            Assert.ExpectErrors(function() LibP2PDB:Deserialize(db2, serialized) end)
-
-            -- String key should be skipped (check internal rows to avoid Get assertion)
-            Assert.IsNil(Private.databases[db2].tables["Users"].rows["stringkey"])
-
-            -- Numeric string key should also be skipped (check internal rows)
-            Assert.IsNil(Private.databases[db2].tables["Users"].rows[5])
-        end,
-
-        Deserialize_InvalidRowStructure_SkipsRow = function()
-            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
-            LibP2PDB:NewTable(db1, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
-            LibP2PDB:InsertKey(db1, "Users", "key1", { name = "Bob", age = 25 })
-            LibP2PDB:InsertKey(db1, "Users", "key2", { name = "Alice", age = 30 })
-
-            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
-            LibP2PDB:NewTable(db2, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
-
-            -- Normal serialize/deserialize should work
-            local serialized = LibP2PDB:Serialize(db1)
-            LibP2PDB:Deserialize(db2, serialized)
-
-            -- Both rows should be imported
-            Assert.AreEqual(LibP2PDB:GetKey(db2, "Users", "key1"), { name = "Bob", age = 25 })
-            Assert.AreEqual(LibP2PDB:GetKey(db2, "Users", "key2"), { name = "Alice", age = 30 })
-        end,
-
-        Deserialize_InvalidVersionClock_SkipsRow = function()
-            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
-            LibP2PDB:NewTable(db1, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
-            LibP2PDB:InsertKey(db1, "Users", "key1", { name = "Bob", age = 25 })
-            LibP2PDB:InsertKey(db1, "Users", "key2", { name = "Alice", age = 30 })
-
-            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
-            LibP2PDB:NewTable(db2, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
-
-            -- Normal serialize/deserialize should work
-            local serialized = LibP2PDB:Serialize(db1)
-            LibP2PDB:Deserialize(db2, serialized)
-
-            -- Both rows should be imported
-            Assert.AreEqual(LibP2PDB:GetKey(db2, "Users", "key1"), { name = "Bob", age = 25 })
-            Assert.AreEqual(LibP2PDB:GetKey(db2, "Users", "key2"), { name = "Alice", age = 30 })
-        end,
-
-        Deserialize_InvalidVersionPeer_SkipsRow = function()
-            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
-            LibP2PDB:NewTable(db1, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
-            LibP2PDB:InsertKey(db1, "Users", "key1", { name = "Bob", age = 25 })
-            LibP2PDB:InsertKey(db1, "Users", "key2", { name = "Alice", age = 30 })
-
-            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
-            LibP2PDB:NewTable(db2, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
-
-            -- Normal serialize/deserialize should work
-            local serialized = LibP2PDB:Serialize(db1)
-            LibP2PDB:Deserialize(db2, serialized)
-
-            -- Both rows should be imported
-            Assert.AreEqual(LibP2PDB:GetKey(db2, "Users", "key1"), { name = "Bob", age = 25 })
-            Assert.AreEqual(LibP2PDB:GetKey(db2, "Users", "key2"), { name = "Alice", age = 30 })
-        end,
-
-        Deserialize_InvalidFieldType_SkipsRow = function()
-            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
-            LibP2PDB:NewTable(db1, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
-            LibP2PDB:InsertKey(db1, "Users", "key1", { name = "Bob", age = 25 })
-            LibP2PDB:InsertKey(db1, "Users", "key2", { name = "Alice", age = 30 })
-
-            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
-            LibP2PDB:NewTable(db2, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
-
-            -- Normal serialize/deserialize should work - schema validation happens during Set, not deserialize
-            local serialized = LibP2PDB:Serialize(db1)
-            LibP2PDB:Deserialize(db2, serialized)
-
-            -- Both rows should be imported
-            Assert.AreEqual(LibP2PDB:GetKey(db2, "Users", "key1"), { name = "Bob", age = 25 })
-            Assert.AreEqual(LibP2PDB:GetKey(db2, "Users", "key2"), { name = "Alice", age = 30 })
-        end,
-
-        Deserialize_TombstoneWithoutData_Imports = function()
-            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
-            LibP2PDB:NewTable(db1, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
-            LibP2PDB:InsertKey(db1, "Users", "deleted", { name = "Bob", age = 25 })
-            LibP2PDB:DeleteKey(db1, "Users", "deleted")
-
-            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
-            LibP2PDB:NewTable(db2, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
-            LibP2PDB:InsertKey(db2, "Users", "deleted", { name = "OldData", age = 99 })
-
-            -- Serialize tombstone from db1, deserialize to db2
-            local serialized = LibP2PDB:Serialize(db1)
-            LibP2PDB:Deserialize(db2, serialized)
-
-            -- Row should be deleted
-            Assert.IsFalse(LibP2PDB:HasKey(db2, "Users", "deleted"))
-        end,
-
-        Deserialize_InvalidBinaryData_Fails = function()
-            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
-            LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
-            Assert.ExpectErrors(function() LibP2PDB:Deserialize(db, "corrupted_data") end)
-        end,
-
-        Deserialize_EmptyData_ImportsCorrectly = function()
-            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
-            LibP2PDB:NewTable(db1, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
-            LibP2PDB:InsertKey(db1, "Users", "key", { name = "Bob", age = 25 })
-
-            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
-            LibP2PDB:NewTable(db2, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
-
-            -- Normal serialize/deserialize
-            local serialized = LibP2PDB:Serialize(db1)
-            LibP2PDB:Deserialize(db2, serialized)
-
-            -- Row should be imported
-            Assert.AreEqual(LibP2PDB:GetKey(db2, "Users", "key"), { name = "Bob", age = 25 })
-        end,
-
-        Deserialize_OptionalFields = function()
-            local db1 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests1" })
-            LibP2PDB:NewTable(db1, { name = "Config", keyType = "string", schema = { key = "string", value = { "string", "nil" } } })
-            LibP2PDB:InsertKey(db1, "Config", "theme", { key = "theme", value = "dark" })
-            LibP2PDB:InsertKey(db1, "Config", "sound", { key = "sound", value = nil })
-
-            local serialized = LibP2PDB:Serialize(db1)
-
-            local db2 = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests2" })
-            LibP2PDB:NewTable(db2, { name = "Config", keyType = "string", schema = { key = "string", value = { "string", "nil" } } })
-
-            LibP2PDB:Deserialize(db2, serialized)
-            Assert.AreEqual(LibP2PDB:GetKey(db2, "Config", "theme"), { key = "theme", value = "dark" })
-            Assert.AreEqual(LibP2PDB:GetKey(db2, "Config", "sound"), { key = "sound", value = nil })
-        end,
-
-        Deserialize_DBIsInvalid_Throws = function()
-            Assert.Throws(function() LibP2PDB:Deserialize(nil, "") end)
-            Assert.Throws(function() LibP2PDB:Deserialize(123, "") end)
-            Assert.Throws(function() LibP2PDB:Deserialize("", "") end)
-            Assert.Throws(function() LibP2PDB:Deserialize({}, "") end)
-        end,
-
-        Deserialize_SerializedIsInvalid_Throws = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-            Assert.Throws(function() LibP2PDB:Deserialize(db, nil) end)
-            Assert.Throws(function() LibP2PDB:Deserialize(db, 123) end)
-            Assert.Throws(function() LibP2PDB:Deserialize(db, "") end)
-            Assert.Throws(function() LibP2PDB:Deserialize(db, {}) end)
+            Assert.AreEqual(Private.databases[db].clock, 0)
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+
+            Assert.ExpectErrors(function() LibP2PDB:ImportDatabase(db, state) end)
+
+            local dbi = Private.databases[db]
+            Assert.IsNonEmptyTable(dbi)
+            Assert.AreEqual(dbi.clock, 6) -- State pretends 6 changes performed
+            Assert.IsNonEmptyTable(dbi.tables)
+
+            local ti = dbi.tables["Users"]
+            Assert.IsNonEmptyTable(ti)
+
+            local rows = ti.rows
+            Assert.IsNonEmptyTable(rows)
+
+            Assert.AreEqual(rows[1], {
+                data = {
+                    name = "Bob",
+                    age = 25,
+                },
+                version = {
+                    clock = 1,
+                    peer = Private.peerId,
+                    tombstone = nil
+                },
+            })
+            Assert.IsNil(rows[2])
+            Assert.AreEqual(rows[3], {
+                data = {
+                    name = "Alice",
+                    age = 30,
+                },
+                version = {
+                    clock = 3,
+                    peer = Private.peerId,
+                    tombstone = nil
+                },
+            })
+            Assert.IsNil(rows[4])
+            Assert.IsNil(rows[5])
+            Assert.IsNil(rows[6])
         end,
 
         ListTables = function()
@@ -4208,6 +4375,135 @@ if DEBUG then
             Assert.Throws(function() LibP2PDB:ListKeys(db, nil) end)
             Assert.Throws(function() LibP2PDB:ListKeys(db, 123) end)
             Assert.Throws(function() LibP2PDB:ListKeys(db, {}) end)
+        end,
+
+        SerializeDeserialize = function()
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+            local testValue = { a = "value", b = 42, c = true, d = nil, nested = { e = "nested", f = 100, g = false, h = nil } }
+            local serialized = LibP2PDB:Serialize(db, testValue)
+            local success, deserialized = LibP2PDB:Deserialize(db, serialized)
+            Assert.IsTrue(success)
+            Assert.AreEqual(deserialized, testValue)
+        end,
+
+        Serialize_DBIsInvalid_Throws = function()
+            local testValue = { a = "value", b = 42 }
+            Assert.Throws(function() LibP2PDB:Serialize(nil, testValue) end)
+            Assert.Throws(function() LibP2PDB:Serialize(true, testValue) end)
+            Assert.Throws(function() LibP2PDB:Serialize(false, testValue) end)
+            Assert.Throws(function() LibP2PDB:Serialize("", testValue) end)
+            Assert.Throws(function() LibP2PDB:Serialize("invalid", testValue) end)
+            Assert.Throws(function() LibP2PDB:Serialize(123, testValue) end)
+            Assert.Throws(function() LibP2PDB:Serialize({}, testValue) end)
+        end,
+
+        Deserialize_DBIsInvalid_Throws = function()
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+            local testValue = { a = "value", b = 42 }
+            local serialized = LibP2PDB:Serialize(db, testValue)
+            Assert.Throws(function() LibP2PDB:Deserialize(nil, serialized) end)
+            Assert.Throws(function() LibP2PDB:Deserialize(true, serialized) end)
+            Assert.Throws(function() LibP2PDB:Deserialize(false, serialized) end)
+            Assert.Throws(function() LibP2PDB:Deserialize("", serialized) end)
+            Assert.Throws(function() LibP2PDB:Deserialize("invalid", serialized) end)
+            Assert.Throws(function() LibP2PDB:Deserialize(123, serialized) end)
+            Assert.Throws(function() LibP2PDB:Deserialize({}, serialized) end)
+        end,
+
+        CompressDecompress = function()
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+            local testString = "This is a test string for compression."
+            local compressed = LibP2PDB:Compress(db, testString)
+            local decompressed = LibP2PDB:Decompress(db, compressed)
+            Assert.AreEqual(decompressed, testString)
+        end,
+
+        Compress_DBIsInvalid_Throws = function()
+            local testString = "This is a test string for compression."
+            Assert.Throws(function() LibP2PDB:Compress(nil, testString) end)
+            Assert.Throws(function() LibP2PDB:Compress(true, testString) end)
+            Assert.Throws(function() LibP2PDB:Compress(false, testString) end)
+            Assert.Throws(function() LibP2PDB:Compress("", testString) end)
+            Assert.Throws(function() LibP2PDB:Compress("invalid", testString) end)
+            Assert.Throws(function() LibP2PDB:Compress(123, testString) end)
+            Assert.Throws(function() LibP2PDB:Compress({}, testString) end)
+        end,
+
+        Decompress_DBIsInvalid_Throws = function()
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+            local testString = "This is a test string for compression."
+            local compressed = LibP2PDB:Compress(db, testString)
+            Assert.Throws(function() LibP2PDB:Decompress(nil, compressed) end)
+            Assert.Throws(function() LibP2PDB:Decompress(true, compressed) end)
+            Assert.Throws(function() LibP2PDB:Decompress(false, compressed) end)
+            Assert.Throws(function() LibP2PDB:Decompress("", compressed) end)
+            Assert.Throws(function() LibP2PDB:Decompress("invalid", compressed) end)
+            Assert.Throws(function() LibP2PDB:Decompress(123, compressed) end)
+            Assert.Throws(function() LibP2PDB:Decompress({}, compressed) end)
+        end,
+
+        EncodeDecodeForChannel = function()
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+            local testString = "This is a test string for channel encoding."
+            local encoded = LibP2PDB:EncodeForChannel(db, testString)
+            local decoded = LibP2PDB:DecodeFromChannel(db, encoded)
+            Assert.AreEqual(decoded, testString)
+        end,
+
+        EncodeForChannel_DBIsInvalid_Throws = function()
+            local testString = "This is a test string for channel encoding."
+            Assert.Throws(function() LibP2PDB:EncodeForChannel(nil, testString) end)
+            Assert.Throws(function() LibP2PDB:EncodeForChannel(true, testString) end)
+            Assert.Throws(function() LibP2PDB:EncodeForChannel(false, testString) end)
+            Assert.Throws(function() LibP2PDB:EncodeForChannel("", testString) end)
+            Assert.Throws(function() LibP2PDB:EncodeForChannel("invalid", testString) end)
+            Assert.Throws(function() LibP2PDB:EncodeForChannel(123, testString) end)
+            Assert.Throws(function() LibP2PDB:EncodeForChannel({}, testString) end)
+        end,
+
+        DecodeFromChannel_DBIsInvalid_Throws = function()
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+            local testString = "This is a test string for channel encoding."
+            local encoded = LibP2PDB:EncodeForChannel(db, testString)
+            Assert.Throws(function() LibP2PDB:DecodeFromChannel(nil, encoded) end)
+            Assert.Throws(function() LibP2PDB:DecodeFromChannel(true, encoded) end)
+            Assert.Throws(function() LibP2PDB:DecodeFromChannel(false, encoded) end)
+            Assert.Throws(function() LibP2PDB:DecodeFromChannel("", encoded) end)
+            Assert.Throws(function() LibP2PDB:DecodeFromChannel("invalid", encoded) end)
+            Assert.Throws(function() LibP2PDB:DecodeFromChannel(123, encoded) end)
+            Assert.Throws(function() LibP2PDB:DecodeFromChannel({}, encoded) end)
+        end,
+
+        EncodeDecodeForPrint = function()
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+            local testString = "This is a test string for print encoding."
+            local encoded = LibP2PDB:EncodeForPrint(db, testString)
+            local decoded = LibP2PDB:DecodeFromPrint(db, encoded)
+            Assert.AreEqual(decoded, testString)
+        end,
+
+        EncodeForPrint_DBIsInvalid_Throws = function()
+            local testString = "This is a test string for print encoding."
+            Assert.Throws(function() LibP2PDB:EncodeForPrint(nil, testString) end)
+            Assert.Throws(function() LibP2PDB:EncodeForPrint(true, testString) end)
+            Assert.Throws(function() LibP2PDB:EncodeForPrint(false, testString) end)
+            Assert.Throws(function() LibP2PDB:EncodeForPrint("", testString) end)
+            Assert.Throws(function() LibP2PDB:EncodeForPrint("invalid", testString) end)
+            Assert.Throws(function() LibP2PDB:EncodeForPrint(123, testString) end)
+            Assert.Throws(function() LibP2PDB:EncodeForPrint({}, testString) end)
+        end,
+
+        DecodeFromPrint_DBIsInvalid_Throws = function()
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+            local testString = "This is a test string for print encoding."
+            local encoded = LibP2PDB:EncodeForPrint(db, testString)
+            Assert.Throws(function() LibP2PDB:DecodeFromPrint(nil, encoded) end)
+            Assert.Throws(function() LibP2PDB:DecodeFromPrint(true, encoded) end)
+            Assert.Throws(function() LibP2PDB:DecodeFromPrint(false, encoded) end)
+            Assert.Throws(function() LibP2PDB:DecodeFromPrint("", encoded) end)
+            Assert.Throws(function() LibP2PDB:DecodeFromPrint("invalid", encoded) end)
+            Assert.Throws(function() LibP2PDB:DecodeFromPrint(123, encoded) end)
+            Assert.Throws(function() LibP2PDB:DecodeFromPrint({}, encoded) end)
         end,
     }
     --- @diagnostic enable: param-type-mismatch, assign-type-mismatch, missing-fields
@@ -4324,21 +4620,35 @@ if DEBUG then
     end
 
     local PerformanceTests = {
-        SerializeDeserialize = function()
+        ExportImport = function()
             local numRows = 2000
             local db = GenerateDatabase(numRows)
 
             local startTime = debugprofilestop()
-            local serialized = LibP2PDB:Serialize(db)
+            local state = LibP2PDB:ExportDatabase(db)
             local endTime = debugprofilestop()
             local duration = endTime - startTime
-            Debug(format("Serialize of %d rows took %.2f ms. Serialized size: %d bytes.", numRows, duration, #serialized))
+            Debug("ExportDatabase of %d rows took %.2f ms.", numRows, duration)
 
             startTime = debugprofilestop()
-            LibP2PDB:Deserialize(db, serialized)
+            LibP2PDB:ImportDatabase(db, state)
             endTime = debugprofilestop()
             duration = endTime - startTime
-            Debug(format("Deserialize of %d rows took %.2f ms.", numRows, duration))
+            Debug("ImportDatabase of %d rows took %.2f ms.", numRows, duration)
+        end,
+
+        ExportSize = function()
+            local numRows = 2000
+            local db = GenerateDatabase(numRows)
+            local state = LibP2PDB:ExportDatabase(db)
+            local serialized = LibP2PDB:Serialize(db, state)
+            Debug("Exported database with %d rows has serialized size of %.2f KB.", numRows, #serialized / 1024)
+            local compressed = LibP2PDB:Compress(db, serialized)
+            Debug("Exported database with %d rows has compressed size of %.2f KB.", numRows, #compressed / 1024)
+            local encodedForChannel = LibP2PDB:EncodeForChannel(db, compressed)
+            Debug("Exported database with %d rows has encoded for channel size of %.2f KB.", numRows, #encodedForChannel / 1024)
+            local encodedForPrint = LibP2PDB:EncodeForPrint(db, compressed)
+            Debug("Exported database with %d rows has encoded for print size of %.2f KB.", numRows, #encodedForPrint / 1024)
         end,
     }
 
