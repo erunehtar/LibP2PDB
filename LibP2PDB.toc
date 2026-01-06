@@ -4,4 +4,7 @@
 ## Notes: A lightweight, embeddable library for peer-to-peer distributed-database synchronization in WoW addons.
 ## Version: 1
 
+BloomFilter.lua
+PatternedBloomFilter.lua
+CuckooFilter.lua
 LibP2PDB.lua
