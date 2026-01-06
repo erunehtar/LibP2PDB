@@ -829,6 +829,7 @@ function LibP2PDB:NewTable(db, desc)
         onValidate = desc.onValidate,
         onChange = desc.onChange,
         subscribers = setmetatable({}, { __mode = "k" }),
+        rowCount = 0,
         rows = {},
     }
 end
@@ -1471,6 +1472,7 @@ end
 --- @field onValidate LibP2PDB.TableOnValidateCallback? Optional validation callback for rows.
 --- @field onChange LibP2PDB.TableOnChangeCallback? Optional change callback for rows.
 --- @field subscribers table<LibP2PDB.TableOnChangeCallback, boolean> Weak table of subscriber callbacks.
+--- @field rowCount number Total number of rows in the table (including tombstones).
 --- @field rows table<LibP2PDB.TableKey, LibP2PDB.TableRow> Registry of rows in the table.
 
 --- @class LibP2PDB.TableRow Table row definition.
@@ -1559,6 +1561,11 @@ function Private:SetKey(dbi, tableName, ti, key, rowData)
             },
         }
 
+        -- Update row count
+        if not existingRow then
+            ti.rowCount = ti.rowCount + 1
+        end
+
         -- Invoke row changed callbacks
         Private:InvokeChangeCallbacks(dbi, tableName, ti, key, rowData)
     end
@@ -1626,6 +1633,11 @@ function Private:MergeKey(dbi, incomingDBClock, tableName, ti, key, rowData, row
                 tombstone = rowVersion.tombstone,
             },
         }
+
+        -- Update row count
+        if not existingRow then
+            ti.rowCount = ti.rowCount + 1
+        end
 
         -- Invoke row changed callbacks
         Private:InvokeChangeCallbacks(dbi, tableName, ti, key, rowData)
@@ -2759,6 +2771,7 @@ if DEBUG and TESTING then
                 Assert.IsNil(ti.onValidate)
                 Assert.IsNil(ti.onChange)
                 Assert.IsTable(ti.subscribers)
+                Assert.AreEqual(ti.rowCount, 0)
                 Assert.IsEmptyTable(ti.rows)
             end
             do -- check new table creation with full description
@@ -2780,6 +2793,7 @@ if DEBUG and TESTING then
                 Assert.IsFunction(ti.onValidate)
                 Assert.IsFunction(ti.onChange)
                 Assert.IsTable(ti.subscribers)
+                Assert.AreEqual(ti.rowCount, 0)
                 Assert.IsEmptyTable(ti.rows)
             end
             do -- check schema allowed types
@@ -3032,6 +3046,35 @@ if DEBUG and TESTING then
             Assert.Throws(function() LibP2PDB:InsertKey(db, "Users", 1, { age = 25 }) end)
         end,
 
+        InsertKey_UpdatesRowCount = function()
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+            LibP2PDB:NewTable(db, {
+                name = "Users",
+                keyType = "number",
+                schema = {
+                    name = "string",
+                    age = {
+                        "number",
+                        "nil"
+                    }
+                },
+                onValidate = function(key, data)
+                    return not data or not data.age or data.age >= 0
+                end
+            })
+
+            local ti = Private.databases[db].tables["Users"]
+            Assert.IsNonEmptyTable(ti)
+            Assert.AreEqual(ti.rowCount, 0)
+
+            Assert.IsTrue(LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }))
+            Assert.AreEqual(ti.rowCount, 1)
+            Assert.IsTrue(LibP2PDB:InsertKey(db, "Users", 2, { name = "Alice" }))
+            Assert.AreEqual(ti.rowCount, 2)
+            Assert.IsFalse(LibP2PDB:InsertKey(db, "Users", 3, { name = "Eve", age = -1 }))
+            Assert.AreEqual(ti.rowCount, 2)
+        end,
+
         InsertKey_InvokeChangeCallbacks = function()
             local dbCount, tableCount, subCount = 0, 0, 0
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = function() dbCount = dbCount + 1 end })
@@ -3188,6 +3231,37 @@ if DEBUG and TESTING then
             Assert.Throws(function() LibP2PDB:SetKey(db, "Users", 1, {}) end)
             Assert.Throws(function() LibP2PDB:SetKey(db, "Users", 1, { name = "Bob" }) end)
             Assert.Throws(function() LibP2PDB:SetKey(db, "Users", 1, { age = 25 }) end)
+        end,
+
+        SetKey_UpdatesRowCount = function()
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+            LibP2PDB:NewTable(db, {
+                name = "Users",
+                keyType = "number",
+                schema = {
+                    name = "string",
+                    age = {
+                        "number",
+                        "nil"
+                    }
+                },
+                onValidate = function(key, data)
+                    return not data or not data.age or data.age >= 0
+                end
+            })
+
+            local ti = Private.databases[db].tables["Users"]
+            Assert.IsNonEmptyTable(ti)
+            Assert.AreEqual(ti.rowCount, 0)
+
+            Assert.IsTrue(LibP2PDB:SetKey(db, "Users", 1, { name = "Bob", age = 25 }))
+            Assert.AreEqual(ti.rowCount, 1)
+            Assert.IsTrue(LibP2PDB:SetKey(db, "Users", 2, { name = "Alice" }))
+            Assert.AreEqual(ti.rowCount, 2)
+            Assert.IsFalse(LibP2PDB:SetKey(db, "Users", 3, { name = "Eve", age = -1 }))
+            Assert.AreEqual(ti.rowCount, 2)
+            Assert.IsTrue(LibP2PDB:SetKey(db, "Users", 1, { name = "Bob", age = 30 }))
+            Assert.AreEqual(ti.rowCount, 2)
         end,
 
         SetKey_InvokeChangeCallbacks = function()
@@ -3348,6 +3422,40 @@ if DEBUG and TESTING then
             Assert.Throws(function() LibP2PDB:UpdateKey(db, "Users", 1, { age = 25 }) end)
         end,
 
+        UpdateKey_UpdatesRowCount = function()
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+            LibP2PDB:NewTable(db, {
+                name = "Users",
+                keyType = "number",
+                schema = {
+                    name = "string",
+                    age = {
+                        "number",
+                        "nil"
+                    }
+                },
+                onValidate = function(key, data)
+                    return not data or not data.age or data.age >= 0
+                end
+            })
+
+            local ti = Private.databases[db].tables["Users"]
+            Assert.IsNonEmptyTable(ti)
+            Assert.AreEqual(ti.rowCount, 0)
+
+            Assert.IsTrue(LibP2PDB:UpdateKey(db, "Users", 1, function() return { name = "Bob", age = 25 } end))
+            Assert.AreEqual(ti.rowCount, 1)
+            Assert.IsTrue(LibP2PDB:UpdateKey(db, "Users", 2, function() return { name = "Alice" } end))
+            Assert.AreEqual(ti.rowCount, 2)
+            Assert.IsFalse(LibP2PDB:UpdateKey(db, "Users", 3, function() return { name = "Eve", age = -1 } end))
+            Assert.AreEqual(ti.rowCount, 2)
+            Assert.IsTrue(LibP2PDB:UpdateKey(db, "Users", 1, function(row)
+                row.age = 30
+                return row
+            end))
+            Assert.AreEqual(ti.rowCount, 2)
+        end,
+
         UpdateKey_InvokeChangeCallbacks = function()
             local dbCount, tableCount, subCount = 0, 0, 0
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = function() dbCount = dbCount + 1 end })
@@ -3504,6 +3612,39 @@ if DEBUG and TESTING then
             end
         end,
 
+        DeleteKey_UpdatesRowCount = function()
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+            LibP2PDB:NewTable(db, {
+                name = "Users",
+                keyType = "number",
+                schema = {
+                    name = "string",
+                    age = {
+                        "number",
+                        "nil"
+                    }
+                },
+                onValidate = function(key, data)
+                    return not data or not data.age or data.age >= 0
+                end
+            })
+
+            local ti = Private.databases[db].tables["Users"]
+            Assert.IsNonEmptyTable(ti)
+            Assert.AreEqual(ti.rowCount, 0)
+
+            Assert.IsTrue(LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }))
+            Assert.AreEqual(ti.rowCount, 1)
+            Assert.IsTrue(LibP2PDB:InsertKey(db, "Users", 2, { name = "Alice" }))
+            Assert.AreEqual(ti.rowCount, 2)
+            Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users", 1))
+            Assert.AreEqual(ti.rowCount, 2)
+            Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users", 2))
+            Assert.AreEqual(ti.rowCount, 2)
+            Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users", 3))
+            Assert.AreEqual(ti.rowCount, 3)
+        end,
+
         DeleteKey_InvokeChangeCallbacks = function()
             local dbCount, tableCount, subCount = 0, 0, 0
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = function() dbCount = dbCount + 1 end })
@@ -3646,6 +3787,30 @@ if DEBUG and TESTING then
                 Assert.Throws(function() LibP2PDB:HasKey(db, "Users2", "invalid") end)
                 Assert.Throws(function() LibP2PDB:HasKey(db, "Users2", {}) end)
             end
+        end,
+
+        HasKey_DoesNotUpdateRowCount = function()
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = { "number", "nil" } } })
+
+            local ti = Private.databases[db].tables["Users"]
+            Assert.IsNonEmptyTable(ti)
+            Assert.AreEqual(ti.rowCount, 0)
+
+            Assert.IsTrue(LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }))
+            Assert.AreEqual(ti.rowCount, 1)
+            Assert.IsTrue(LibP2PDB:HasKey(db, "Users", 1))
+            Assert.AreEqual(ti.rowCount, 1)
+            Assert.IsTrue(LibP2PDB:InsertKey(db, "Users", 2, { name = "Alice" }))
+            Assert.AreEqual(ti.rowCount, 2)
+            Assert.IsTrue(LibP2PDB:HasKey(db, "Users", 2))
+            Assert.AreEqual(ti.rowCount, 2)
+            Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users", 1))
+            Assert.AreEqual(ti.rowCount, 2)
+            Assert.IsFalse(LibP2PDB:HasKey(db, "Users", 1))
+            Assert.AreEqual(ti.rowCount, 2)
+            Assert.IsFalse(LibP2PDB:HasKey(db, "Users", 3))
+            Assert.AreEqual(ti.rowCount, 2)
         end,
 
         HasKey_DoesNotInvokeChangeCallbacks = function()
@@ -3791,6 +3956,30 @@ if DEBUG and TESTING then
                 Assert.Throws(function() LibP2PDB:GetKey(db, "Users2", "invalid") end)
                 Assert.Throws(function() LibP2PDB:GetKey(db, "Users2", {}) end)
             end
+        end,
+
+        GetKey_DoesNotUpdateRowCount = function()
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = { "number", "nil" } } })
+
+            local ti = Private.databases[db].tables["Users"]
+            Assert.IsNonEmptyTable(ti)
+            Assert.AreEqual(ti.rowCount, 0)
+
+            Assert.IsTrue(LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }))
+            Assert.AreEqual(ti.rowCount, 1)
+            Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
+            Assert.AreEqual(ti.rowCount, 1)
+            Assert.IsTrue(LibP2PDB:InsertKey(db, "Users", 2, { name = "Alice" }))
+            Assert.AreEqual(ti.rowCount, 2)
+            Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 2), { name = "Alice" })
+            Assert.AreEqual(ti.rowCount, 2)
+            Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users", 1))
+            Assert.AreEqual(ti.rowCount, 2)
+            Assert.IsNil(LibP2PDB:GetKey(db, "Users", 1))
+            Assert.AreEqual(ti.rowCount, 2)
+            Assert.IsNil(LibP2PDB:GetKey(db, "Users", 3))
+            Assert.AreEqual(ti.rowCount, 2)
         end,
 
         GetKey_DoesNotInvokeChangeCallbacks = function()
