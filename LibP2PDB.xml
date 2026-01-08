@@ -1,5 +1,4 @@
 <Ui xmlns="http://www.blizzard.com/wow/ui/">
-	<Include file="PatternedBloomFilter.lua" />
 	<Include file="CuckooFilter.lua" />
 	<Include file="LibP2PDB.lua" />
 </Ui>
