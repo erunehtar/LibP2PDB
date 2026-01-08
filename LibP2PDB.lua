@@ -28,7 +28,7 @@ local AceComm = LibStub("AceComm-3.0")
 
 local LibBloomFilter = LibStub("LibBloomFilter", true)
 local LibPatternedBloomFilter = LibStub("LibPatternedBloomFilter", true)
-local CuckooFilter = LibStub("CuckooFilter", true)
+local LibCuckooFilter = LibStub("LibCuckooFilter", true)
 local AceSerializer = LibStub("AceSerializer-3.0", true)
 local LibSerialize = LibStub("LibSerialize", true)
 local LibDeflate = LibStub("LibDeflate", true)
@@ -578,7 +578,7 @@ end)
 --- @field prefix LibP2PDB.DBPrefix Unique communication prefix for the database (max 16 chars).
 --- @field version LibP2PDB.DBVersion? Optional database version number (default: 1).
 --- @field onError LibP2PDB.DBOnErrorCallback? Optional callback function(errMsg, stack) invoked on errors.
---- @field filter LibP2PDB.Filter? Optional custom filter digest generation (default: LibPatternedBloomFilter, BloomFilter, or CuckooFilter if available).
+--- @field filter LibP2PDB.Filter? Optional custom filter digest generation (default: LibPatternedBloomFilter, LibBloomFilter, or LibCuckooFilter if available).
 --- @field serializer LibP2PDB.Serializer? Optional custom serializer for encoding/decoding data (default: LibSerialize or AceSerializer if available).
 --- @field compressor LibP2PDB.Compressor? Optional custom compressor for compressing/decompressing data (default: LibDeflate if available).
 --- @field encoder LibP2PDB.Encoder? Optional custom encoder for encoding/decoding data for chat channels and print (default: LibDeflate if available).
@@ -590,7 +590,7 @@ end)
 --- @field peerTimeout number? Optional seconds of inactivity after which a peer is considered inactive (default: 300.0).
 
 --- @class LibP2PDB.Filter Filter interface for generating data digests.
---- @field New fun(numItems: number): LibP2PDB.Filter Creates a new filter instance.
+--- @field New fun(capacity: number): LibP2PDB.Filter Creates a new filter instance.
 --- @field Insert fun(self: LibP2PDB.Filter, value: any): boolean Inserts a value into the filter.
 --- @field Contains fun(self: LibP2PDB.Filter, value: any): boolean Determine if the filter contains a value.
 --- @field Export fun(self: LibP2PDB.Filter): any Exports the filter to a compact format.
@@ -681,8 +681,8 @@ function LibP2PDB:NewDatabase(desc)
             dbi.filter = LibPatternedBloomFilter
         elseif LibBloomFilter then
             dbi.filter = LibBloomFilter
-        elseif CuckooFilter then
-            dbi.filter = CuckooFilter
+        elseif LibCuckooFilter then
+            dbi.filter = LibCuckooFilter
         else
             error("filter required but none found; provide custom filter via desc.filter")
         end
@@ -5228,7 +5228,7 @@ if DEBUG and TESTING then
             local db = GenerateDatabase(sampleCount)
             ProfileReset("CuckooFilter.New")
             ProfileBegin("CuckooFilter.New")
-            local filter = CuckooFilter.New(sampleCount * 2) -- Avoid high load factor
+            local filter = LibCuckooFilter.New(sampleCount * 2) -- Avoid high load factor
             ProfileEnd("CuckooFilter.New")
             PrintProfileMarker("CuckooFilter.New", "CuckooFilter.New")
 
@@ -5264,7 +5264,7 @@ if DEBUG and TESTING then
 
             ProfileReset("CuckooFilter.Import")
             ProfileBegin("CuckooFilter.Import")
-            local importedFilter = CuckooFilter.Import(state)
+            local importedFilter = LibCuckooFilter.Import(state)
             ProfileEnd("CuckooFilter.Import")
             PrintProfileMarker("CuckooFilter.Import", "CuckooFilter.Import")
 
