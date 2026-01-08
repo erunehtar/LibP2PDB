@@ -4860,9 +4860,13 @@ if DEBUG and TESTING then
         end
     end
 
-    local function FormatSize(bytes)
+    local function FormatSize(bytes, allowPartialBytes)
         if bytes < 1024 then
-            return format("%dB", bytes)
+            if allowPartialBytes then
+                return format("%.2fB", bytes)
+            else
+                return format("%dB", bytes)
+            end
         elseif bytes < (1024 * 1024) then
             return format("%.2fKB", bytes / 1024)
         else
@@ -5103,22 +5107,25 @@ if DEBUG and TESTING then
             PrintProfileMarker("LibP2PDB:ImportDatabase", "ImportDatabase")
 
             local serialized = LibP2PDB:Serialize(db, state)
-            Print("Database (%d rows) serialized: %s", sampleCount, FormatSize(#serialized))
+            Print("Database (%d rows) serialized: %s (%s)", sampleCount, FormatSize(#serialized), FormatSize(#serialized / sampleCount, true))
             local compressed = LibP2PDB:Compress(db, serialized)
-            Print("Database (%d rows) compressed: %s", sampleCount, FormatSize(#compressed))
+            Print("Database (%d rows) compressed: %s (%s)", sampleCount, FormatSize(#compressed), FormatSize(#compressed / sampleCount, true))
             local encodedForChannel = LibP2PDB:EncodeForChannel(db, compressed)
-            Print("Database (%d rows) encoded for channel: %s", sampleCount, FormatSize(#encodedForChannel))
+            Print("Database (%d rows) encoded for channel: %s (%s)", sampleCount, FormatSize(#encodedForChannel), FormatSize(#encodedForChannel / sampleCount, true))
             local encodedForPrint = LibP2PDB:EncodeForPrint(db, compressed)
-            Print("Database (%d rows) encoded for print: %s", sampleCount, FormatSize(#encodedForPrint))
+            Print("Database (%d rows) encoded for print: %s (%s)", sampleCount, FormatSize(#encodedForPrint), FormatSize(#encodedForPrint / sampleCount, true))
         end,
 
         LibBloomFilter = function()
             if LibBloomFilter then
                 local db = GenerateDatabase(sampleCount)
+                local filter = nil
                 ProfileReset("BloomFilter.New")
-                ProfileBegin("BloomFilter.New")
-                local filter = LibBloomFilter.New(sampleCount)
-                ProfileEnd("BloomFilter.New")
+                for i = 1, sampleCount do
+                    ProfileBegin("BloomFilter.New")
+                    filter = LibBloomFilter.New(sampleCount)
+                    ProfileEnd("BloomFilter.New")
+                end
                 PrintProfileMarker("BloomFilter.New", "BloomFilter.New")
 
                 ProfileReset("BloomFilter:Insert")
@@ -5146,35 +5153,45 @@ if DEBUG and TESTING then
                 PrintProfileMarker("BloomFilter:Contains", "BloomFilter:Contains")
 
                 ProfileReset("BloomFilter:Export")
-                ProfileBegin("BloomFilter:Export")
-                local state = filter:Export()
-                ProfileEnd("BloomFilter:Export")
+                local state = nil
+                for i = 1, sampleCount do
+                    ProfileBegin("BloomFilter:Export")
+                    state = filter:Export()
+                    ProfileEnd("BloomFilter:Export")
+                end
                 PrintProfileMarker("BloomFilter:Export", "BloomFilter:Export")
 
                 ProfileReset("BloomFilter.Import")
-                ProfileBegin("BloomFilter.Import")
-                local importedFilter = LibBloomFilter.Import(state)
-                ProfileEnd("BloomFilter.Import")
+                for i = 1, sampleCount do
+                    ProfileBegin("BloomFilter.Import")
+                    LibBloomFilter.Import(state)
+                    ProfileEnd("BloomFilter.Import")
+                end
                 PrintProfileMarker("BloomFilter.Import", "BloomFilter.Import")
 
+                Print("BloomFilter estimated FPR: %.4f%%", filter:EstimateFalsePositiveRate(sampleCount) * 100.0)
+
                 local serialized = LibP2PDB:Serialize(db, state)
-                Print("BloomFilter (%d keys) serialized: %s", sampleCount, FormatSize(#serialized))
+                Print("BloomFilter (%d keys) serialized: %s (%s)", sampleCount, FormatSize(#serialized), FormatSize(#serialized / sampleCount, true))
                 local compressed = LibP2PDB:Compress(db, serialized)
-                Print("BloomFilter (%d keys) compressed: %s", sampleCount, FormatSize(#compressed))
+                Print("BloomFilter (%d keys) compressed: %s (%s)", sampleCount, FormatSize(#compressed), FormatSize(#compressed / sampleCount, true))
                 local encodedForChannel = LibP2PDB:EncodeForChannel(db, compressed)
-                Print("BloomFilter (%d keys) encoded for channel: %s", sampleCount, FormatSize(#encodedForChannel))
+                Print("BloomFilter (%d keys) encoded for channel: %s (%s)", sampleCount, FormatSize(#encodedForChannel), FormatSize(#encodedForChannel / sampleCount, true))
                 local encodedForPrint = LibP2PDB:EncodeForPrint(db, compressed)
-                Print("BloomFilter (%d keys) encoded for print: %s", sampleCount, FormatSize(#encodedForPrint))
+                Print("BloomFilter (%d keys) encoded for print: %s (%s)", sampleCount, FormatSize(#encodedForPrint), FormatSize(#encodedForPrint / sampleCount, true))
             end
         end,
 
         PatternedBloomFilter = function()
             if LibPatternedBloomFilter then
                 local db = GenerateDatabase(sampleCount)
+                local filter = nil
                 ProfileReset("PatternedBloomFilter.New")
-                ProfileBegin("PatternedBloomFilter.New")
-                local filter = LibPatternedBloomFilter.New(sampleCount)
-                ProfileEnd("PatternedBloomFilter.New")
+                for i = 1, sampleCount do
+                    ProfileBegin("PatternedBloomFilter.New")
+                    filter = LibPatternedBloomFilter.New(sampleCount)
+                    ProfileEnd("PatternedBloomFilter.New")
+                end
                 PrintProfileMarker("PatternedBloomFilter.New", "PatternedBloomFilter.New")
 
                 ProfileReset("PatternedBloomFilter:Insert")
@@ -5201,35 +5218,45 @@ if DEBUG and TESTING then
                 end
                 PrintProfileMarker("PatternedBloomFilter:Contains", "PatternedBloomFilter:Contains")
 
+                local state = nil
                 ProfileReset("PatternedBloomFilter:Export")
-                ProfileBegin("PatternedBloomFilter:Export")
-                local state = filter:Export()
-                ProfileEnd("PatternedBloomFilter:Export")
+                for i = 1, sampleCount do
+                    ProfileBegin("PatternedBloomFilter:Export")
+                    state = filter:Export()
+                    ProfileEnd("PatternedBloomFilter:Export")
+                end
                 PrintProfileMarker("PatternedBloomFilter:Export", "PatternedBloomFilter:Export")
 
                 ProfileReset("PatternedBloomFilter.Import")
-                ProfileBegin("PatternedBloomFilter.Import")
-                local importedFilter = LibPatternedBloomFilter.Import(state)
-                ProfileEnd("PatternedBloomFilter.Import")
+                for i = 1, sampleCount do
+                    ProfileBegin("PatternedBloomFilter.Import")
+                    LibPatternedBloomFilter.Import(state)
+                    ProfileEnd("PatternedBloomFilter.Import")
+                end
                 PrintProfileMarker("PatternedBloomFilter.Import", "PatternedBloomFilter.Import")
 
+                Print("PatternedBloomFilter estimated FPR: %.4f%%", filter:EstimateFalsePositiveRate(sampleCount) * 100.0)
+
                 local serialized = LibP2PDB:Serialize(db, state)
-                Print("PatternedBloomFilter (%d keys) serialized: %s", sampleCount, FormatSize(#serialized))
+                Print("PatternedBloomFilter (%d keys) serialized: %s (%s)", sampleCount, FormatSize(#serialized), FormatSize(#serialized / sampleCount, true))
                 local compressed = LibP2PDB:Compress(db, serialized)
-                Print("PatternedBloomFilter (%d keys) compressed: %s", sampleCount, FormatSize(#compressed))
+                Print("PatternedBloomFilter (%d keys) compressed: %s (%s)", sampleCount, FormatSize(#compressed), FormatSize(#compressed / sampleCount, true))
                 local encodedForChannel = LibP2PDB:EncodeForChannel(db, compressed)
-                Print("PatternedBloomFilter (%d keys) encoded for channel: %s", sampleCount, FormatSize(#encodedForChannel))
+                Print("PatternedBloomFilter (%d keys) encoded for channel: %s (%s)", sampleCount, FormatSize(#encodedForChannel), FormatSize(#encodedForChannel / sampleCount, true))
                 local encodedForPrint = LibP2PDB:EncodeForPrint(db, compressed)
-                Print("PatternedBloomFilter (%d keys) encoded for print: %s", sampleCount, FormatSize(#encodedForPrint))
+                Print("PatternedBloomFilter (%d keys) encoded for print: %s (%s)", sampleCount, FormatSize(#encodedForPrint), FormatSize(#encodedForPrint / sampleCount, true))
             end
         end,
 
         CuckooFilter = function()
             local db = GenerateDatabase(sampleCount)
+            local filter = nil
             ProfileReset("CuckooFilter.New")
-            ProfileBegin("CuckooFilter.New")
-            local filter = LibCuckooFilter.New(sampleCount * 2) -- Avoid high load factor
-            ProfileEnd("CuckooFilter.New")
+            for i = 1, sampleCount do
+                ProfileBegin("CuckooFilter.New")
+                filter = LibCuckooFilter.New(sampleCount * 2) -- Avoid high load factor
+                ProfileEnd("CuckooFilter.New")
+            end
             PrintProfileMarker("CuckooFilter.New", "CuckooFilter.New")
 
             ProfileReset("CuckooFilter:Insert")
@@ -5256,26 +5283,33 @@ if DEBUG and TESTING then
             end
             PrintProfileMarker("CuckooFilter:Contains", "CuckooFilter:Contains")
 
+            local state = nil
             ProfileReset("CuckooFilter:Export")
-            ProfileBegin("CuckooFilter:Export")
-            local state = filter:Export()
-            ProfileEnd("CuckooFilter:Export")
+            for i = 1, sampleCount do
+                ProfileBegin("CuckooFilter:Export")
+                state = filter:Export()
+                ProfileEnd("CuckooFilter:Export")
+            end
             PrintProfileMarker("CuckooFilter:Export", "CuckooFilter:Export")
 
             ProfileReset("CuckooFilter.Import")
-            ProfileBegin("CuckooFilter.Import")
-            local importedFilter = LibCuckooFilter.Import(state)
-            ProfileEnd("CuckooFilter.Import")
+            for i = 1, sampleCount do
+                ProfileBegin("CuckooFilter.Import")
+                LibCuckooFilter.Import(state)
+                ProfileEnd("CuckooFilter.Import")
+            end
             PrintProfileMarker("CuckooFilter.Import", "CuckooFilter.Import")
 
+            Print("CuckooFilter estimated FPR: %.4f%%", filter:EstimateFalsePositiveRate(sampleCount) * 100.0)
+
             local serialized = LibP2PDB:Serialize(db, state)
-            Print("CuckooFilter (%d keys) serialized: %s", sampleCount, FormatSize(#serialized))
+            Print("CuckooFilter (%d keys) serialized: %s (%s)", sampleCount, FormatSize(#serialized), FormatSize(#serialized / sampleCount, true))
             local compressed = LibP2PDB:Compress(db, serialized)
-            Print("CuckooFilter (%d keys) compressed: %s", sampleCount, FormatSize(#compressed))
+            Print("CuckooFilter (%d keys) compressed: %s (%s)", sampleCount, FormatSize(#compressed), FormatSize(#compressed / sampleCount, true))
             local encodedForChannel = LibP2PDB:EncodeForChannel(db, compressed)
-            Print("CuckooFilter (%d keys) encoded for channel: %s", sampleCount, FormatSize(#encodedForChannel))
+            Print("CuckooFilter (%d keys) encoded for channel: %s (%s)", sampleCount, FormatSize(#encodedForChannel), FormatSize(#encodedForChannel / sampleCount, true))
             local encodedForPrint = LibP2PDB:EncodeForPrint(db, compressed)
-            Print("CuckooFilter (%d keys) encoded for print: %s", sampleCount, FormatSize(#encodedForPrint))
+            Print("CuckooFilter (%d keys) encoded for print: %s (%s)", sampleCount, FormatSize(#encodedForPrint), FormatSize(#encodedForPrint / sampleCount, true))
         end,
     }
 
