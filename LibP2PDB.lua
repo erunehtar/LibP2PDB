@@ -602,7 +602,7 @@ end)
 --- @field discoveryQuietPeriod number? Optional seconds of quiet time with no new peers before considering discovery complete (default: 1.5).
 --- @field discoveryMaxTime number? Optional maximum seconds to wait for peer discovery before considering it complete (default: 3.0).
 --- @field onDiscoveryComplete LibP2PDB.DBOnDiscoveryCompleteCallback? Optional callback function() invoked when peers discovery completes.
---- @field peerTimeout number? Optional seconds of inactivity after which a peer is considered inactive (default: 300.0).
+--- @field peerTimeout number? Optional seconds of inactivity after which a peer is considered inactive (default: 120.0).
 
 --- @class LibP2PDB.Filter Filter interface for generating data digests.
 --- @field New fun(capacity: integer): LibP2PDB.Filter Creates a new filter instance.
@@ -661,8 +661,7 @@ function LibP2PDB:NewDatabase(desc)
     assert(Private.prefixes[desc.prefix] == nil, "a database with prefix '" .. desc.prefix .. "' already exists")
 
     -- Create the new database
-    --- @type LibP2PDB.DBInstance
-    local dbi = {
+    local dbi = { --- @type LibP2PDB.DBInstance
         -- Identity
         prefix = desc.prefix,
         version = desc.version or 1,
@@ -675,7 +674,7 @@ function LibP2PDB:NewDatabase(desc)
         channels = desc.channels,
         discoveryQuietPeriod = desc.discoveryQuietPeriod or 1.5,
         discoveryMaxTime = desc.discoveryMaxTime or 3.0,
-        peerTimeout = desc.peerTimeout or 300.0,
+        peerTimeout = desc.peerTimeout or 120.0,
         -- Networking
         peers = {},
         neighbors = {},
@@ -1315,12 +1314,16 @@ function LibP2PDB:DiscoverPeers(db)
     local dbi = Private.databases[db]
     assert(dbi, "db is not a recognized database handle")
 
+    -- Prune timed-out peers
+    Private:PruneTimedOutPeers(dbi)
+
     -- Send the discover peers message
+    Spam("broadcasting peer discovery request")
     local obj = {
         type = CommMessageType.PeerDiscoveryRequest,
         peer = Private.peerId,
+        data = dbi.clock,
     }
-    Spam("broadcasting peer discovery request")
     Private:Broadcast(dbi, obj, dbi.channels, CommPriority.Low)
 
     -- Record the time of the peer discovery request
@@ -1353,7 +1356,7 @@ function LibP2PDB:SyncNow(db)
         neighbors[dbi.neighbors.lowest] = true
     end
 
-    if next(neighbors) then
+    if IsNonEmptyTable(neighbors) then
         -- Send the digest request message to closest neighbors
         for neighborPeerId in pairs(neighbors) do
             Spam("sending digest request to '%s'", dbi.peers[neighborPeerId].name)
@@ -1446,6 +1449,7 @@ function LibP2PDB:SendNow(db, tableName, key, target)
     local databaseState = { dbi.version, dbi.clock, tablesArray }
 
     -- Send the row to the target player
+    Spam("sending key '%s' from table '%s' to '%s'", tostring(key), tableName or "*", target)
     local obj = {
         type = CommMessageType.RowsResponse,
         peer = Private.peerId,
@@ -1502,6 +1506,7 @@ function LibP2PDB:BroadcastNow(db, tableName, key)
     local databaseState = { dbi.version, dbi.clock, tablesArray }
 
     -- Send the row to the target player
+    Spam("broadcasting key '%s' from table '%s'", tostring(key), tableName or "*")
     local obj = {
         type = CommMessageType.RowsResponse,
         peer = Private.peerId,
@@ -1768,13 +1773,13 @@ end
 --- @field onError LibP2PDB.DBOnErrorCallback? Callback for error events.
 --- @field onChange LibP2PDB.DBOnChangeCallback? Callback for row changes.
 --- @field onDiscoveryComplete LibP2PDB.DBOnDiscoveryCompleteCallback? Callback for discovery completion.
---- @field discoveryStartTime number? Time when discovery started.
---- @field lastDiscoveryResponseTime number? Time when last discovery response was received.
+--- @field discoveryStartTime number? Local timestamp when discovery started.
+--- @field lastDiscoveryResponseTime number? Local timestamp when last discovery response was received.
 
 --- @class LibP2PDB.PeerInfo Peer information.
 --- @field name string Name of the peer.
 --- @field clock LibP2PDB.Clock Lamport clock of the peer's database.
---- @field lastSeen integer Timestamp of the last time the peer was seen.
+--- @field lastSeen number Local timestamp of the last time the peer was seen.
 
 --- @class LibP2PDB.Neighbors Active gossip sync neighbors.
 --- @field lowest LibP2PDB.PeerID? Lowest active peer ID.
@@ -2395,6 +2400,9 @@ function Private:Send(dbi, data, channel, target, priority)
     else
         Spam("sending %d bytes on prefix '%s' channel '%s'", #encoded, tostring(dbi.prefix), tostring(channel))
     end
+    if DEBUG and VERBOSITY >= 4 then
+        DevTools_Dump(data)
+    end
 
     --- @cast priority "ALERT"|"BULK"|"NORMAL"
     AceComm.SendCommMessage(self, dbi.prefix, encoded, channel, target, priority)
@@ -2425,6 +2433,9 @@ function Private:Broadcast(dbi, data, channels, priority)
     end
 
     Spam("broadcasting %d bytes on prefix '%s'", #encoded, tostring(dbi.prefix))
+    if DEBUG and VERBOSITY >= 4 then
+        DevTools_Dump(data)
+    end
 
     if IsInGuild() then
         --- @cast priority "ALERT"|"BULK"|"NORMAL"
@@ -2526,8 +2537,7 @@ function Private:OnCommReceived(prefix, encoded, channel, sender)
     end
 
     -- Build message object
-    --- @type LibP2PDB.Message
-    local message = {
+    local message = { --- @type LibP2PDB.Message
         type = obj.type,
         peer = obj.peer,
         data = obj.data,
@@ -2548,8 +2558,8 @@ function Private:OnCommReceived(prefix, encoded, channel, sender)
         return
     end
 
-    -- Create a timer to process this message after 100 milliseconds
-    bucket[message.peer] = C_Timer.NewTimer(0.1, function()
+    -- Create a timer to process this message after 200 milliseconds
+    bucket[message.peer] = C_Timer.NewTimer(0.2, function()
         -- Process the message
         Private:DispatchMessage(message)
 
@@ -2579,7 +2589,7 @@ function Private:DispatchMessage(message)
     elseif message.type == CommMessageType.RowsResponse then
         Private:RowsResponseHandler(message)
     else
-        Error("received unknown message type %d from '%s' on channel '%s'", message.type, tostring(message.sender), tostring(message.channel))
+        Error("received unknown message type %d from '%s' on channel '%s'", message.type, message.sender, message.channel)
     end
 end
 
@@ -2587,82 +2597,43 @@ end
 --- Reply to the sender with our peer ID and clock.
 --- @param message LibP2PDB.Message
 function Private:PeerDiscoveryRequestHandler(message)
-    Spam("received peer discovery request from '%s'", tostring(message.sender))
+    local dbi = message.dbi
+    local sender = message.sender
+    Spam("received peer discovery request from '%s'", tostring(sender))
+
+    -- Record the peer
+    local peerID = message.peer
+    local peerClock = message.data --- @type LibP2PDB.Clock
+    Private:RecordPeer(dbi, peerID, sender, peerClock)
 
     -- Send peer discovery response
-    Spam("sending peer discovery response to '%s'", tostring(message.sender))
+    Spam("sending peer discovery response to '%s'", tostring(sender))
     local obj = {
         type = CommMessageType.PeerDiscoveryResponse,
         peer = Private.peerId,
-        data = message.dbi.clock, --- @type LibP2PDB.Clock
+        data = dbi.clock, --- @type LibP2PDB.Clock
     }
-    Private:Send(message.dbi, obj, "WHISPER", message.sender, CommPriority.Low)
+    Private:Send(dbi, obj, "WHISPER", sender, CommPriority.Low)
 end
 
 --- Handler for peer discovery response messages.
 --- Update known peers and active neighbors.
 --- @param message LibP2PDB.Message
 function Private:PeerDiscoveryResponseHandler(message)
-    Spam("received peer discovery response from '%s'", tostring(message.sender))
+    local dbi = message.dbi
+    local sender = message.sender
+    Spam("received peer discovery response from '%s'", tostring(sender))
 
     -- Update last discovery time
     local now = GetTime()
-    local dbi = message.dbi
-    local clock = message.data
     if dbi.onDiscoveryComplete then
         dbi.lastDiscoveryResponseTime = now
     end
 
-    -- Lookup peer info
-    local peerId = message.peer
-    local peerInfo = dbi.peers[peerId]
-
-    -- Update or add peer info
-    if not peerInfo then
-        -- New peer
-        dbi.peers[peerId] = {
-            name = message.sender,
-            clock = clock,
-            lastSeen = now,
-        }
-    else
-        -- Update peer info
-        peerInfo.clock = clock
-        peerInfo.lastSeen = now
-    end
-
-    -- Update active neighbors
-    if not dbi.neighbors.lowest then
-        dbi.neighbors.lowest = peerId
-    else
-        if (peerId < dbi.neighbors.lowest) or (now - dbi.peers[dbi.neighbors.lowest].lastSeen > dbi.peerTimeout) then
-            dbi.neighbors.lowest = peerId
-        end
-    end
-    if not dbi.neighbors.highest then
-        dbi.neighbors.highest = peerId
-    else
-        if (peerId > dbi.neighbors.highest) or (now - dbi.peers[dbi.neighbors.highest].lastSeen > dbi.peerTimeout) then
-            dbi.neighbors.highest = peerId
-        end
-    end
-    if peerId < Private.peerId then
-        if not dbi.neighbors.previous then
-            dbi.neighbors.previous = peerId
-        else
-            if (peerId > dbi.neighbors.previous) or (now - dbi.peers[dbi.neighbors.previous].lastSeen > dbi.peerTimeout) then
-                dbi.neighbors.previous = peerId
-            end
-        end
-    elseif peerId > Private.peerId then
-        if not dbi.neighbors.next then
-            dbi.neighbors.next = peerId
-        else
-            if (peerId < dbi.neighbors.next) or (now - dbi.peers[dbi.neighbors.next].lastSeen > dbi.peerTimeout) then
-                dbi.neighbors.next = peerId
-            end
-        end
-    end
+    -- Record the peer
+    local peerID = message.peer
+    local clock = message.data --- @type LibP2PDB.Clock
+    Private:RecordPeer(dbi, peerID, sender, clock)
 end
 
 --- Handler for digest request messages.
@@ -2670,10 +2641,11 @@ end
 --- Data will be sent using the LibP2PDB.DBDigest format.
 --- @param message LibP2PDB.Message
 function Private:DigestRequestHandler(message)
-    Spam("received digest request from '%s'", tostring(message.sender))
+    local dbi = message.dbi
+    local sender = message.sender
+    Spam("received digest request from '%s'", tostring(sender))
 
     -- Build filter for each table
-    local dbi = message.dbi
     local databaseDigest = {} --- @type LibP2PDB.DBDigest
     for tableName, ti in pairs(dbi.tables) do
         if ti.rowCount > 0 then
@@ -2689,17 +2661,18 @@ function Private:DigestRequestHandler(message)
 
     -- Return if there are no tables to include in the digest
     if IsEmptyTable(databaseDigest) then
-        Spam("no tables to include in digest response to '%s'", tostring(message.sender))
+        Spam("no tables to include in digest response to '%s'", tostring(sender))
+        return
     end
 
     -- Send digest response
-    Spam("sending digest response to '%s'", tostring(message.sender))
+    Spam("sending digest response to '%s'", tostring(sender))
     local obj = {
         type = CommMessageType.DigestResponse,
         peer = Private.peerId,
         data = databaseDigest,
     }
-    Private:Send(message.dbi, obj, "WHISPER", message.sender, CommPriority.Normal)
+    Private:Send(dbi, obj, "WHISPER", sender, CommPriority.Normal)
 end
 
 --- Handler for digest response messages.
@@ -2707,10 +2680,11 @@ end
 --- Data will be sent using the LibP2PDB.DBState format.
 --- @param message LibP2PDB.Message
 function Private:DigestResponseHandler(message)
-    Spam("received digest response from '%s'", tostring(message.sender))
+    local dbi = message.dbi
+    local sender = message.sender
+    Spam("received digest response from '%s'", tostring(sender))
 
     -- Export rows the peer is missing or outdated, for each table in their digest
-    local dbi = message.dbi
     local databaseDigest = message.data --- @type LibP2PDB.DBDigest
     local tablesArray = {}              --- @type LibP2PDB.TableState[]
     local tablesIndex = 1
@@ -2744,24 +2718,24 @@ function Private:DigestResponseHandler(message)
                 end
             end
         else
-            ReportError(dbi, "table '%s' in digest response from '%s' is not defined in the database", tableName, tostring(message.sender))
+            ReportError(dbi, "table '%s' in digest response from '%s' is not defined in the database", tableName, tostring(sender))
         end
     end
 
     -- Return if there are no rows to send
     if IsEmptyTable(tablesArray) then
-        Spam("no missing or outdated rows to send to '%s'", tostring(message.sender))
+        Spam("no missing or outdated rows to send to '%s'", tostring(sender))
         return
     end
 
     -- Send rows response
-    Spam("sending rows response to '%s'", tostring(message.sender))
+    Spam("sending rows response to '%s'", tostring(sender))
     local obj = {
         type = CommMessageType.RowsResponse,
         peer = Private.peerId,
         data = { dbi.version, dbi.clock, tablesArray }, --- @type LibP2PDB.DBState
     }
-    Private:Send(message.dbi, obj, "WHISPER", message.sender, CommPriority.Normal)
+    Private:Send(dbi, obj, "WHISPER", sender, CommPriority.Normal)
 end
 
 --- Handler for rows request messages.
@@ -2769,10 +2743,11 @@ end
 --- Data will be sent using the LibP2PDB.DBState format.
 --- @param message LibP2PDB.Message
 function Private:RowsRequestHandler(message)
-    Spam("received rows request from '%s'", tostring(message.sender))
+    local dbi = message.dbi
+    local sender = message.sender
+    Spam("received rows request from '%s'", tostring(sender))
 
     -- Export requested rows for each table
-    local dbi = message.dbi
     local databaseRequest = message.data --- @type LibP2PDB.DBRequest
     local tablesArray = {}
     local tablesIndex = 1
@@ -2804,24 +2779,24 @@ function Private:RowsRequestHandler(message)
                 tablesIndex = tablesIndex + 1
             end
         else
-            ReportError(dbi, "table '%s' in rows request from '%s' is not defined in the database", tableName, tostring(message.sender))
+            ReportError(dbi, "table '%s' in rows request from '%s' is not defined in the database", tableName, tostring(sender))
         end
     end
 
     -- Return if there are no rows to send
     if IsEmptyTable(tablesArray) then
-        Spam("no rows to send to '%s'", tostring(message.sender))
+        Spam("no rows to send to '%s'", tostring(sender))
         return
     end
 
     -- Send rows response
-    Spam("sending rows response to '%s'", tostring(message.sender))
+    Spam("sending rows response to '%s'", tostring(sender))
     local obj = {
         type = CommMessageType.RowsResponse,
         peer = Private.peerId,
         data = { dbi.version, dbi.clock, tablesArray }, --- @type LibP2PDB.DBState
     }
-    Private:Send(message.dbi, obj, "WHISPER", message.sender, CommPriority.Normal)
+    Private:Send(dbi, obj, "WHISPER", sender, CommPriority.Normal)
 end
 
 --- Handler for rows response messages.
@@ -2829,12 +2804,13 @@ end
 --- Data is expected to be in the LibP2PDB.DBState format.
 --- @param message LibP2PDB.Message
 function Private:RowsResponseHandler(message)
-    Spam("received rows response from '%s'", tostring(message.sender))
-
-    -- Import missing or outdated rows into the database
     local dbi = message.dbi
-    local rowsResponse = message.data --- @type LibP2PDB.DBState
-    Private:ImportDatabase(dbi, rowsResponse)
+    local sender = message.sender
+    Spam("received rows response from '%s'", tostring(sender))
+
+    -- Import the database state we received
+    local databaseState = message.data --- @type LibP2PDB.DBState
+    Private:ImportDatabase(dbi, databaseState)
 end
 
 --- OnUpdate handler called periodically to handle time-based events.
@@ -2854,6 +2830,65 @@ function Private:OnUpdate(dbi)
         dbi.discoveryStartTime = nil
         if dbi.onDiscoveryComplete then
             securecallfunction(dbi.onDiscoveryComplete)
+        end
+    end
+end
+
+--- Record information about a peer and update active neighbors.
+--- @param dbi LibP2PDB.DBInstance Database instance.
+--- @param peerID LibP2PDB.PeerID Peer ID.
+--- @param peerName string Peer name.
+--- @param peerClock LibP2PDB.Clock Peer clock.
+function Private:RecordPeer(dbi, peerID, peerName, peerClock)
+    -- Update peer info
+    local now = GetTime()
+    dbi.peers[peerID] = {
+        name = peerName,
+        clock = peerClock,
+        lastSeen = now,
+    }
+
+    -- Update active neighbors
+    if not dbi.neighbors.lowest or peerID < dbi.neighbors.lowest then
+        dbi.neighbors.lowest = peerID
+    end
+    if not dbi.neighbors.highest or peerID > dbi.neighbors.highest then
+        dbi.neighbors.highest = peerID
+    end
+    if peerID < Private.peerId then
+        if not dbi.neighbors.previous or peerID > dbi.neighbors.previous then
+            dbi.neighbors.previous = peerID
+        end
+    elseif peerID > Private.peerId then
+        if not dbi.neighbors.next or peerID < dbi.neighbors.next then
+            dbi.neighbors.next = peerID
+        end
+    end
+end
+
+--- Prune peers that have timed out from the peer and neighbors list.
+--- @param dbi LibP2PDB.DBInstance Database instance.
+function Private:PruneTimedOutPeers(dbi)
+    local now = GetTime()
+    local timedOutPeers = {}
+    for peerID, peerInfo in pairs(dbi.peers) do
+        if now - peerInfo.lastSeen >= dbi.peerTimeout then
+            tinsert(timedOutPeers, peerID)
+        end
+    end
+    for _, peerID in ipairs(timedOutPeers) do
+        dbi.peers[peerID] = nil
+        if dbi.neighbors.lowest == peerID then
+            dbi.neighbors.lowest = nil
+        end
+        if dbi.neighbors.highest == peerID then
+            dbi.neighbors.highest = nil
+        end
+        if dbi.neighbors.previous == peerID then
+            dbi.neighbors.previous = nil
+        end
+        if dbi.neighbors.next == peerID then
+            dbi.neighbors.next = nil
         end
     end
 end
@@ -2950,7 +2985,7 @@ if DEBUG and TESTING then
                 Assert.IsNil(dbi.channels)
                 Assert.AreEqual(dbi.discoveryQuietPeriod, 1.5)
                 Assert.AreEqual(dbi.discoveryMaxTime, 3.0)
-                Assert.AreEqual(dbi.peerTimeout, 300.0)
+                Assert.AreEqual(dbi.peerTimeout, 120.0)
                 Assert.IsInterface(dbi.filter, { "New", "Insert", "Contains", "Export", "Import" })
                 Assert.IsInterface(dbi.serializer, { "Serialize", "Deserialize" })
                 Assert.IsInterface(dbi.compressor, { "Compress", "Decompress" })
@@ -3007,7 +3042,7 @@ if DEBUG and TESTING then
                     discoveryQuietPeriod = 5.0,
                     discoveryMaxTime = 30.0,
                     onDiscoveryComplete = function() end,
-                    peerTimeout = 120.0,
+                    peerTimeout = 300.0,
                 })
                 Assert.IsEmptyTable(db)
                 Assert.AreEqual(LibP2PDB:GetDatabase("LibP2PDBTests2"), db)
@@ -3021,7 +3056,7 @@ if DEBUG and TESTING then
                 Assert.AreEqual(dbi.channels, { "CUSTOM" })
                 Assert.AreEqual(dbi.discoveryQuietPeriod, 5.0)
                 Assert.AreEqual(dbi.discoveryMaxTime, 30.0)
-                Assert.AreEqual(dbi.peerTimeout, 120.0)
+                Assert.AreEqual(dbi.peerTimeout, 300.0)
                 Assert.IsInterface(dbi.filter, { "New", "Insert", "Contains", "Export", "Import" })
                 Assert.IsInterface(dbi.serializer, { "Serialize", "Deserialize" })
                 Assert.IsInterface(dbi.compressor, { "Compress", "Decompress" })
