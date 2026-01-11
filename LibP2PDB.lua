@@ -194,34 +194,25 @@ local function Dump(value)
     end
 end
 
---- Determine if a value is nil.
---- @param value any Value to check if it's nil.
---- @return boolean isNil True if the value is nil, false otherwise.
-local function IsNil(value)
-    return value == nil
-end
-
 --- Determine if a value is a string.
 --- @param value any Value to check if it's a string.
---- @param maxlen number? Optional maximum length.
 --- @return boolean isString True if the value is a string, false otherwise.
-local function IsString(value, maxlen)
-    return type(value) == "string" and (not maxlen or #value <= maxlen)
+local function IsString(value)
+    return type(value) == "string"
 end
 
 --- Determine if a value is a string or nil.
 --- @param value any Value to check if it's a string or nil.
---- @param maxlen number? Optional maximum length.
 --- @return boolean isStringOrNil True if the value is a string or nil, false otherwise.
-local function IsStringOrNil(value, maxlen)
-    return value == nil or IsString(value, maxlen)
+local function IsStringOrNil(value)
+    return value == nil or IsString(value)
 end
 
 --- Determine if a value is an empty string.
 --- @param value any Value to check if it's an empty string.
 --- @return boolean isEmptyString True if the value is an empty string, false otherwise.
 local function IsEmptyString(value)
-    return IsString(value) and #value == 0
+    return IsString(value) and value == ""
 end
 
 --- Determine if a value is an empty string or nil.
@@ -233,18 +224,24 @@ end
 
 --- Determine if a value is a non-empty string.
 --- @param value any Value to check if it's a non-empty string.
---- @param maxlen number? Optional maximum length.
 --- @return boolean isNonEmptyString True if the value is a non-empty string, false otherwise.
-local function IsNonEmptyString(value, maxlen)
-    return IsString(value, maxlen) and #value > 0
+local function IsNonEmptyString(value)
+    return IsString(value) and value ~= ""
 end
 
 --- Determine if a value is a non-empty string or nil.
 --- @param value any Value to check if it's a non-empty string or nil.
---- @param maxlen number? Optional maximum length.
 --- @return boolean isNonEmptyStringOrNil True if the value is a non-empty string or nil, false otherwise.
-local function IsNonEmptyStringOrNil(value, maxlen)
-    return value == nil or IsNonEmptyString(value, maxlen)
+local function IsNonEmptyStringOrNil(value)
+    return value == nil or IsNonEmptyString(value)
+end
+
+--- Determine if a value is a non-empty string with maximum length.
+--- @param value any Value to check if it's a non-empty string.
+--- @param maxLen integer Maximum length of the string.
+--- @return boolean isNonEmptyStringMaxLen True if the value is a non-empty string with maximum length, false otherwise.
+local function IsNonEmptyStringMaxLen(value, maxLen)
+    return IsNonEmptyString(value) and #value <= maxLen
 end
 
 --- Determine if a value is a number.
@@ -253,7 +250,7 @@ end
 --- @param maxValue number? Optional maximum value.
 --- @return boolean isNumber True if the value is a number, false otherwise.
 local function IsNumber(value, minValue, maxValue)
-    return type(value) == "number" and value == value and (not minValue or value >= minValue) and (not maxValue or value <= maxValue) -- n == n checks for NaN
+    return type(value) == "number" and (not minValue or value >= minValue) and (not maxValue or value <= maxValue)
 end
 
 --- Determine if a value is a number or nil.
@@ -263,6 +260,24 @@ end
 --- @return boolean isNumberOrNil True if the value is a number or nil, false otherwise.
 local function IsNumberOrNil(value, minValue, maxValue)
     return value == nil or IsNumber(value, minValue, maxValue)
+end
+
+--- Determine if a value is an integer.
+--- @param value any Value to check if it's an integer.
+--- @param minValue integer? Optional minimum value.
+--- @param maxValue integer? Optional maximum value.
+--- @return boolean isInteger True if the value is an integer, false otherwise.
+local function IsInteger(value, minValue, maxValue)
+    return type(value) == "number" and value % 1 == 0 and (not minValue or value >= minValue) and (not maxValue or value <= maxValue)
+end
+
+--- Determine if a value is an integer or nil.
+--- @param value any Value to check if it's an integer or nil.
+--- @param minValue integer? Optional minimum value.
+--- @param maxValue integer? Optional maximum value.
+--- @return boolean isIntegerOrNil True if the value is an integer or nil, false otherwise.
+local function IsIntegerOrNil(value, minValue, maxValue)
+    return value == nil or IsInteger(value, minValue, maxValue)
 end
 
 --- Determine if a value is a boolean.
@@ -570,7 +585,7 @@ end)
 ------------------------------------------------------------------------------------------------------------------------
 
 --- @alias LibP2PDB.DBPrefix string Unique communication prefix for a database (max 16 chars).
---- @alias LibP2PDB.DBVersion number Database version number.
+--- @alias LibP2PDB.DBVersion integer Database version number.
 
 --- @class LibP2PDB.DBHandle Database handle.
 
@@ -584,35 +599,35 @@ end)
 --- @field encoder LibP2PDB.Encoder? Optional custom encoder for encoding/decoding data for chat channels and print (default: LibDeflate if available).
 --- @field channels string[]? Optional array of custom channels to use for broadcasts, in addition to default channels (GUILD, RAID, PARTY, YELL).
 --- @field onChange LibP2PDB.DBOnChangeCallback? Optional callback function(tableName, key, data) invoked on any row change.
---- @field discoveryQuietPeriod number? Optional seconds of quiet time with no new peers before considering discovery complete (default: 3.0).
---- @field discoveryMaxTime number? Optional maximum seconds to wait for peer discovery before considering it complete (default: 10.0).
---- @field onDiscoveryComplete LibP2PDB.DBOnDiscoveryCompleteCallback? Optional callback function(isInitial) invoked when peers discovery completes.
+--- @field discoveryQuietPeriod number? Optional seconds of quiet time with no new peers before considering discovery complete (default: 1.5).
+--- @field discoveryMaxTime number? Optional maximum seconds to wait for peer discovery before considering it complete (default: 3.0).
+--- @field onDiscoveryComplete LibP2PDB.DBOnDiscoveryCompleteCallback? Optional callback function() invoked when peers discovery completes.
 --- @field peerTimeout number? Optional seconds of inactivity after which a peer is considered inactive (default: 300.0).
 
 --- @class LibP2PDB.Filter Filter interface for generating data digests.
---- @field New fun(capacity: number): LibP2PDB.Filter Creates a new filter instance.
+--- @field New fun(capacity: integer): LibP2PDB.Filter Creates a new filter instance.
 --- @field Insert fun(self: LibP2PDB.Filter, value: any): boolean Inserts a value into the filter.
 --- @field Contains fun(self: LibP2PDB.Filter, value: any): boolean Determine if the filter contains a value.
 --- @field Export fun(self: LibP2PDB.Filter): any Exports the filter to a compact format.
 --- @field Import fun(state: any): LibP2PDB.Filter Imports the filter from a compact format.
 
---- @class LibP2PDB.Serializer Serializer interface for encoding/decoding data.
---- @field Serialize fun(self: LibP2PDB.Serializer, value: any): string Serializes a value to a string.
---- @field Deserialize fun(self: LibP2PDB.Serializer, str: string): boolean, any? Deserializes a string back to a value.
+--- @class LibP2PDB.Serializer Serializer interface for serializing/deserializing data.
+--- @field Serialize fun(self: LibP2PDB.Serializer, data: any): string Serializes data to a string.
+--- @field Deserialize fun(self: LibP2PDB.Serializer, str: string): any? Deserializes a string, restoring the original data.
 
 --- @class LibP2PDB.Compressor Compressor interface for compressing/decompressing data.
 --- @field Compress fun(self: LibP2PDB.Compressor, str: string): string Compresses a string.
---- @field Decompress fun(self: LibP2PDB.Compressor, str: string): string? Decompresses a string.
+--- @field Decompress fun(self: LibP2PDB.Compressor, str: string): string? Decompresses a string, restoring the original string.
 
 --- @class LibP2PDB.Encoder Encoder interface for encoding/decoding data.
---- @field EncodeForChannel fun(self: LibP2PDB.Encoder, str: string): string Encodes data for safe transmission over chat channels.
---- @field DecodeFromChannel fun(self: LibP2PDB.Encoder, str: string): string? Decodes data received from chat channels, restoring the original data.
---- @field EncodeForPrint fun(self: LibP2PDB.Encoder, str: string): string Encodes data for safe display or persistence in saved variables.
---- @field DecodeFromPrint fun(self: LibP2PDB.Encoder, str: string): string? Decodes data from display/storage, restoring the original data.
+--- @field EncodeForChannel fun(self: LibP2PDB.Encoder, str: string): string Encodes a string for safe transmission over chat channels.
+--- @field DecodeFromChannel fun(self: LibP2PDB.Encoder, str: string): string? Decodes a string received from chat channels, restoring the original string.
+--- @field EncodeForPrint fun(self: LibP2PDB.Encoder, str: string): string Encodes a string for safe display or persistence in saved variables.
+--- @field DecodeFromPrint fun(self: LibP2PDB.Encoder, str: string): string? Decodes a string from display/storage, restoring the original string.
 
 --- @alias LibP2PDB.DBOnErrorCallback fun(errMsg: string, stack: string?) Callback function invoked on errors.
 --- @alias LibP2PDB.DBOnChangeCallback fun(tableName: string, key: LibP2PDB.TableKey, data: LibP2PDB.RowData?) Callback function invoked on any row change.
---- @alias LibP2PDB.DBOnDiscoveryCompleteCallback fun(isInitial: boolean) Callback function invoked when peer discovery completes.
+--- @alias LibP2PDB.DBOnDiscoveryCompleteCallback fun() Callback function invoked when peer discovery completes.
 
 --- Create a new peer-to-peer synchronized database instance.
 --- Each database is identified by a unique prefix and operates independently.
@@ -622,8 +637,8 @@ end)
 --- @return LibP2PDB.DBHandle dbh The newly created database handle.
 function LibP2PDB:NewDatabase(desc)
     assert(IsNonEmptyTable(desc), "desc must be a non-empty table")
-    assert(IsNonEmptyString(desc.prefix, 16), "desc.prefix must be a non-empty string (max 16 chars)")
-    assert(IsNumberOrNil(desc.version, 1), "desc.version must be a number greater or equal to 1 if provided")
+    assert(IsNonEmptyStringMaxLen(desc.prefix, 16), "desc.prefix must be a non-empty string (max 16 chars)")
+    assert(IsIntegerOrNil(desc.version, 1), "desc.version must be an integer greater than 0 if provided")
     assert(IsFunctionOrNil(desc.onError), "desc.onError must be a function if provided")
     assert(IsInterfaceOrNil(desc.filter, "New", "Insert", "Contains", "Export", "Import"), "desc.filter must be a filter interface if provided")
     assert(IsInterfaceOrNil(desc.serializer, "Serialize", "Deserialize"), "desc.serializer must be a serializer interface if provided")
@@ -631,10 +646,10 @@ function LibP2PDB:NewDatabase(desc)
     assert(IsInterfaceOrNil(desc.encoder, "EncodeForChannel", "DecodeFromChannel", "EncodeForPrint", "DecodeFromPrint"), "desc.encoder must be an encoder interface if provided")
     assert(IsNonEmptyTableOrNil(desc.channels), "desc.channels must be a non-empty array of string if provided")
     assert(IsFunctionOrNil(desc.onChange), "desc.onChange must be a function if provided")
-    assert(IsNumberOrNil(desc.discoveryQuietPeriod, 0), "desc.discoveryQuietPeriod must be a positive number if provided")
-    assert(IsNumberOrNil(desc.discoveryMaxTime, 0), "desc.discoveryMaxTime must be a positive number if provided")
+    assert(IsNumberOrNil(desc.discoveryQuietPeriod, 0.0), "desc.discoveryQuietPeriod must be a positive number if provided")
+    assert(IsNumberOrNil(desc.discoveryMaxTime, 0.0), "desc.discoveryMaxTime must be a positive number if provided")
     assert(IsFunctionOrNil(desc.onDiscoveryComplete), "desc.onDiscoveryComplete must be a function if provided")
-    assert(IsNumberOrNil(desc.peerTimeout, 0), "desc.peerTimeout must be a positive number if provided")
+    assert(IsNumberOrNil(desc.peerTimeout, 0.0), "desc.peerTimeout must be a positive number if provided")
 
     if desc.channels then
         for _, channel in ipairs(desc.channels) do
@@ -658,8 +673,8 @@ function LibP2PDB:NewDatabase(desc)
         compressor = desc.compressor,
         encoder = desc.encoder,
         channels = desc.channels,
-        discoveryQuietPeriod = desc.discoveryQuietPeriod or 3.0,
-        discoveryMaxTime = desc.discoveryMaxTime or 10.0,
+        discoveryQuietPeriod = desc.discoveryQuietPeriod or 1.5,
+        discoveryMaxTime = desc.discoveryMaxTime or 3.0,
         peerTimeout = desc.peerTimeout or 300.0,
         -- Networking
         peers = {},
@@ -678,11 +693,61 @@ function LibP2PDB:NewDatabase(desc)
     -- Setup default filter if none provided
     if not dbi.filter then
         if LibPatternedBloomFilter then
-            dbi.filter = LibPatternedBloomFilter
+            dbi.filter = {
+                New = function(capacity)
+                    return LibPatternedBloomFilter.New(capacity, 0.01)
+                end,
+                Insert = function(self, value)
+                    self:Insert(value)
+                    return true
+                end,
+                Contains = function(self, value)
+                    return self:Contains(value)
+                end,
+                Export = function(self)
+                    return self:Export()
+                end,
+                Import = function(state)
+                    return LibPatternedBloomFilter.Import(state)
+                end,
+            }
         elseif LibBloomFilter then
-            dbi.filter = LibBloomFilter
+            dbi.filter = {
+                New = function(capacity)
+                    return LibBloomFilter.New(capacity, 0.01)
+                end,
+                Insert = function(self, value)
+                    self:Insert(value)
+                    return true
+                end,
+                Contains = function(self, value)
+                    return self:Contains(value)
+                end,
+                Export = function(self)
+                    return self:Export()
+                end,
+                Import = function(state)
+                    return LibBloomFilter.Import(state)
+                end,
+            }
         elseif LibCuckooFilter then
-            dbi.filter = LibCuckooFilter
+            dbi.filter = {
+                New = function(capacity)
+                    return LibCuckooFilter.New(capacity * 2)
+                end,
+                Insert = function(self, value)
+                    return self:Insert(value)
+                end,
+                Contains = function(self, value)
+                    return self:Contains(value)
+                end,
+                Export = function(self)
+                    return self:Export()
+                end,
+                Import = function(state)
+                    return LibCuckooFilter.Import(state)
+                end,
+            }
         else
             error("filter required but none found; provide custom filter via desc.filter")
         end
@@ -701,9 +766,41 @@ function LibP2PDB:NewDatabase(desc)
     -- Setup default serializer if none provided
     if not dbi.serializer then
         if LibSerialize then
-            dbi.serializer = LibSerialize
+            dbi.serializer = {
+                Serialize = function(self, data)
+                    return LibSerialize:Serialize(data)
+                end,
+                Deserialize = function(self, str)
+                    local success, data = LibSerialize:Deserialize(str)
+                    if success then
+                        return data
+                    else
+                        if type(data) == "string" then
+                            ReportError(dbi, "LibSerialize failed to deserialize data: %s", data)
+                        else
+                            ReportError(dbi, "LibSerialize failed to deserialize data")
+                        end
+                    end
+                end,
+            }
         elseif AceSerializer then
-            dbi.serializer = AceSerializer
+            dbi.serializer = {
+                Serialize = function(self, data)
+                    return AceSerializer:Serialize(data)
+                end,
+                Deserialize = function(self, str)
+                    local success, data = AceSerializer:Deserialize(str)
+                    if success then
+                        return data
+                    else
+                        if type(data) == "string" then
+                            ReportError(dbi, "AceSerializer failed to deserialize data: %s", data)
+                        else
+                            ReportError(dbi, "AceSerializer failed to deserialize data")
+                        end
+                    end
+                end,
+            }
         else
             error("serializer required but none found; provide custom serializer via desc.serializer")
         end
@@ -711,10 +808,10 @@ function LibP2PDB:NewDatabase(desc)
 
     -- Validate serialization works
     do
-        local testValue = { a = "value", b = 42, c = true, d = nil, nested = { e = "nested", f = 100, g = false, h = nil } }
-        local serialized = dbi.serializer:Serialize(testValue)
-        local success, deserialized = dbi.serializer:Deserialize(serialized)
-        assert(success and DeepEqual(testValue, deserialized), "serializer provided in desc.serializer is invalid")
+        local testData = { a = "value", b = 42, c = true, d = nil, nested = { e = "nested", f = 100, g = false, h = nil } }
+        local serialized = dbi.serializer:Serialize(testData)
+        local deserialized = dbi.serializer:Deserialize(serialized)
+        assert(DeepEqual(testData, deserialized), "serializer provided in desc.serializer is invalid")
     end
 
     -- Setup default compressor if none provided
@@ -725,7 +822,12 @@ function LibP2PDB:NewDatabase(desc)
                     return (LibDeflate:CompressDeflate(str))
                 end,
                 Decompress = function(self, str)
-                    return (LibDeflate:DecompressDeflate(str))
+                    local data = LibDeflate:DecompressDeflate(str)
+                    if data then
+                        return data
+                    else
+                        ReportError(dbi, "LibDeflate failed to decompress data")
+                    end
                 end,
             }
         else
@@ -755,13 +857,23 @@ function LibP2PDB:NewDatabase(desc)
                     return self.channelCodec:Encode(str)
                 end,
                 DecodeFromChannel = function(self, str)
-                    return self.channelCodec:Decode(str)
+                    local data = self.channelCodec:Decode(str)
+                    if data then
+                        return data
+                    else
+                        ReportError(dbi, "LibDeflate failed to decode channel data")
+                    end
                 end,
                 EncodeForPrint = function(self, str)
                     return LibDeflate:EncodeForPrint(str)
                 end,
                 DecodeFromPrint = function(self, str)
-                    return LibDeflate:DecodeForPrint(str)
+                    local data = LibDeflate:DecodeForPrint(str)
+                    if data then
+                        return data
+                    else
+                        ReportError(dbi, "LibDeflate failed to decode print data")
+                    end
                 end,
             }
         else
@@ -797,7 +909,7 @@ end
 --- @param prefix string Unique communication prefix for the database (max 16 chars).
 --- @return LibP2PDB.DBHandle? dbh The database handle if found, or nil if not found.
 function LibP2PDB:GetDatabase(prefix)
-    assert(IsNonEmptyString(prefix, 16), "prefix must be a non-empty string (max 16 chars)")
+    assert(IsNonEmptyStringMaxLen(prefix, 16), "prefix must be a non-empty string (max 16 chars)")
     return Private.prefixes[prefix]
 end
 
@@ -805,7 +917,7 @@ end
 -- Public API: Table Definition
 ------------------------------------------------------------------------------------------------------------------------
 
---- @alias LibP2PDB.Clock number Lamport clock value.
+--- @alias LibP2PDB.Clock integer Lamport clock value.
 --- @alias LibP2PDB.PeerID string Peer identifier value.
 --- @alias LibP2PDB.Tombstone boolean Flag indicating if a row is a tombstone (deleted).
 --- @alias LibP2PDB.TableName string Name of the table.
@@ -894,7 +1006,7 @@ end
 --- If no schema is defined, all primitive fields are accepted.
 --- Fails if the key already exists (use SetKey to overwrite).
 --- @param db LibP2PDB.DBHandle Database handle.
---- @param tableName string Name of the table to insert into.
+--- @param tableName LibP2PDB.TableName Name of the table to insert into.
 --- @param key LibP2PDB.TableKey Primary key value for the row (must match table's keyType).
 --- @param data table Data for the new row.
 --- @return boolean success Returns true on success, false otherwise.
@@ -931,7 +1043,7 @@ end
 --- If a schema is defined, extra fields in the row are ignored.
 --- If no schema is defined, all primitive fields are accepted.
 --- @param db LibP2PDB.DBHandle Database handle.
---- @param tableName string Name of the table to set into.
+--- @param tableName LibP2PDB.TableName Name of the table to set into.
 --- @param key LibP2PDB.TableKey Primary key value for the row (must match table's keyType).
 --- @param data table Row data containing fields defined in the table schema.
 --- @return boolean success Returns true on success, false otherwise.
@@ -965,7 +1077,7 @@ end
 --- If a schema is defined, extra fields in the updated row are ignored.
 --- If no schema is defined, all primitive fields are accepted.
 --- @param db LibP2PDB.DBHandle Database handle.
---- @param tableName string Name of the table to update.
+--- @param tableName LibP2PDB.TableName Name of the table to update.
 --- @param key LibP2PDB.TableKey Primary key value for the row (must match table's keyType).
 --- @param updateFn LibP2PDB.TableUpdateFunction Function invoked to produce updated row data. Current row data is passed as a copy.
 --- @return boolean success Returns true on success, false otherwise.
@@ -1003,7 +1115,7 @@ end
 --- Validates the key type against the table definition.
 --- Marks the row as a tombstone for gossip synchronization, whether the row existed or not.
 --- @param db LibP2PDB.DBHandle Database handle.
---- @param tableName string Name of the table to delete from.
+--- @param tableName LibP2PDB.TableName Name of the table to delete from.
 --- @param key LibP2PDB.TableKey Primary key value for the row (must match table's keyType).
 --- @return boolean success Returns true on success, false otherwise.
 function LibP2PDB:DeleteKey(db, tableName, key)
@@ -1028,7 +1140,7 @@ end
 --- A key exists if it is present and not marked as a tombstone.
 --- Validates the key type against the table definition.
 --- @param db LibP2PDB.DBHandle Database handle.
---- @param tableName string Name of the table to check.
+--- @param tableName LibP2PDB.TableName Name of the table to check.
 --- @param key LibP2PDB.TableKey Primary key value for the row (must match table's keyType).
 --- @return boolean exists True if the key exists and is not marked as a tombstone (deleted), false otherwise.
 function LibP2PDB:HasKey(db, tableName, key)
@@ -1057,7 +1169,7 @@ end
 --- A key exists if it is present and not marked as a tombstone.
 --- Validates the key type against the table definition.
 --- @param db LibP2PDB.DBHandle Database handle.
---- @param tableName string Name of the table to get from.
+--- @param tableName LibP2PDB.TableName Name of the table to get from.
 --- @param key LibP2PDB.TableKey Primary key value for the row (must match table's keyType).
 --- @return LibP2PDB.RowData? rowData The row data if found, or nil if not found or tombstone (deleted).
 function LibP2PDB:GetKey(db, tableName, key)
@@ -1091,7 +1203,7 @@ end
 --- Subscribe to changes in a specific table.
 --- The callback is invoked with the key and new data (nil for deletions) whenever a row changes.
 --- @param db LibP2PDB.DBHandle Database handle.
---- @param tableName string Name of the table to subscribe to
+--- @param tableName LibP2PDB.TableName Name of the table to subscribe to
 --- @param callback LibP2PDB.TableOnChangeCallback Function(key, data) to invoke on changes
 function LibP2PDB:Subscribe(db, tableName, callback)
     assert(IsEmptyTable(db), "db must be an empty table")
@@ -1112,7 +1224,7 @@ end
 
 --- Unsubscribe to changes in a specific table.
 --- @param db LibP2PDB.DBHandle Database handle.
---- @param tableName string Name of the table to unsubscribe from
+--- @param tableName LibP2PDB.TableName Name of the table to unsubscribe from
 --- @param callback LibP2PDB.TableOnChangeCallback Function(key, data) to remove from subscriptions
 function LibP2PDB:Unsubscribe(db, tableName, callback)
     assert(IsEmptyTable(db), "db must be an empty table")
@@ -1135,17 +1247,31 @@ end
 -- Public API: Persistence
 ------------------------------------------------------------------------------------------------------------------------
 
---- @alias LibP2PDB.DBState [LibP2PDB.DBVersion, LibP2PDB.Clock, [LibP2PDB.TableState]]
---- @alias LibP2PDB.TableState [LibP2PDB.TableName, [LibP2PDB.RowState]]
---- @alias LibP2PDB.RowState [LibP2PDB.TableKey, LibP2PDB.RowDataState, LibP2PDB.Clock, LibP2PDB.PeerID, LibP2PDB.Tombstone?]
+--- @class LibP2PDB.DBState
+--- @field [1] LibP2PDB.DBVersion Database version number.
+--- @field [2] LibP2PDB.Clock Database Lamport clock value.
+--- @field [3] LibP2PDB.TableState[] Array of table state representing the state of each table.
+
+--- @class LibP2PDB.TableState
+--- @field [1] LibP2PDB.TableName Name of the table.
+--- @field [2] LibP2PDB.RowState[] Array of row state representing the state of each row in the table.
+
+--- @class LibP2PDB.RowState
+--- @field [1] LibP2PDB.TableKey Primary key value of the row.
+--- @field [2] LibP2PDB.RowDataState Data for the row (NIL_MARKER if nil).
+--- @field [3] LibP2PDB.Clock Lamport clock value when the row was last modified.
+--- @field [4] LibP2PDB.PeerID Peer ID that last modified the row.
+--- @field [5] LibP2PDB.Tombstone? Optional flag indicating if the row is a tombstone (deleted).
+
 --- @alias LibP2PDB.RowDataState [LibP2PDB.RowDataValue]|LibP2PDB.RowData
 
 --- Export the database state to a compact table format.
 --- If a table has a schema, fields are exported in alphabetical order without names.
 --- If no schema is defined, all fields are exported in arbitrary order with names.
---- Empty tables are omitted from the exported output.
+--- Empty tables or rows are omitted from the exported output.
+--- If the database state is empty, nil is returned.
 --- @param db LibP2PDB.DBHandle Database handle.
---- @return LibP2PDB.DBState state The exported database state in compact format.
+--- @return LibP2PDB.DBState? state The exported database state in compact format.
 function LibP2PDB:ExportDatabase(db)
     assert(IsEmptyTable(db), "db must be an empty table")
 
@@ -1242,6 +1368,149 @@ function LibP2PDB:SyncNow(db)
     end
 end
 
+--- Request a specific row immediately from a target player.
+--- @param db LibP2PDB.DBHandle Database handle.
+--- @param tableName LibP2PDB.TableName? Name of the table to request from, or nil to request from all tables.
+--- @param key LibP2PDB.TableKey Primary key value for the row (must match table's keyType).
+--- @param target string Target player name to request the row from.
+function LibP2PDB:RequestNow(db, tableName, key, target)
+    assert(IsEmptyTable(db), "db must be an empty table")
+
+    -- Validate db instance
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database handle")
+
+    -- Prepare the database request
+    local databaseRequest = {}
+    if not tableName then
+        for tableName in pairs(dbi.tables) do
+            databaseRequest[tableName] = { key }
+        end
+    else
+        databaseRequest[tableName] = { key }
+    end
+
+    -- Send the row request to the target player
+    local obj = {
+        type = CommMessageType.RowsRequest,
+        peer = Private.peerId,
+        data = databaseRequest, --- @type LibP2PDB.DBRequest
+    }
+    Private:Send(dbi, obj, "WHISPER", target, CommPriority.High)
+end
+
+--- Send a specific row immediately to a target player.
+--- @param db LibP2PDB.DBHandle Database handle.
+--- @param tableName LibP2PDB.TableName? Name of the table to send from, or nil to send from all tables that contain the key.
+--- @param key LibP2PDB.TableKey Primary key value for the row (must match table's keyType).
+--- @param target string Target player name to send the row to.
+--- @return boolean success Returns true on success, false otherwise.
+function LibP2PDB:SendNow(db, tableName, key, target)
+    assert(IsEmptyTable(db), "db must be an empty table")
+
+    -- Validate db instance
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database handle")
+
+    -- Gather the tables to send from
+    local tableNames = {}
+    if tableName then
+        tinsert(tableNames, tableName)
+    else
+        for tableName in pairs(dbi.tables) do
+            tinsert(tableNames, tableName)
+        end
+    end
+
+    -- Collect the rows to send
+    local tablesArray = {} --- @type LibP2PDB.TableState[]
+    local tablesIndex = 1
+    for _, tableName in ipairs(tableNames) do
+        local ti = dbi.tables[tableName]
+        if ti then
+            local schemaSorted = Private:GetTableSchema(ti, true) --- @type LibP2PDB.TableSchemaSorted?
+            local row = ti.rows[key]
+            if row then
+                tablesArray[tablesIndex] = { tableName, { Private:ExportRow(key, row, schemaSorted) } }
+                tablesIndex = tablesIndex + 1
+            end
+        end
+    end
+
+    if IsEmptyTable(tablesArray) then
+        ReportError(dbi, "no valid rows to send to '%s'", target)
+        return false
+    end
+
+    --- @type LibP2PDB.DBState
+    local databaseState = { dbi.version, dbi.clock, tablesArray }
+
+    -- Send the row to the target player
+    local obj = {
+        type = CommMessageType.RowsResponse,
+        peer = Private.peerId,
+        data = databaseState,
+    }
+    Private:Send(dbi, obj, "WHISPER", target, CommPriority.High)
+    return true
+end
+
+--- Broadcast a specific row immediately to all peers.
+--- Validates the key type against the table definition.
+--- @param db LibP2PDB.DBHandle Database handle.
+--- @param tableName LibP2PDB.TableName Name of the table to broadcast from.
+--- @param key LibP2PDB.TableKey Primary key value for the row (must match table's keyType).
+--- @return boolean success Returns true on success, false otherwise.
+function LibP2PDB:BroadcastNow(db, tableName, key)
+    assert(IsEmptyTable(db), "db must be an empty table")
+
+    -- Validate db instance
+    local dbi = Private.databases[db]
+    assert(dbi, "db is not a recognized database handle")
+
+    -- Gather the tables to send from
+    local tableNames = {}
+    if tableName then
+        tinsert(tableNames, tableName)
+    else
+        for tableName in pairs(dbi.tables) do
+            tinsert(tableNames, tableName)
+        end
+    end
+
+    -- Collect the rows to send
+    local tablesArray = {} --- @type LibP2PDB.TableState[]
+    local tablesIndex = 1
+    for _, tableName in ipairs(tableNames) do
+        local ti = dbi.tables[tableName]
+        if ti then
+            local schemaSorted = Private:GetTableSchema(ti, true) --- @type LibP2PDB.TableSchemaSorted?
+            local row = ti.rows[key]
+            if row then
+                tablesArray[tablesIndex] = { tableName, { Private:ExportRow(key, row, schemaSorted) } }
+                tablesIndex = tablesIndex + 1
+            end
+        end
+    end
+
+    if IsEmptyTable(tablesArray) then
+        ReportError(dbi, "no valid rows to broadcast")
+        return false
+    end
+
+    --- @type LibP2PDB.DBState
+    local databaseState = { dbi.version, dbi.clock, tablesArray }
+
+    -- Send the row to the target player
+    local obj = {
+        type = CommMessageType.RowsResponse,
+        peer = Private.peerId,
+        data = databaseState,
+    }
+    Private:Broadcast(dbi, obj, dbi.channels, CommPriority.Low)
+    return true
+end
+
 ------------------------------------------------------------------------------------------------------------------------
 -- Public API: Utility / Metadata
 ------------------------------------------------------------------------------------------------------------------------
@@ -1283,7 +1552,7 @@ end
 
 --- List all keys of a specific table in the database.
 --- @param db LibP2PDB.DBHandle Database handle.
---- @param tableName string Name of the table to list keys from
+--- @param tableName LibP2PDB.TableName Name of the table to list keys from
 --- @return [LibP2PDB.TableKey] keys Array of keys in the specified table
 function LibP2PDB:ListKeys(db, tableName)
     assert(IsEmptyTable(db), "db must be an empty table")
@@ -1325,11 +1594,11 @@ function LibP2PDB:ListPeers(db)
     return peers
 end
 
---- Serialize a value using the database's serializer.
+--- Serialize data using the database's serializer.
 --- @param db LibP2PDB.DBHandle Database handle.
---- @param value any Value to serialize.
---- @return string serialized The serialized string representation of the value.
-function LibP2PDB:Serialize(db, value)
+--- @param data any Data to serialize.
+--- @return string serialized The serialized string representation of the data.
+function LibP2PDB:Serialize(db, data)
     assert(IsEmptyTable(db), "db must be an empty table")
 
     -- Validate db instance
@@ -1337,14 +1606,13 @@ function LibP2PDB:Serialize(db, value)
     assert(dbi, "db is not a recognized database handle")
 
     -- Serialize the data
-    return dbi.serializer:Serialize(value)
+    return dbi.serializer:Serialize(data)
 end
 
---- Deserialize a value using the database's serializer.
+--- Deserialize data using the database's serializer.
 --- @param db LibP2PDB.DBHandle Database handle.
 --- @param str string Serialized string representation of the value.
---- @return boolean success True if deserialization succeeded, false otherwise.
---- @return any value The deserialized value if successful, or nil if failed.
+--- @return any? data The deserialized data if successful, or nil if failed.
 function LibP2PDB:Deserialize(db, str)
     assert(IsEmptyTable(db), "db must be an empty table")
 
@@ -1352,7 +1620,7 @@ function LibP2PDB:Deserialize(db, str)
     local dbi = Private.databases[db]
     assert(dbi, "db is not a recognized database handle")
 
-    -- Deserialize the data
+    -- Deserialize the string
     return dbi.serializer:Deserialize(str)
 end
 
@@ -1482,9 +1750,9 @@ end
 ------------------------------------------------------------------------------------------------------------------------
 
 --- @class LibP2PDB.DBInstance Database instance.
---- @field prefix string Unique communication prefix.
---- @field version number Database version.
---- @field clock number Lamport clock for versioning.
+--- @field prefix LibP2PDB.DBPrefix Unique communication prefix.
+--- @field version LibP2PDB.DBVersion Database version.
+--- @field clock LibP2PDB.Clock Lamport clock for versioning.
 --- @field channels string[]? List of custom channels for broadcasts.
 --- @field discoveryQuietPeriod number Seconds of quiet time for discovery completion.
 --- @field discoveryMaxTime number Maximum time for discovery completion.
@@ -1496,18 +1764,17 @@ end
 --- @field neighbors LibP2PDB.Neighbors Active neighbor peers for gossip sync.
 --- @field peerTimeout number Timeout in seconds for considering a peer inactive.
 --- @field buckets table Communication event buckets for burst control.
---- @field tables table<string, LibP2PDB.TableInstance> Defined tables in the database.
+--- @field tables table<LibP2PDB.TableName, LibP2PDB.TableInstance> Defined tables in the database.
 --- @field onError LibP2PDB.DBOnErrorCallback? Callback for error events.
 --- @field onChange LibP2PDB.DBOnChangeCallback? Callback for row changes.
 --- @field onDiscoveryComplete LibP2PDB.DBOnDiscoveryCompleteCallback? Callback for discovery completion.
 --- @field discoveryStartTime number? Time when discovery started.
 --- @field lastDiscoveryResponseTime number? Time when last discovery response was received.
---- @field isInitialDiscoveryComplete boolean? Flag indicating if initial discovery is complete.
 
 --- @class LibP2PDB.PeerInfo Peer information.
 --- @field name string Name of the peer.
---- @field clock number Lamport clock of the peer's database.
---- @field lastSeen number Timestamp of the last time the peer was seen.
+--- @field clock LibP2PDB.Clock Lamport clock of the peer's database.
+--- @field lastSeen integer Timestamp of the last time the peer was seen.
 
 --- @class LibP2PDB.Neighbors Active gossip sync neighbors.
 --- @field lowest LibP2PDB.PeerID? Lowest active peer ID.
@@ -1521,7 +1788,7 @@ end
 --- @field onValidate LibP2PDB.TableOnValidateCallback? Optional validation callback for rows.
 --- @field onChange LibP2PDB.TableOnChangeCallback? Optional change callback for rows.
 --- @field subscribers table<LibP2PDB.TableOnChangeCallback, boolean> Weak table of subscriber callbacks.
---- @field rowCount number Total number of rows in the table (including tombstones).
+--- @field rowCount integer Total number of rows in the table (including tombstones).
 --- @field rows table<LibP2PDB.TableKey, LibP2PDB.TableRow> Registry of rows in the table.
 
 --- @class LibP2PDB.TableRow Table row definition.
@@ -1529,13 +1796,18 @@ end
 --- @field version LibP2PDB.RowVersion Version metadata for the row.
 
 --- @class LibP2PDB.ImportedTable Table imported from a DBState.
---- @field name string Name of the table.
+--- @field name LibP2PDB.TableName Name of the table.
 --- @field rows table<LibP2PDB.TableKey, LibP2PDB.RowData> rows Table rows mapped by their primary keys.
 
 --- @class LibP2PDB.ImportedRow Row imported from a DBState.
 --- @field key LibP2PDB.TableKey Primary key of the row.
 --- @field data LibP2PDB.RowData? Data for the row, or nil if the row is a tombstone.
 --- @field version LibP2PDB.RowVersion Version metadata for the row.
+
+--- @alias LibP2PDB.DBDigest table<LibP2PDB.TableName, LibP2PDB.DigestState> Database digest mapping table names to their digest states.
+--- @alias LibP2PDB.DigestState any Digest state for a table (implementation-defined).
+
+--- @alias LibP2PDB.DBRequest table<LibP2PDB.TableName, LibP2PDB.TableKey[]> Database request mapping table names to arrays of requested keys.
 
 --- Retrieve the schema definition for a specific table instance.
 --- @param ti LibP2PDB.TableInstance Table instance.
@@ -1564,7 +1836,7 @@ end
 
 --- Set a row in a table, overwriting any existing row.
 --- @param dbi LibP2PDB.DBInstance Database instance.
---- @param tableName string Name of the table.
+--- @param tableName LibP2PDB.TableName Name of the table.
 --- @param ti LibP2PDB.TableInstance Table instance.
 --- @param key LibP2PDB.TableKey Primary key value for the row.
 --- @param rowData LibP2PDB.RowData? Row data containing fields defined in the table schema (or nil for tombstone).
@@ -1624,8 +1896,8 @@ end
 
 --- Merge a row in a table, overwriting any existing row, based on version metadata.
 --- @param dbi LibP2PDB.DBInstance Database instance.
---- @param incomingDBClock number Incoming database Lamport clock.
---- @param tableName string Name of the table.
+--- @param incomingDBClock LibP2PDB.Clock Incoming database Lamport clock.
+--- @param tableName LibP2PDB.TableName Name of the table.
 --- @param ti LibP2PDB.TableInstance Table instance.
 --- @param key LibP2PDB.TableKey Primary key value for the row.
 --- @param rowData LibP2PDB.RowData? Row data containing fields defined in the table schema (or nil for tombstone).
@@ -1698,7 +1970,7 @@ end
 --- Prepare data for a row.
 --- If a schema is defined, validates field types and copies only defined fields.
 --- If no schema is defined, copies all primitive fields with string or number keys.
---- @param tableName string Name of the table.
+--- @param tableName LibP2PDB.TableName Name of the table.
 --- @param ti LibP2PDB.TableInstance Table instance.
 --- @param data table? Row data to prepare (or nil for tombstone).
 --- @return LibP2PDB.RowData? rowData The processed row data.
@@ -1737,7 +2009,7 @@ end
 
 --- Invoke change callbacks for a row change.
 --- @param dbi LibP2PDB.DBInstance Database instance.
---- @param tableName string Name of the table.
+--- @param tableName LibP2PDB.TableName Name of the table.
 --- @param ti LibP2PDB.TableInstance Table instance.
 --- @param key LibP2PDB.TableKey Primary key value for the row.
 --- @param rowData LibP2PDB.RowData? New row data (or nil for tombstone).
@@ -1763,12 +2035,8 @@ end
 --- If no schema is defined, all fields are exported in arbitrary order with names.
 --- Empty tables are omitted from the exported output.
 --- @param dbi LibP2PDB.DBInstance Database instance.
---- @return LibP2PDB.DBState databaseState The exported database state in compact format.
+--- @return LibP2PDB.DBState? databaseState The exported database state in compact format.
 function Private:ExportDatabase(dbi)
-    local databaseState = {}
-    databaseState[1] = dbi.version
-    databaseState[2] = dbi.clock
-
     -- Export each table
     local tablesArray = {}
     local tablesIndex = 1
@@ -1781,12 +2049,17 @@ function Private:ExportDatabase(dbi)
         end
     end
 
-    -- Include tables only if there are any
-    if #tablesArray > 0 then
-        databaseState[3] = tablesArray
+    -- Return nil if no tables to export
+    if #tablesArray == 0 then
+        return nil -- no tables to export
     end
 
-    return databaseState
+    --- @type LibP2PDB.DBState
+    return {
+        dbi.version,
+        dbi.clock,
+        tablesArray,
+    }
 end
 
 --- Export a single table to compact format.
@@ -1816,10 +2089,10 @@ function Private:ExportTable(tableName, ti)
 
     -- Export the table state
     --- @type LibP2PDB.TableState
-    local tableState = {}
-    tableState[1] = tableName
-    tableState[2] = rowsArray
-    return tableState
+    return {
+        tableName,
+        rowsArray
+    }
 end
 
 --- Export a single row to compact format.
@@ -1862,15 +2135,13 @@ function Private:ExportRow(key, row, schemaSorted)
 
     -- Export the row state
     --- @type LibP2PDB.RowState
-    local rowState = {}
-    rowState[1] = key
-    rowState[2] = rowDataState
-    rowState[3] = row.version.clock
-    rowState[4] = row.version.peer
-    if row.version.tombstone then
-        rowState[5] = true
-    end
-    return rowState
+    return {
+        key,
+        rowDataState,
+        row.version.clock,
+        row.version.peer,
+        row.version.tombstone and true or nil
+    }
 end
 
 --- Import the database state from a compact format.
@@ -1888,21 +2159,21 @@ function Private:ImportDatabase(dbi, state)
 
     -- Validate database state version
     local incomingDBVersion = state[1]
-    if not IsNumber(incomingDBVersion, 1) then
+    if not IsInteger(incomingDBVersion, 1) then
         ReportError(dbi, "invalid database version in state")
         return false
     end
 
     -- Validate database state clock
     local incomingDBClock = state[2]
-    if not IsNumber(incomingDBClock, 0) then
+    if not IsInteger(incomingDBClock, 0) then
         ReportError(dbi, "invalid database clock in state")
         return false
     end
 
     -- Validate database tables
     local incomingTables = state[3]
-    if not IsTableOrNil(incomingTables) then
+    if not IsTable(incomingTables) then
         ReportError(dbi, "invalid database tables in state")
         return false
     end
@@ -1936,14 +2207,14 @@ function Private:ImportTable(dbi, incomingDBClock, tableState)
     -- Check if table is defined in the database
     local ti = dbi.tables[incomingTableName]
     if not ti then
-        ReportError(dbi, "table '" .. incomingTableName .. "' is not defined in the database")
+        ReportError(dbi, "table '%s' is not defined in the database", incomingTableName)
         return nil
     end
 
     -- Validate table rows
     local incomingRows = tableState[2]
     if not IsTableOrNil(incomingRows) then
-        ReportError(dbi, "invalid rows in table state for table '" .. incomingTableName .. "'")
+        ReportError(dbi, "invalid rows in table state for table '%s'", incomingTableName)
         return nil
     end
 
@@ -1993,7 +2264,7 @@ function Private:ImportRow(dbi, incomingDBClock, incomingTableName, ti, schemaSo
 
     -- Validate version clock
     local incomingVersionClock = rowState[3]
-    if not IsNumber(incomingVersionClock, 0) then
+    if not IsInteger(incomingVersionClock, 0) then
         ReportError(dbi, "invalid clock in row version state for key '%s' in table '%s'", tostring(incomingKey), incomingTableName)
         return
     end
@@ -2177,6 +2448,14 @@ function Private:Broadcast(dbi, data, channels, priority)
         --- @cast priority "ALERT"|"BULK"|"NORMAL"
         AceComm.SendCommMessage(self, dbi.prefix, encoded, channel, nil, priority)
     end
+
+    -- local numFriends = C_FriendList.GetNumFriends()
+    -- for i = 1, numFriends do
+    --     local info = C_FriendList.GetFriendInfoByIndex(i)
+    --     if info and info.connected then
+    --         AceComm.SendCommMessage(self, dbi.prefix, encoded, "WHISPER", info.name, priority)
+    --     end
+    -- end
 end
 
 --- @class LibP2PDB.Message Received communication message.
@@ -2224,8 +2503,8 @@ function Private:OnCommReceived(prefix, encoded, channel, sender)
         return
     end
 
-    local success, obj = dbi.serializer:Deserialize(serialized)
-    if not success or not obj then
+    local obj = dbi.serializer:Deserialize(serialized)
+    if not obj then
         Error("failed to deserialize message from prefix '%s' channel '%s' sender '%s': %s", tostring(prefix), tostring(channel), tostring(sender), Dump(obj))
         return
     end
@@ -2236,7 +2515,7 @@ function Private:OnCommReceived(prefix, encoded, channel, sender)
         return
     end
 
-    if not IsNumber(obj.type) then
+    if not IsInteger(obj.type) then
         Error("received message with missing or invalid type from '%s' on channel '%s'", tostring(sender), tostring(channel))
         return
     end
@@ -2269,8 +2548,8 @@ function Private:OnCommReceived(prefix, encoded, channel, sender)
         return
     end
 
-    -- Create a timer to process this message after 1 second
-    bucket[message.peer] = C_Timer.NewTimer(1.0, function()
+    -- Create a timer to process this message after 100 milliseconds
+    bucket[message.peer] = C_Timer.NewTimer(0.1, function()
         -- Process the message
         Private:DispatchMessage(message)
 
@@ -2315,7 +2594,7 @@ function Private:PeerDiscoveryRequestHandler(message)
     local obj = {
         type = CommMessageType.PeerDiscoveryResponse,
         peer = Private.peerId,
-        data = message.dbi.clock,
+        data = message.dbi.clock, --- @type LibP2PDB.Clock
     }
     Private:Send(message.dbi, obj, "WHISPER", message.sender, CommPriority.Low)
 end
@@ -2388,22 +2667,29 @@ end
 
 --- Handler for digest request messages.
 --- Reply to the sender with digests for each table.
+--- Data will be sent using the LibP2PDB.DBDigest format.
 --- @param message LibP2PDB.Message
 function Private:DigestRequestHandler(message)
     Spam("received digest request from '%s'", tostring(message.sender))
 
     -- Build filter for each table
     local dbi = message.dbi
-    local digests = {}
-    local tables = dbi.tables
-    for tableName, ti in pairs(tables) do
+    local databaseDigest = {} --- @type LibP2PDB.DBDigest
+    for tableName, ti in pairs(dbi.tables) do
         if ti.rowCount > 0 then
             local filter = dbi.filter.New(ti.rowCount)
             for key, row in pairs(ti.rows) do
+                -- Concatenate key and row version clock to create unique
+                -- entry so we can detect both missing and outdated rows.
                 filter:Insert(key .. row.version.clock)
             end
-            digests[tableName] = filter:Export()
+            databaseDigest[tableName] = filter:Export()
         end
+    end
+
+    -- Return if there are no tables to include in the digest
+    if IsEmptyTable(databaseDigest) then
+        Spam("no tables to include in digest response to '%s'", tostring(message.sender))
     end
 
     -- Send digest response
@@ -2411,41 +2697,37 @@ function Private:DigestRequestHandler(message)
     local obj = {
         type = CommMessageType.DigestResponse,
         peer = Private.peerId,
-        data = digests,
+        data = databaseDigest,
     }
     Private:Send(message.dbi, obj, "WHISPER", message.sender, CommPriority.Normal)
 end
 
 --- Handler for digest response messages.
 --- Reply to the sender with rows the peer is missing or outdated.
+--- Data will be sent using the LibP2PDB.DBState format.
 --- @param message LibP2PDB.Message
 function Private:DigestResponseHandler(message)
     Spam("received digest response from '%s'", tostring(message.sender))
 
-    -- Build database state
-    local dbi = message.dbi
-    local digests = message.data
-    local databaseState = {}
-    databaseState[1] = dbi.version
-    databaseState[2] = dbi.clock
-
     -- Export rows the peer is missing or outdated, for each table in their digest
-    local tablesArray = {}
+    local dbi = message.dbi
+    local databaseDigest = message.data --- @type LibP2PDB.DBDigest
+    local tablesArray = {}              --- @type LibP2PDB.TableState[]
     local tablesIndex = 1
-    for tableName, tableDigest in pairs(digests) do
+    for tableName, tableDigest in pairs(databaseDigest) do
         local ti = dbi.tables[tableName]
         if ti then
             -- We both have this table, compare rows
             local filter = dbi.filter.Import(tableDigest)
             if filter then
-                --- @type LibP2PDB.TableSchemaSorted?
-                local schemaSorted = Private:GetTableSchema(ti, true)
-
                 -- Export each row the peer is missing
-                local rowsArray = {}
+                local schemaSorted = Private:GetTableSchema(ti, true) --- @type LibP2PDB.TableSchemaSorted?
+                local rowsArray = {}                                  --- @type LibP2PDB.RowState[]
                 local rowsIndex = 1
                 local rows = ti.rows
                 for key, row in pairs(rows) do
+                    -- Concatenate key and row version clock to create unique
+                    -- entry so we can detect both missing and outdated rows.
                     if not filter:Contains(key .. row.version.clock) then
                         -- Export the row state
                         rowsArray[rowsIndex] = Private:ExportRow(key, rows[key], schemaSorted)
@@ -2456,9 +2738,7 @@ function Private:DigestResponseHandler(message)
                 -- Include the table only if there are any rows to send
                 if #rowsArray > 0 then
                     -- Export the table state
-                    local tableState = {}
-                    tableState[1] = tableName
-                    tableState[2] = rowsArray
+                    local tableState = { tableName, rowsArray } --- @type LibP2PDB.TableState
                     tablesArray[tablesIndex] = tableState
                     tablesIndex = tablesIndex + 1
                 end
@@ -2468,36 +2748,92 @@ function Private:DigestResponseHandler(message)
         end
     end
 
-    -- Include tables only if there are any
-    if next(tablesArray) then
-        databaseState[3] = tablesArray
+    -- Return if there are no rows to send
+    if IsEmptyTable(tablesArray) then
+        Spam("no missing or outdated rows to send to '%s'", tostring(message.sender))
+        return
     end
 
     -- Send rows response
-    if next(databaseState) and next(tablesArray) then
-        Spam("sending rows response to '%s'", tostring(message.sender))
-        local obj = {
-            type = CommMessageType.RowsResponse,
-            peer = Private.peerId,
-            data = databaseState,
-        }
-        Private:Send(message.dbi, obj, "WHISPER", message.sender, CommPriority.Normal)
-    else
-        Spam("no rows to send to '%s'", tostring(message.sender))
-    end
+    Spam("sending rows response to '%s'", tostring(message.sender))
+    local obj = {
+        type = CommMessageType.RowsResponse,
+        peer = Private.peerId,
+        data = { dbi.version, dbi.clock, tablesArray }, --- @type LibP2PDB.DBState
+    }
+    Private:Send(message.dbi, obj, "WHISPER", message.sender, CommPriority.Normal)
 end
 
+--- Handler for rows request messages.
+--- Reply to the sender with the requested rows.
+--- Data will be sent using the LibP2PDB.DBState format.
+--- @param message LibP2PDB.Message
 function Private:RowsRequestHandler(message)
     Spam("received rows request from '%s'", tostring(message.sender))
-    -- currently not necessary, tbd if we want to implement this later
+
+    -- Export requested rows for each table
+    local dbi = message.dbi
+    local databaseRequest = message.data --- @type LibP2PDB.DBRequest
+    local tablesArray = {}
+    local tablesIndex = 1
+    for tableName, keys in pairs(databaseRequest or {}) do
+        -- Check if table is defined in the database
+        local ti = dbi.tables[tableName]
+        if ti then
+            -- Get sorted schema for the table (if any)
+            --- @type LibP2PDB.TableSchemaSorted?
+            local schemaSorted = Private:GetTableSchema(ti, true)
+
+            -- Export each requested row
+            local rowsArray = {}
+            local rowsIndex = 1
+            for _, key in ipairs(keys or {}) do
+                local row = ti.rows[key]
+                if row then
+                    rowsArray[rowsIndex] = Private:ExportRow(key, row, schemaSorted)
+                    rowsIndex = rowsIndex + 1
+                end
+            end
+
+            -- Include the table only if there are any rows to send
+            if #rowsArray > 0 then
+                -- Export the table state
+                --- @type LibP2PDB.TableState
+                local tableState = { tableName, rowsArray }
+                tablesArray[tablesIndex] = tableState
+                tablesIndex = tablesIndex + 1
+            end
+        else
+            ReportError(dbi, "table '%s' in rows request from '%s' is not defined in the database", tableName, tostring(message.sender))
+        end
+    end
+
+    -- Return if there are no rows to send
+    if IsEmptyTable(tablesArray) then
+        Spam("no rows to send to '%s'", tostring(message.sender))
+        return
+    end
+
+    -- Send rows response
+    Spam("sending rows response to '%s'", tostring(message.sender))
+    local obj = {
+        type = CommMessageType.RowsResponse,
+        peer = Private.peerId,
+        data = { dbi.version, dbi.clock, tablesArray }, --- @type LibP2PDB.DBState
+    }
+    Private:Send(message.dbi, obj, "WHISPER", message.sender, CommPriority.Normal)
 end
 
+--- Handler for rows response messages.
+--- Import the received rows into the database.
+--- Data is expected to be in the LibP2PDB.DBState format.
+--- @param message LibP2PDB.Message
 function Private:RowsResponseHandler(message)
     Spam("received rows response from '%s'", tostring(message.sender))
 
     -- Import missing or outdated rows into the database
     local dbi = message.dbi
-    local rowsResponse = message.data
+    local rowsResponse = message.data --- @type LibP2PDB.DBState
     Private:ImportDatabase(dbi, rowsResponse)
 end
 
@@ -2517,9 +2853,7 @@ function Private:OnUpdate(dbi)
     if sinceLast >= dbi.discoveryQuietPeriod or sinceStart >= dbi.discoveryMaxTime then
         dbi.discoveryStartTime = nil
         if dbi.onDiscoveryComplete then
-            local isInitial = not dbi.isInitialDiscoveryComplete
-            dbi.isInitialDiscoveryComplete = true
-            securecallfunction(dbi.onDiscoveryComplete, isInitial)
+            securecallfunction(dbi.onDiscoveryComplete)
         end
     end
 end
@@ -2535,6 +2869,7 @@ if DEBUG and TESTING then
         IsTrue = function(value, msg) assert(value == true, msg or "value is not true") end,
         IsFalse = function(value, msg) assert(value == false, msg or "value is not false") end,
         IsNumber = function(value, msg) assert(IsNumber(value), msg or "value is not a number") end,
+        IsInteger = function(value, msg) assert(IsInteger(value), msg or "value is not an integer") end,
         IsString = function(value, msg) assert(IsString(value), msg or "value is not a string") end,
         IsEmptyString = function(value, msg) assert(IsEmptyString(value), msg or "value is not an empty string") end,
         IsNonEmptyString = function(value, msg) assert(IsNonEmptyString(value), msg or "value is not a non-empty string") end,
@@ -2610,10 +2945,11 @@ if DEBUG and TESTING then
                 local dbi = Private.databases[db]
                 Assert.IsNonEmptyTable(dbi)
                 Assert.AreEqual(dbi.prefix, "LibP2PDBTests1")
+                Assert.AreEqual(dbi.version, 1)
                 Assert.AreEqual(dbi.clock, 0)
                 Assert.IsNil(dbi.channels)
-                Assert.AreEqual(dbi.discoveryQuietPeriod, 3.0)
-                Assert.AreEqual(dbi.discoveryMaxTime, 10.0)
+                Assert.AreEqual(dbi.discoveryQuietPeriod, 1.5)
+                Assert.AreEqual(dbi.discoveryMaxTime, 3.0)
                 Assert.AreEqual(dbi.peerTimeout, 300.0)
                 Assert.IsInterface(dbi.filter, { "New", "Insert", "Contains", "Export", "Import" })
                 Assert.IsInterface(dbi.serializer, { "Serialize", "Deserialize" })
@@ -2627,13 +2963,13 @@ if DEBUG and TESTING then
                 Assert.IsNil(dbi.onDiscoveryComplete)
                 Assert.IsNil(dbi.discoveryStartTime)
                 Assert.IsNil(dbi.lastDiscoveryResponseTime)
-                Assert.IsNil(dbi.isInitialDiscoveryComplete)
                 Assert.IsEmptyTable(dbi.neighbors)
             end
             do -- check new database creation with full description
                 Assert.IsNil(LibP2PDB:GetDatabase("LibP2PDBTests2"))
                 local db = LibP2PDB:NewDatabase({
                     prefix = "LibP2PDBTests2",
+                    version = 2,
                     onError = function(dbi, msg) end,
                     serializer = AceSerializer,
                     filter = (function()
@@ -2670,7 +3006,7 @@ if DEBUG and TESTING then
                     onChange = function(table, key, row) end,
                     discoveryQuietPeriod = 5.0,
                     discoveryMaxTime = 30.0,
-                    onDiscoveryComplete = function(isInitial) end,
+                    onDiscoveryComplete = function() end,
                     peerTimeout = 120.0,
                 })
                 Assert.IsEmptyTable(db)
@@ -2680,6 +3016,7 @@ if DEBUG and TESTING then
                 local dbi = Private.databases[db]
                 Assert.IsNonEmptyTable(dbi)
                 Assert.AreEqual(dbi.prefix, "LibP2PDBTests2")
+                Assert.AreEqual(dbi.version, 2)
                 Assert.AreEqual(dbi.clock, 0)
                 Assert.AreEqual(dbi.channels, { "CUSTOM" })
                 Assert.AreEqual(dbi.discoveryQuietPeriod, 5.0)
@@ -2697,7 +3034,6 @@ if DEBUG and TESTING then
                 Assert.IsFunction(dbi.onDiscoveryComplete)
                 Assert.IsNil(dbi.discoveryStartTime)
                 Assert.IsNil(dbi.lastDiscoveryResponseTime)
-                Assert.IsNil(dbi.isInitialDiscoveryComplete)
                 Assert.IsEmptyTable(dbi.neighbors)
             end
         end,
@@ -2796,8 +3132,8 @@ if DEBUG and TESTING then
                 LibP2PDB:NewDatabase({
                     prefix = "LibP2PDBTests",
                     serializer = {
-                        Serialize = function(self, value) return tostring(value) end,
-                        Deserialize = function(self, str) return true, {} end,
+                        Serialize = function(self, data) return tostring(data) end,
+                        Deserialize = function(self, str) return {} end,
                     },
                 })
             end)
@@ -4723,28 +5059,27 @@ if DEBUG and TESTING then
 
         SerializeDeserialize = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-            local testValue = { a = "value", b = 42, c = true, d = nil, nested = { e = "nested", f = 100, g = false, h = nil } }
-            local serialized = LibP2PDB:Serialize(db, testValue)
-            local success, deserialized = LibP2PDB:Deserialize(db, serialized)
-            Assert.IsTrue(success)
-            Assert.AreEqual(deserialized, testValue)
+            local testData = { a = "value", b = 42, c = true, d = nil, nested = { e = "nested", f = 100, g = false, h = nil } }
+            local serialized = LibP2PDB:Serialize(db, testData)
+            local deserialized = LibP2PDB:Deserialize(db, serialized)
+            Assert.AreEqual(deserialized, testData)
         end,
 
         Serialize_DBIsInvalid_Throws = function()
-            local testValue = { a = "value", b = 42 }
-            Assert.Throws(function() LibP2PDB:Serialize(nil, testValue) end)
-            Assert.Throws(function() LibP2PDB:Serialize(true, testValue) end)
-            Assert.Throws(function() LibP2PDB:Serialize(false, testValue) end)
-            Assert.Throws(function() LibP2PDB:Serialize("", testValue) end)
-            Assert.Throws(function() LibP2PDB:Serialize("invalid", testValue) end)
-            Assert.Throws(function() LibP2PDB:Serialize(123, testValue) end)
-            Assert.Throws(function() LibP2PDB:Serialize({}, testValue) end)
+            local testData = { a = "value", b = 42 }
+            Assert.Throws(function() LibP2PDB:Serialize(nil, testData) end)
+            Assert.Throws(function() LibP2PDB:Serialize(true, testData) end)
+            Assert.Throws(function() LibP2PDB:Serialize(false, testData) end)
+            Assert.Throws(function() LibP2PDB:Serialize("", testData) end)
+            Assert.Throws(function() LibP2PDB:Serialize("invalid", testData) end)
+            Assert.Throws(function() LibP2PDB:Serialize(123, testData) end)
+            Assert.Throws(function() LibP2PDB:Serialize({}, testData) end)
         end,
 
         Deserialize_DBIsInvalid_Throws = function()
             local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-            local testValue = { a = "value", b = 42 }
-            local serialized = LibP2PDB:Serialize(db, testValue)
+            local testData = { a = "value", b = 42 }
+            local serialized = LibP2PDB:Serialize(db, testData)
             Assert.Throws(function() LibP2PDB:Deserialize(nil, serialized) end)
             Assert.Throws(function() LibP2PDB:Deserialize(true, serialized) end)
             Assert.Throws(function() LibP2PDB:Deserialize(false, serialized) end)
@@ -5096,7 +5431,7 @@ if DEBUG and TESTING then
 
             ProfileReset("LibP2PDB:ExportDatabase")
             ProfileBegin("LibP2PDB:ExportDatabase")
-            local state = LibP2PDB:ExportDatabase(db)
+            local state = LibP2PDB:ExportDatabase(db) --[[@as LibP2PDB.DBState]]
             ProfileEnd("LibP2PDB:ExportDatabase")
             PrintProfileMarker("LibP2PDB:ExportDatabase", "ExportDatabase")
 
@@ -5249,67 +5584,69 @@ if DEBUG and TESTING then
         end,
 
         CuckooFilter = function()
-            local db = GenerateDatabase(sampleCount)
-            local filter = nil
-            ProfileReset("CuckooFilter.New")
-            for i = 1, sampleCount do
-                ProfileBegin("CuckooFilter.New")
-                filter = LibCuckooFilter.New(sampleCount * 2) -- Avoid high load factor
-                ProfileEnd("CuckooFilter.New")
-            end
-            PrintProfileMarker("CuckooFilter.New", "CuckooFilter.New")
-
-            ProfileReset("CuckooFilter:Insert")
-            local tables = LibP2PDB:ListTables(db)
-            for _, tableName in ipairs(tables) do
-                local keys = LibP2PDB:ListKeys(db, tableName)
-                for _, key in ipairs(keys) do
-                    ProfileBegin("CuckooFilter:Insert")
-                    filter:Insert(key)
-                    ProfileEnd("CuckooFilter:Insert")
+            if LibCuckooFilter then
+                local db = GenerateDatabase(sampleCount)
+                local filter = nil
+                ProfileReset("CuckooFilter.New")
+                for i = 1, sampleCount do
+                    ProfileBegin("CuckooFilter.New")
+                    filter = LibCuckooFilter.New(sampleCount * 2) -- Avoid high load factor
+                    ProfileEnd("CuckooFilter.New")
                 end
-            end
-            PrintProfileMarker("CuckooFilter:Insert", "CuckooFilter:Insert")
+                PrintProfileMarker("CuckooFilter.New", "CuckooFilter.New")
 
-            ProfileReset("CuckooFilter:Contains")
-            ProfileBegin("CuckooFilter:Contains")
-            for _, tableName in ipairs(tables) do
-                local keys = LibP2PDB:ListKeys(db, tableName)
-                for _, key in ipairs(keys) do
-                    ProfileBegin("CuckooFilter:Contains")
-                    filter:Contains(key)
-                    ProfileEnd("CuckooFilter:Contains")
+                ProfileReset("CuckooFilter:Insert")
+                local tables = LibP2PDB:ListTables(db)
+                for _, tableName in ipairs(tables) do
+                    local keys = LibP2PDB:ListKeys(db, tableName)
+                    for _, key in ipairs(keys) do
+                        ProfileBegin("CuckooFilter:Insert")
+                        filter:Insert(key)
+                        ProfileEnd("CuckooFilter:Insert")
+                    end
                 end
+                PrintProfileMarker("CuckooFilter:Insert", "CuckooFilter:Insert")
+
+                ProfileReset("CuckooFilter:Contains")
+                ProfileBegin("CuckooFilter:Contains")
+                for _, tableName in ipairs(tables) do
+                    local keys = LibP2PDB:ListKeys(db, tableName)
+                    for _, key in ipairs(keys) do
+                        ProfileBegin("CuckooFilter:Contains")
+                        filter:Contains(key)
+                        ProfileEnd("CuckooFilter:Contains")
+                    end
+                end
+                PrintProfileMarker("CuckooFilter:Contains", "CuckooFilter:Contains")
+
+                local state = nil
+                ProfileReset("CuckooFilter:Export")
+                for i = 1, sampleCount do
+                    ProfileBegin("CuckooFilter:Export")
+                    state = filter:Export()
+                    ProfileEnd("CuckooFilter:Export")
+                end
+                PrintProfileMarker("CuckooFilter:Export", "CuckooFilter:Export")
+
+                ProfileReset("CuckooFilter.Import")
+                for i = 1, sampleCount do
+                    ProfileBegin("CuckooFilter.Import")
+                    LibCuckooFilter.Import(state)
+                    ProfileEnd("CuckooFilter.Import")
+                end
+                PrintProfileMarker("CuckooFilter.Import", "CuckooFilter.Import")
+
+                Print("CuckooFilter estimated FPR: %.4f%%", filter:EstimateFalsePositiveRate(sampleCount) * 100.0)
+
+                local serialized = LibP2PDB:Serialize(db, state)
+                Print("CuckooFilter (%d keys) serialized: %s (%s)", sampleCount, FormatSize(#serialized), FormatSize(#serialized / sampleCount, true))
+                local compressed = LibP2PDB:Compress(db, serialized)
+                Print("CuckooFilter (%d keys) compressed: %s (%s)", sampleCount, FormatSize(#compressed), FormatSize(#compressed / sampleCount, true))
+                local encodedForChannel = LibP2PDB:EncodeForChannel(db, compressed)
+                Print("CuckooFilter (%d keys) encoded for channel: %s (%s)", sampleCount, FormatSize(#encodedForChannel), FormatSize(#encodedForChannel / sampleCount, true))
+                local encodedForPrint = LibP2PDB:EncodeForPrint(db, compressed)
+                Print("CuckooFilter (%d keys) encoded for print: %s (%s)", sampleCount, FormatSize(#encodedForPrint), FormatSize(#encodedForPrint / sampleCount, true))
             end
-            PrintProfileMarker("CuckooFilter:Contains", "CuckooFilter:Contains")
-
-            local state = nil
-            ProfileReset("CuckooFilter:Export")
-            for i = 1, sampleCount do
-                ProfileBegin("CuckooFilter:Export")
-                state = filter:Export()
-                ProfileEnd("CuckooFilter:Export")
-            end
-            PrintProfileMarker("CuckooFilter:Export", "CuckooFilter:Export")
-
-            ProfileReset("CuckooFilter.Import")
-            for i = 1, sampleCount do
-                ProfileBegin("CuckooFilter.Import")
-                LibCuckooFilter.Import(state)
-                ProfileEnd("CuckooFilter.Import")
-            end
-            PrintProfileMarker("CuckooFilter.Import", "CuckooFilter.Import")
-
-            Print("CuckooFilter estimated FPR: %.4f%%", filter:EstimateFalsePositiveRate(sampleCount) * 100.0)
-
-            local serialized = LibP2PDB:Serialize(db, state)
-            Print("CuckooFilter (%d keys) serialized: %s (%s)", sampleCount, FormatSize(#serialized), FormatSize(#serialized / sampleCount, true))
-            local compressed = LibP2PDB:Compress(db, serialized)
-            Print("CuckooFilter (%d keys) compressed: %s (%s)", sampleCount, FormatSize(#compressed), FormatSize(#compressed / sampleCount, true))
-            local encodedForChannel = LibP2PDB:EncodeForChannel(db, compressed)
-            Print("CuckooFilter (%d keys) encoded for channel: %s (%s)", sampleCount, FormatSize(#encodedForChannel), FormatSize(#encodedForChannel / sampleCount, true))
-            local encodedForPrint = LibP2PDB:EncodeForPrint(db, compressed)
-            Print("CuckooFilter (%d keys) encoded for print: %s (%s)", sampleCount, FormatSize(#encodedForPrint), FormatSize(#encodedForPrint / sampleCount, true))
         end,
     }
 
