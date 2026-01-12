@@ -112,11 +112,11 @@ end
 --- @param fmt string Format string.
 --- @param ... any Format arguments.
 local function Print(fmt, ...)
-    local success, message = pcall(format, fmt, ...)
+    local success, message = pcall(format, fmt, tostringall(...))
     if not success then
         message = fmt
     end
-    print(format("%s: %s", C(Color.Ace, "LibP2PDB"), message))
+    print(C(Color.Ace, "[LibP2PDB] ") .. ": " .. message)
 end
 
 --- Spam print function.
@@ -125,7 +125,7 @@ end
 --- @param ... any Format arguments.
 local function Spam(fmt, ...)
     if DEBUG and VERBOSITY >= 4 then
-        local success, message = pcall(format, fmt, ...)
+        local success, message = pcall(format, fmt, tostringall(...))
         if not success then
             message = fmt
         end
@@ -139,7 +139,7 @@ end
 --- @param ... any Format arguments.
 local function Debug(fmt, ...)
     if DEBUG and VERBOSITY >= 3 then
-        local success, message = pcall(format, fmt, ...)
+        local success, message = pcall(format, fmt, tostringall(...))
         if not success then
             message = fmt
         end
@@ -153,7 +153,7 @@ end
 --- @param ... any Format arguments.
 local function Warn(fmt, ...)
     if DEBUG and VERBOSITY >= 2 then
-        local success, message = pcall(format, fmt, ...)
+        local success, message = pcall(format, fmt, tostringall(...))
         if not success then
             message = fmt
         end
@@ -167,7 +167,7 @@ end
 --- @param ... any Format arguments.
 local function Error(fmt, ...)
     if DEBUG and VERBOSITY >= 1 then
-        local success, message = pcall(format, fmt, ...)
+        local success, message = pcall(format, fmt, tostringall(...))
         if not success then
             message = fmt
         end
