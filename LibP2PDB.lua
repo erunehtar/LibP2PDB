@@ -1882,7 +1882,7 @@ function Private:SetKey(dbi, tableName, ti, key, rowData)
             data = rowData,
             version = {
                 clock = dbi.clock,
-                peer = (key == Private.peerId) and "=" or Private.peerId,
+                peer = (key == self.peerId) and "=" or self.peerId,
                 tombstone = (rowData == nil) and true or nil,
             },
         }
@@ -1893,7 +1893,7 @@ function Private:SetKey(dbi, tableName, ti, key, rowData)
         end
 
         -- Invoke row changed callbacks
-        Private:InvokeChangeCallbacks(dbi, tableName, ti, key, rowData)
+        self:InvokeChangeCallbacks(dbi, tableName, ti, key, rowData)
     end
 
     return true
@@ -1966,7 +1966,7 @@ function Private:MergeKey(dbi, incomingDBClock, tableName, ti, key, rowData, row
         end
 
         -- Invoke row changed callbacks
-        Private:InvokeChangeCallbacks(dbi, tableName, ti, key, rowData)
+        self:InvokeChangeCallbacks(dbi, tableName, ti, key, rowData)
     end
 
     return true
@@ -2047,7 +2047,7 @@ function Private:ExportDatabase(dbi)
     local tablesIndex = 1
     local tables = dbi.tables
     for tableName, ti in pairs(tables) do
-        local tableState = Private:ExportTable(tableName, ti)
+        local tableState = self:ExportTable(tableName, ti)
         if tableState then
             tablesArray[tablesIndex] = tableState
             tablesIndex = tablesIndex + 1
@@ -2076,14 +2076,14 @@ end
 function Private:ExportTable(tableName, ti)
     -- Get the table schema in sorted order
     --- @type LibP2PDB.TableSchemaSorted?
-    local schemaSorted = Private:GetTableSchema(ti, true)
+    local schemaSorted = self:GetTableSchema(ti, true)
 
     -- Export each row
     local rowsArray = {}
     local rowsIndex = 1
     local rows = ti.rows
     for key, row in pairs(rows) do
-        rowsArray[rowsIndex] = Private:ExportRow(key, row, schemaSorted)
+        rowsArray[rowsIndex] = self:ExportRow(key, row, schemaSorted)
         rowsIndex = rowsIndex + 1
     end
 
@@ -2185,7 +2185,7 @@ function Private:ImportDatabase(dbi, state)
 
     -- Import each table (skipping invalid table entries)
     for _, tableState in ipairs(incomingTables or {}) do
-        Private:ImportTable(dbi, incomingDBClock, tableState)
+        self:ImportTable(dbi, incomingDBClock, tableState)
     end
 
     return true
@@ -2225,11 +2225,11 @@ function Private:ImportTable(dbi, incomingDBClock, tableState)
 
     -- Get sorted schema for the table (if any)
     --- @type LibP2PDB.TableSchemaSorted?
-    local schemaSorted = Private:GetTableSchema(ti, true)
+    local schemaSorted = self:GetTableSchema(ti, true)
 
     -- Import each row (skipping invalid row entries)
     for _, rowState in ipairs(incomingRows or {}) do
-        Private:ImportRow(dbi, incomingDBClock, incomingTableName, ti, schemaSorted, rowState)
+        self:ImportRow(dbi, incomingDBClock, incomingTableName, ti, schemaSorted, rowState)
     end
 end
 
@@ -2299,13 +2299,13 @@ function Private:ImportRow(dbi, incomingDBClock, incomingTableName, ti, schemaSo
     -- Merge the incoming row
     if incomingVersionTombstone then
         -- Merge the tombstone row (no data)
-        SafeCall(dbi, Private.MergeKey, Private, dbi, incomingDBClock, incomingTableName, ti, incomingKey, nil, importedVersion)
+        SafeCall(dbi, self.MergeKey, self, dbi, incomingDBClock, incomingTableName, ti, incomingKey, nil, importedVersion)
     else
         -- Import the row data
-        local importedRowData = Private:ImportRowData(dbi, schemaSorted, incomingData)
+        local importedRowData = self:ImportRowData(dbi, schemaSorted, incomingData)
         if importedRowData then
             -- Merge the row data
-            SafeCall(dbi, Private.MergeKey, Private, dbi, incomingDBClock, incomingTableName, ti, incomingKey, importedRowData, importedVersion)
+            SafeCall(dbi, self.MergeKey, self, dbi, incomingDBClock, incomingTableName, ti, incomingKey, importedRowData, importedVersion)
         end
     end
 end
@@ -2484,18 +2484,18 @@ end
 --- @param sender string The sender of the message.
 function Private:OnCommReceived(prefix, encoded, channel, sender)
     -- Ignore messages from self
-    if sender == Private.playerName then
+    if sender == self.playerName then
         return
     end
 
     -- Get the database instance for this prefix
-    local db = Private.prefixes[prefix]
+    local db = self.prefixes[prefix]
     if not db then
         Error("received message for unknown prefix '%s' from channel '%s' sender '%s'", tostring(prefix), tostring(channel), tostring(sender))
         return
     end
 
-    local dbi = Private.databases[db]
+    local dbi = self.databases[db]
     if not dbi then
         Error("received message for unregistered database prefix '%s' from channel '%s' sender '%s'", tostring(prefix), tostring(channel), tostring(sender))
         return
@@ -2561,7 +2561,7 @@ function Private:OnCommReceived(prefix, encoded, channel, sender)
     -- Create a timer to process this message after 200 milliseconds
     bucket[message.peer] = C_Timer.NewTimer(0.2, function()
         -- Process the message
-        Private:DispatchMessage(message)
+        self:DispatchMessage(message)
 
         -- Clean up
         bucket[message.peer] = nil
@@ -2577,17 +2577,17 @@ end
 --- @param message LibP2PDB.Message
 function Private:DispatchMessage(message)
     if message.type == CommMessageType.PeerDiscoveryRequest then
-        Private:PeerDiscoveryRequestHandler(message)
+        self:PeerDiscoveryRequestHandler(message)
     elseif message.type == CommMessageType.PeerDiscoveryResponse then
-        Private:PeerDiscoveryResponseHandler(message)
+        self:PeerDiscoveryResponseHandler(message)
     elseif message.type == CommMessageType.DigestRequest then
-        Private:DigestRequestHandler(message)
+        self:DigestRequestHandler(message)
     elseif message.type == CommMessageType.DigestResponse then
-        Private:DigestResponseHandler(message)
+        self:DigestResponseHandler(message)
     elseif message.type == CommMessageType.RowsRequest then
-        Private:RowsRequestHandler(message)
+        self:RowsRequestHandler(message)
     elseif message.type == CommMessageType.RowsResponse then
-        Private:RowsResponseHandler(message)
+        self:RowsResponseHandler(message)
     else
         Error("received unknown message type %d from '%s' on channel '%s'", message.type, message.sender, message.channel)
     end
@@ -2604,16 +2604,16 @@ function Private:PeerDiscoveryRequestHandler(message)
     -- Record the peer
     local peerID = message.peer
     local peerClock = message.data --- @type LibP2PDB.Clock
-    Private:RecordPeer(dbi, peerID, sender, peerClock)
+    self:RecordPeer(dbi, peerID, sender, peerClock)
 
     -- Send peer discovery response
     Spam("sending peer discovery response to '%s'", tostring(sender))
     local obj = {
         type = CommMessageType.PeerDiscoveryResponse,
-        peer = Private.peerId,
+        peer = self.peerId,
         data = dbi.clock, --- @type LibP2PDB.Clock
     }
-    Private:Send(dbi, obj, "WHISPER", sender, CommPriority.Low)
+    self:Send(dbi, obj, "WHISPER", sender, CommPriority.Low)
 end
 
 --- Handler for peer discovery response messages.
@@ -2633,7 +2633,7 @@ function Private:PeerDiscoveryResponseHandler(message)
     -- Record the peer
     local peerID = message.peer
     local clock = message.data --- @type LibP2PDB.Clock
-    Private:RecordPeer(dbi, peerID, sender, clock)
+    self:RecordPeer(dbi, peerID, sender, clock)
 end
 
 --- Handler for digest request messages.
@@ -2669,10 +2669,10 @@ function Private:DigestRequestHandler(message)
     Spam("sending digest response to '%s'", tostring(sender))
     local obj = {
         type = CommMessageType.DigestResponse,
-        peer = Private.peerId,
+        peer = self.peerId,
         data = databaseDigest,
     }
-    Private:Send(dbi, obj, "WHISPER", sender, CommPriority.Normal)
+    self:Send(dbi, obj, "WHISPER", sender, CommPriority.Normal)
 end
 
 --- Handler for digest response messages.
@@ -2695,7 +2695,7 @@ function Private:DigestResponseHandler(message)
             local filter = dbi.filter.Import(tableDigest)
             if filter then
                 -- Export each row the peer is missing
-                local schemaSorted = Private:GetTableSchema(ti, true) --- @type LibP2PDB.TableSchemaSorted?
+                local schemaSorted = self:GetTableSchema(ti, true) --- @type LibP2PDB.TableSchemaSorted?
                 local rowsArray = {}                                  --- @type LibP2PDB.RowState[]
                 local rowsIndex = 1
                 local rows = ti.rows
@@ -2704,7 +2704,7 @@ function Private:DigestResponseHandler(message)
                     -- entry so we can detect both missing and outdated rows.
                     if not filter:Contains(key .. row.version.clock) then
                         -- Export the row state
-                        rowsArray[rowsIndex] = Private:ExportRow(key, rows[key], schemaSorted)
+                        rowsArray[rowsIndex] = self:ExportRow(key, rows[key], schemaSorted)
                         rowsIndex = rowsIndex + 1
                     end
                 end
@@ -2732,10 +2732,10 @@ function Private:DigestResponseHandler(message)
     Spam("sending rows response to '%s'", tostring(sender))
     local obj = {
         type = CommMessageType.RowsResponse,
-        peer = Private.peerId,
+        peer = self.peerId,
         data = { dbi.version, dbi.clock, tablesArray }, --- @type LibP2PDB.DBState
     }
-    Private:Send(dbi, obj, "WHISPER", sender, CommPriority.Normal)
+    self:Send(dbi, obj, "WHISPER", sender, CommPriority.Normal)
 end
 
 --- Handler for rows request messages.
@@ -2757,7 +2757,7 @@ function Private:RowsRequestHandler(message)
         if ti then
             -- Get sorted schema for the table (if any)
             --- @type LibP2PDB.TableSchemaSorted?
-            local schemaSorted = Private:GetTableSchema(ti, true)
+            local schemaSorted = self:GetTableSchema(ti, true)
 
             -- Export each requested row
             local rowsArray = {}
@@ -2765,7 +2765,7 @@ function Private:RowsRequestHandler(message)
             for _, key in ipairs(keys or {}) do
                 local row = ti.rows[key]
                 if row then
-                    rowsArray[rowsIndex] = Private:ExportRow(key, row, schemaSorted)
+                    rowsArray[rowsIndex] = self:ExportRow(key, row, schemaSorted)
                     rowsIndex = rowsIndex + 1
                 end
             end
@@ -2793,10 +2793,10 @@ function Private:RowsRequestHandler(message)
     Spam("sending rows response to '%s'", tostring(sender))
     local obj = {
         type = CommMessageType.RowsResponse,
-        peer = Private.peerId,
+        peer = self.peerId,
         data = { dbi.version, dbi.clock, tablesArray }, --- @type LibP2PDB.DBState
     }
-    Private:Send(dbi, obj, "WHISPER", sender, CommPriority.Normal)
+    self:Send(dbi, obj, "WHISPER", sender, CommPriority.Normal)
 end
 
 --- Handler for rows response messages.
@@ -2810,7 +2810,7 @@ function Private:RowsResponseHandler(message)
 
     -- Import the database state we received
     local databaseState = message.data --- @type LibP2PDB.DBState
-    Private:ImportDatabase(dbi, databaseState)
+    self:ImportDatabase(dbi, databaseState)
 end
 
 --- OnUpdate handler called periodically to handle time-based events.
@@ -2855,11 +2855,11 @@ function Private:RecordPeer(dbi, peerID, peerName, peerClock)
     if not dbi.neighbors.highest or peerID > dbi.neighbors.highest then
         dbi.neighbors.highest = peerID
     end
-    if peerID < Private.peerId then
+    if peerID < self.peerId then
         if not dbi.neighbors.previous or peerID > dbi.neighbors.previous then
             dbi.neighbors.previous = peerID
         end
-    elseif peerID > Private.peerId then
+    elseif peerID > self.peerId then
         if not dbi.neighbors.next or peerID < dbi.neighbors.next then
             dbi.neighbors.next = peerID
         end
