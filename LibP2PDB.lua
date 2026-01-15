@@ -1462,7 +1462,7 @@ end
 --- Broadcast a specific row immediately to all peers.
 --- Validates the key type against the table definition.
 --- @param db LibP2PDB.DBHandle Database handle.
---- @param tableName LibP2PDB.TableName Name of the table to broadcast from.
+--- @param tableName LibP2PDB.TableName? Name of the table to broadcast from, or nil to broadcast from all tables that contain the key.
 --- @param key LibP2PDB.TableKey Primary key value for the row (must match table's keyType).
 --- @return boolean success Returns true on success, false otherwise.
 function LibP2PDB:BroadcastNow(db, tableName, key)
@@ -2696,7 +2696,7 @@ function Private:DigestResponseHandler(message)
             if filter then
                 -- Export each row the peer is missing
                 local schemaSorted = self:GetTableSchema(ti, true) --- @type LibP2PDB.TableSchemaSorted?
-                local rowsArray = {}                                  --- @type LibP2PDB.RowState[]
+                local rowsArray = {}                               --- @type LibP2PDB.RowState[]
                 local rowsIndex = 1
                 local rows = ti.rows
                 for key, row in pairs(rows) do
@@ -2948,6 +2948,14 @@ if DEBUG and TESTING then
                 assert(false, msg or "first argument must be a string or table")
             end
         end,
+        ContainsKey = function(table, key, msg)
+            assert(IsTable(table), msg or "first argument is not a table")
+            assert(table[key] ~= nil, msg or format("table does not contain key '%s'", tostring(key)))
+        end,
+        DoesNotContainKey = function(table, key, msg)
+            assert(IsTable(table), msg or "first argument is not a table")
+            assert(table[key] == nil, msg or format("table contains key '%s'", tostring(key)))
+        end,
         Throws = function(fn, msg) assert(pcall(fn) == false, msg or "function did not throw") end,
         DoesNotThrow = function(fn, msg)
             local s, r = pcall(fn)
@@ -2966,6 +2974,55 @@ if DEBUG and TESTING then
             LAST_ERROR = nil
         end,
     }
+
+    --- Creates a new private instance of the LibP2PDB library for a given player.
+    --- @param playerName string Name of the player.
+    --- @param playerGUID string GUID of the player.
+    --- @return table instance The created private instance.
+    local function MakePrivateInstance(playerName, playerGUID)
+        local peerID = strsub(playerGUID, 8) -- skip "Player-" prefix
+        local instance = {
+            playerName = playerName,
+            playerGUID = playerGUID,
+            peerId = peerID,
+            prefixes = setmetatable({}, { __mode = "v" }),
+            databases = setmetatable({}, { __mode = "k" }),
+            frame = CreateFrame("Frame", "LibP2PDB_" .. peerID),
+        }
+        instance.frame:SetScript("OnUpdate", function(self)
+            for _, dbi in pairs(instance.databases) do
+                instance:OnUpdate(dbi)
+            end
+        end)
+        for k, v in pairs(Private) do
+            if type(v) == "function" then
+                instance[k] = v
+            end
+        end
+        return instance
+    end
+
+    --- Executes a function within the context of a given private instance.
+    --- @param instance table Private instance.
+    --- @param func function Function to execute within the private scope.
+    local function PrivateScope(instance, func)
+        local originalPrivate = Private
+        Private = instance
+        local result = { func() }
+        Private = originalPrivate
+        return unpack(result)
+    end
+
+    --- Executes a function with a specified verbosity level.
+    --- @param level integer Verbosity level to set.
+    --- @param func function Function to execute within the verbosity scope.
+    local function VerbosityScope(level, func)
+        local originalVerbosity = VERBOSITY
+        VERBOSITY = level
+        local result = { func() }
+        VERBOSITY = originalVerbosity
+        return unpack(result)
+    end
 
     --- @diagnostic disable: param-type-mismatch, assign-type-mismatch, missing-fields
     local UnitTests = {
@@ -5222,6 +5279,395 @@ if DEBUG and TESTING then
     }
     --- @diagnostic enable: param-type-mismatch, assign-type-mismatch, missing-fields
 
+    local fakeChannels = {
+        GUILD = {},
+        RAID = {},
+        PARTY = {},
+        YELL = {},
+        WHISPER = {},
+    }
+
+    --- Simulates ticking multiple private instances, processing their outgoing messages and OnUpdate handlers.
+    --- @param ... table List of private instances to tick.
+    local function TickPrivateInstances(...)
+        local instances = { ... }
+        local orderedChannels = { "GUILD", "RAID", "PARTY", "YELL", "WHISPER" }
+
+        -- Process messages until there are no more to process
+        local moreMessagesToProcess = true
+        while moreMessagesToProcess do
+            -- Take a copy of outgoing messages to process, since processing may generate new messages
+            local messages = DeepCopy(fakeChannels)
+            for channel in pairs(fakeChannels) do
+                fakeChannels[channel] = {}
+            end
+
+            -- Process outgoing messages from each instance
+            for _, channel in ipairs(orderedChannels) do
+                for _, instance in ipairs(instances) do
+                    for _, msg in ipairs(messages[channel] or {}) do
+                        if channel ~= "WHISPER" or msg.target == instance.playerName then
+                            local originalPrivateInstance = Private
+                            Private = instance
+                            instance:OnCommReceived(msg.prefix, msg.text, msg.distribution, msg.sender)
+                            Private = originalPrivateInstance
+                        end
+                    end
+                end
+            end
+
+            -- Process OnUpdate for each instance
+            for _, instance in ipairs(instances) do
+                if instance.frame then
+                    local onUpdateHandler = instance.frame:GetScript("OnUpdate")
+                    if onUpdateHandler then
+                        onUpdateHandler(instance.frame)
+                    end
+                end
+            end
+
+            -- Check if there are more messages to process
+            moreMessagesToProcess = false
+            for _, channel in ipairs(orderedChannels) do
+                if #fakeChannels[channel] > 0 then
+                    moreMessagesToProcess = true
+                    break
+                end
+            end
+        end
+    end
+
+    local NetworkTests = {
+        DiscoverPeers = function()
+            local peerA = MakePrivateInstance("PlayerA", "Player-0001-00000001")
+            local peerB = MakePrivateInstance("PlayerB", "Player-0001-00000002")
+            local peerC = MakePrivateInstance("PlayerC", "Player-0001-00000003")
+
+            local dbA = PrivateScope(peerA, function() return LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" }) end)
+            local dbB = PrivateScope(peerB, function() return LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" }) end)
+            local dbC = PrivateScope(peerC, function() return LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" }) end)
+
+            PrivateScope(peerA, function() LibP2PDB:NewTable(dbA, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } }) end)
+            PrivateScope(peerB, function() LibP2PDB:NewTable(dbB, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } }) end)
+            PrivateScope(peerC, function() LibP2PDB:NewTable(dbC, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } }) end)
+
+            PrivateScope(peerA, function() LibP2PDB:InsertKey(dbA, "Users", 1, { name = "Alice", age = 30 }) end)
+            PrivateScope(peerB, function() LibP2PDB:InsertKey(dbB, "Users", 2, { name = "Bob", age = 25 }) end)
+            PrivateScope(peerC, function() LibP2PDB:InsertKey(dbC, "Users", 3, { name = "Charlie", age = 28 }) end)
+
+            -- This should make peer A broadcast a peer discovery request
+            -- Peer B and C should receive it and respond back to A with a peer discovery response
+            -- After that, peer A should know about B and C, but B and C should only know about A
+            VerbosityScope(0, function() -- suppress debug output for this test
+                PrivateScope(peerA, function() LibP2PDB:DiscoverPeers(dbA) end)
+                TickPrivateInstances(peerA, peerB, peerC)
+            end)
+
+            -- Check that peer A knows about peers B and C
+            local peersA = peerA.databases[dbA].peers
+            Assert.ContainsKey(peersA, peerB.peerId)
+            Assert.AreEqual(peersA[peerB.peerId].clock, 1)
+            Assert.AreEqual(peersA[peerB.peerId].name, "PlayerB")
+            Assert.IsNumber(peersA[peerB.peerId].lastSeen)
+            Assert.ContainsKey(peersA, peerC.peerId)
+            Assert.AreEqual(peersA[peerC.peerId].clock, 1)
+            Assert.AreEqual(peersA[peerC.peerId].name, "PlayerC")
+            Assert.IsNumber(peersA[peerC.peerId].lastSeen)
+
+            -- Check that peer B knows about peer A but not C
+            local peersB = peerB.databases[dbB].peers
+            Assert.ContainsKey(peersB, peerA.peerId)
+            Assert.AreEqual(peersB[peerA.peerId].clock, 1)
+            Assert.AreEqual(peersB[peerA.peerId].name, "PlayerA")
+            Assert.IsNumber(peersB[peerA.peerId].lastSeen)
+            Assert.DoesNotContainKey(peersB, peerC.peerId)
+
+            -- Check that peer C knows about peer A but not B
+            local peersC = peerC.databases[dbC].peers
+            Assert.ContainsKey(peersC, peerA.peerId)
+            Assert.AreEqual(peersC[peerA.peerId].clock, 1)
+            Assert.AreEqual(peersC[peerA.peerId].name, "PlayerA")
+            Assert.IsNumber(peersC[peerA.peerId].lastSeen)
+            Assert.DoesNotContainKey(peersC, peerB.peerId)
+        end,
+
+        SyncNow = function()
+            local peerA = MakePrivateInstance("PlayerA", "Player-0001-00000001")
+            local peerB = MakePrivateInstance("PlayerB", "Player-0001-00000002")
+            local peerC = MakePrivateInstance("PlayerC", "Player-0001-00000003")
+
+            local dbA = PrivateScope(peerA, function()
+                local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+                LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+                LibP2PDB:InsertKey(db, "Users", 1, { name = "Alice", age = 30 })
+                return db
+            end)
+            local dbB = PrivateScope(peerB, function()
+                local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+                LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+                LibP2PDB:InsertKey(db, "Users", 2, { name = "Bob", age = 25 })
+                return db
+            end)
+            local dbC = PrivateScope(peerC, function()
+                local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+                LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+                LibP2PDB:InsertKey(db, "Users", 3, { name = "Charlie", age = 28 })
+                return db
+            end)
+
+            -- Make all peers discover each other
+            VerbosityScope(0, function() -- suppress debug output for this test
+                PrivateScope(peerA, function() LibP2PDB:DiscoverPeers(dbA) end)
+                PrivateScope(peerB, function() LibP2PDB:DiscoverPeers(dbB) end)
+                PrivateScope(peerC, function() LibP2PDB:DiscoverPeers(dbC) end)
+                TickPrivateInstances(peerA, peerB, peerC)
+            end)
+
+            -- Make all peers sync their databases
+            VerbosityScope(0, function() -- suppress debug output for this test
+                PrivateScope(peerA, function() LibP2PDB:SyncNow(dbA) end)
+                PrivateScope(peerB, function() LibP2PDB:SyncNow(dbB) end)
+                PrivateScope(peerC, function() LibP2PDB:SyncNow(dbC) end)
+                TickPrivateInstances(peerA, peerB, peerC)
+            end)
+
+            -- Verify that all peers have all data
+            PrivateScope(peerA, function()
+                Assert.AreEqual(LibP2PDB:GetKey(dbA, "Users", 1), { name = "Alice", age = 30 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbA, "Users", 2), { name = "Bob", age = 25 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbA, "Users", 3), { name = "Charlie", age = 28 })
+            end)
+            PrivateScope(peerB, function()
+                Assert.AreEqual(LibP2PDB:GetKey(dbB, "Users", 1), { name = "Alice", age = 30 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbB, "Users", 2), { name = "Bob", age = 25 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbB, "Users", 3), { name = "Charlie", age = 28 })
+            end)
+            PrivateScope(peerC, function()
+                Assert.AreEqual(LibP2PDB:GetKey(dbC, "Users", 1), { name = "Alice", age = 30 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbC, "Users", 2), { name = "Bob", age = 25 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbC, "Users", 3), { name = "Charlie", age = 28 })
+            end)
+        end,
+
+        RequestNow = function()
+
+        end,
+
+        SendNow = function()
+            local peerA = MakePrivateInstance("PlayerA", "Player-0001-00000001")
+            local peerB = MakePrivateInstance("PlayerB", "Player-0001-00000002")
+
+            local dbA = PrivateScope(peerA, function()
+                local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+                LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+                LibP2PDB:NewTable(db, { name = "Messages", keyType = "number", schema = { content = "string" } })
+                LibP2PDB:NewTable(db, { name = "Logs", keyType = "number", schema = { entry = "string" } })
+                LibP2PDB:InsertKey(db, "Users", 1, { name = "Alice", age = 30 })
+                LibP2PDB:InsertKey(db, "Messages", 1, { content = "Hello from A" })
+                LibP2PDB:InsertKey(db, "Logs", 1, { entry = "Log entry A1" })
+                return db
+            end)
+            local dbB = PrivateScope(peerB, function()
+                local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+                LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+                LibP2PDB:NewTable(db, { name = "Messages", keyType = "number", schema = { content = "string" } })
+                LibP2PDB:NewTable(db, { name = "Logs", keyType = "number", schema = { entry = "string" } })
+                LibP2PDB:InsertKey(db, "Users", 2, { name = "Bob", age = 25 })
+                LibP2PDB:InsertKey(db, "Messages", 2, { content = "Hello from B" })
+                LibP2PDB:InsertKey(db, "Logs", 2, { entry = "Log entry B1" })
+                return db
+            end)
+
+            -- Make both peers discover each other
+            VerbosityScope(0, function() -- suppress debug output for this test
+                PrivateScope(peerA, function() LibP2PDB:DiscoverPeers(dbA) end)
+                PrivateScope(peerB, function() LibP2PDB:DiscoverPeers(dbB) end)
+                TickPrivateInstances(peerA, peerB)
+            end)
+
+            -- Make each peer send one key of one table to the other
+            VerbosityScope(0, function() -- suppress debug output for this test
+                PrivateScope(peerA, function() LibP2PDB:SendNow(dbA, "Users", 1, peerB.playerName) end)
+                PrivateScope(peerB, function() LibP2PDB:SendNow(dbB, "Users", 2, peerA.playerName) end)
+                TickPrivateInstances(peerA, peerB)
+            end)
+
+            -- Verify that each peer received the other's key
+            PrivateScope(peerA, function()
+                Assert.AreEqual(LibP2PDB:GetKey(dbA, "Users", 1), { name = "Alice", age = 30 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbA, "Users", 2), { name = "Bob", age = 25 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbA, "Messages", 1), { content = "Hello from A" })
+                Assert.IsNil(LibP2PDB:GetKey(dbA, "Messages", 2))
+                Assert.AreEqual(LibP2PDB:GetKey(dbA, "Logs", 1), { entry = "Log entry A1" })
+                Assert.IsNil(LibP2PDB:GetKey(dbA, "Logs", 2))
+            end)
+            PrivateScope(peerB, function()
+                Assert.AreEqual(LibP2PDB:GetKey(dbB, "Users", 1), { name = "Alice", age = 30 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbB, "Users", 2), { name = "Bob", age = 25 })
+                Assert.IsNil(LibP2PDB:GetKey(dbB, "Messages", 1))
+                Assert.AreEqual(LibP2PDB:GetKey(dbB, "Messages", 2), { content = "Hello from B" })
+                Assert.IsNil(LibP2PDB:GetKey(dbB, "Logs", 1))
+                Assert.AreEqual(LibP2PDB:GetKey(dbB, "Logs", 2), { entry = "Log entry B1" })
+            end)
+
+            -- Make each peer send one key matching any table to the other
+            VerbosityScope(0, function() -- suppress debug output for this test
+                PrivateScope(peerA, function() LibP2PDB:SendNow(dbA, nil, 1, peerB.playerName) end)
+                PrivateScope(peerB, function() LibP2PDB:SendNow(dbB, nil, 2, peerA.playerName) end)
+                TickPrivateInstances(peerA, peerB)
+            end)
+
+            -- Verify that each peer received the other's key from all tables
+            PrivateScope(peerA, function()
+                Assert.AreEqual(LibP2PDB:GetKey(dbA, "Users", 1), { name = "Alice", age = 30 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbA, "Users", 2), { name = "Bob", age = 25 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbA, "Messages", 1), { content = "Hello from A" })
+                Assert.AreEqual(LibP2PDB:GetKey(dbA, "Messages", 2), { content = "Hello from B" })
+                Assert.AreEqual(LibP2PDB:GetKey(dbA, "Logs", 1), { entry = "Log entry A1" })
+                Assert.AreEqual(LibP2PDB:GetKey(dbA, "Logs", 2), { entry = "Log entry B1" })
+            end)
+            PrivateScope(peerB, function()
+                Assert.AreEqual(LibP2PDB:GetKey(dbB, "Users", 1), { name = "Alice", age = 30 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbB, "Users", 2), { name = "Bob", age = 25 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbB, "Messages", 1), { content = "Hello from A" })
+                Assert.AreEqual(LibP2PDB:GetKey(dbB, "Messages", 2), { content = "Hello from B" })
+                Assert.AreEqual(LibP2PDB:GetKey(dbB, "Logs", 1), { entry = "Log entry A1" })
+                Assert.AreEqual(LibP2PDB:GetKey(dbB, "Logs", 2), { entry = "Log entry B1" })
+            end)
+        end,
+
+        BroadcastNow = function()
+            local peerA = MakePrivateInstance("PlayerA", "Player-0001-00000001")
+            local peerB = MakePrivateInstance("PlayerB", "Player-0001-00000002")
+            local peerC = MakePrivateInstance("PlayerC", "Player-0001-00000003")
+
+            local dbA = PrivateScope(peerA, function()
+                local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+                LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+                LibP2PDB:NewTable(db, { name = "Messages", keyType = "number", schema = { content = "string" } })
+                LibP2PDB:NewTable(db, { name = "Logs", keyType = "number", schema = { entry = "string" } })
+                LibP2PDB:InsertKey(db, "Users", 1, { name = "Alice", age = 30 })
+                LibP2PDB:InsertKey(db, "Messages", 1, { content = "Hello from A" })
+                LibP2PDB:InsertKey(db, "Logs", 1, { entry = "Log entry A1" })
+                return db
+            end)
+            local dbB = PrivateScope(peerB, function()
+                local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+                LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+                LibP2PDB:NewTable(db, { name = "Messages", keyType = "number", schema = { content = "string" } })
+                LibP2PDB:NewTable(db, { name = "Logs", keyType = "number", schema = { entry = "string" } })
+                LibP2PDB:InsertKey(db, "Users", 2, { name = "Bob", age = 25 })
+                LibP2PDB:InsertKey(db, "Messages", 2, { content = "Hello from B" })
+                LibP2PDB:InsertKey(db, "Logs", 2, { entry = "Log entry B1" })
+                return db
+            end)
+            local dbC = PrivateScope(peerC, function()
+                local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+                LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+                LibP2PDB:NewTable(db, { name = "Messages", keyType = "number", schema = { content = "string" } })
+                LibP2PDB:NewTable(db, { name = "Logs", keyType = "number", schema = { entry = "string" } })
+                LibP2PDB:InsertKey(db, "Users", 3, { name = "Charlie", age = 28 })
+                LibP2PDB:InsertKey(db, "Messages", 3, { content = "Hello from C" })
+                LibP2PDB:InsertKey(db, "Logs", 3, { entry = "Log entry C1" })
+                return db
+            end)
+
+            -- Make all peers discover each other
+            VerbosityScope(0, function() -- suppress debug output for this test
+                PrivateScope(peerA, function() LibP2PDB:DiscoverPeers(dbA) end)
+                PrivateScope(peerB, function() LibP2PDB:DiscoverPeers(dbB) end)
+                PrivateScope(peerC, function() LibP2PDB:DiscoverPeers(dbC) end)
+                TickPrivateInstances(peerA, peerB, peerC)
+            end)
+
+            -- Make each peer broadcast one key of one table to all peers
+            VerbosityScope(0, function() -- suppress debug output for this test
+                PrivateScope(peerA, function() LibP2PDB:BroadcastNow(dbA, "Users", 1) end)
+                PrivateScope(peerB, function() LibP2PDB:BroadcastNow(dbB, "Users", 2) end)
+                PrivateScope(peerC, function() LibP2PDB:BroadcastNow(dbC, "Users", 3) end)
+                TickPrivateInstances(peerA, peerB, peerC)
+            end)
+
+            -- Verify that each peer received the other's key
+            PrivateScope(peerA, function()
+                Assert.AreEqual(LibP2PDB:GetKey(dbA, "Users", 1), { name = "Alice", age = 30 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbA, "Users", 2), { name = "Bob", age = 25 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbA, "Users", 3), { name = "Charlie", age = 28 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbA, "Messages", 1), { content = "Hello from A" })
+                Assert.IsNil(LibP2PDB:GetKey(dbA, "Messages", 2))
+                Assert.IsNil(LibP2PDB:GetKey(dbA, "Messages", 3))
+                Assert.AreEqual(LibP2PDB:GetKey(dbA, "Logs", 1), { entry = "Log entry A1" })
+                Assert.IsNil(LibP2PDB:GetKey(dbA, "Logs", 2))
+                Assert.IsNil(LibP2PDB:GetKey(dbA, "Logs", 3))
+            end)
+            PrivateScope(peerB, function()
+                Assert.AreEqual(LibP2PDB:GetKey(dbB, "Users", 1), { name = "Alice", age = 30 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbB, "Users", 2), { name = "Bob", age = 25 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbB, "Users", 3), { name = "Charlie", age = 28 })
+                Assert.IsNil(LibP2PDB:GetKey(dbB, "Messages", 1))
+                Assert.AreEqual(LibP2PDB:GetKey(dbB, "Messages", 2), { content = "Hello from B" })
+                Assert.IsNil(LibP2PDB:GetKey(dbB, "Messages", 3))
+                Assert.IsNil(LibP2PDB:GetKey(dbB, "Logs", 1))
+                Assert.AreEqual(LibP2PDB:GetKey(dbB, "Logs", 2), { entry = "Log entry B1" })
+                Assert.IsNil(LibP2PDB:GetKey(dbB, "Logs", 3))
+            end)
+            PrivateScope(peerC, function()
+                Assert.AreEqual(LibP2PDB:GetKey(dbC, "Users", 1), { name = "Alice", age = 30 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbC, "Users", 2), { name = "Bob", age = 25 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbC, "Users", 3), { name = "Charlie", age = 28 })
+                Assert.IsNil(LibP2PDB:GetKey(dbC, "Messages", 1))
+                Assert.IsNil(LibP2PDB:GetKey(dbC, "Messages", 2))
+                Assert.AreEqual(LibP2PDB:GetKey(dbC, "Messages", 3), { content = "Hello from C" })
+                Assert.IsNil(LibP2PDB:GetKey(dbC, "Logs", 1))
+                Assert.IsNil(LibP2PDB:GetKey(dbC, "Logs", 2))
+                Assert.AreEqual(LibP2PDB:GetKey(dbC, "Logs", 3), { entry = "Log entry C1" })
+            end)
+
+            -- Make each peer broadcast one key matching any table to all peers
+            VerbosityScope(0, function() -- suppress debug output for this test
+                PrivateScope(peerA, function() LibP2PDB:BroadcastNow(dbA, nil, 1) end)
+                PrivateScope(peerB, function() LibP2PDB:BroadcastNow(dbB, nil, 2) end)
+                PrivateScope(peerC, function() LibP2PDB:BroadcastNow(dbC, nil, 3) end)
+                TickPrivateInstances(peerA, peerB, peerC)
+            end)
+
+            -- Verify that each peer received the other's key from all tables
+            PrivateScope(peerA, function()
+                Assert.AreEqual(LibP2PDB:GetKey(dbA, "Users", 1), { name = "Alice", age = 30 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbA, "Users", 2), { name = "Bob", age = 25 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbA, "Users", 3), { name = "Charlie", age = 28 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbA, "Messages", 1), { content = "Hello from A" })
+                Assert.AreEqual(LibP2PDB:GetKey(dbA, "Messages", 2), { content = "Hello from B" })
+                Assert.AreEqual(LibP2PDB:GetKey(dbA, "Messages", 3), { content = "Hello from C" })
+                Assert.AreEqual(LibP2PDB:GetKey(dbA, "Logs", 1), { entry = "Log entry A1" })
+                Assert.AreEqual(LibP2PDB:GetKey(dbA, "Logs", 2), { entry = "Log entry B1" })
+                Assert.AreEqual(LibP2PDB:GetKey(dbA, "Logs", 3), { entry = "Log entry C1" })
+            end)
+            PrivateScope(peerB, function()
+                Assert.AreEqual(LibP2PDB:GetKey(dbB, "Users", 1), { name = "Alice", age = 30 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbB, "Users", 2), { name = "Bob", age = 25 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbB, "Users", 3), { name = "Charlie", age = 28 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbB, "Messages", 1), { content = "Hello from A" })
+                Assert.AreEqual(LibP2PDB:GetKey(dbB, "Messages", 2), { content = "Hello from B" })
+                Assert.AreEqual(LibP2PDB:GetKey(dbB, "Messages", 3), { content = "Hello from C" })
+                Assert.AreEqual(LibP2PDB:GetKey(dbB, "Logs", 1), { entry = "Log entry A1" })
+                Assert.AreEqual(LibP2PDB:GetKey(dbB, "Logs", 2), { entry = "Log entry B1" })
+                Assert.AreEqual(LibP2PDB:GetKey(dbB, "Logs", 3), { entry = "Log entry C1" })
+            end)
+            PrivateScope(peerC, function()
+                Assert.AreEqual(LibP2PDB:GetKey(dbC, "Users", 1), { name = "Alice", age = 30 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbC, "Users", 2), { name = "Bob", age = 25 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbC, "Users", 3), { name = "Charlie", age = 28 })
+                Assert.AreEqual(LibP2PDB:GetKey(dbC, "Messages", 1), { content = "Hello from A" })
+                Assert.AreEqual(LibP2PDB:GetKey(dbC, "Messages", 2), { content = "Hello from B" })
+                Assert.AreEqual(LibP2PDB:GetKey(dbC, "Messages", 3), { content = "Hello from C" })
+                Assert.AreEqual(LibP2PDB:GetKey(dbC, "Logs", 1), { entry = "Log entry A1" })
+                Assert.AreEqual(LibP2PDB:GetKey(dbC, "Logs", 2), { entry = "Log entry B1" })
+                Assert.AreEqual(LibP2PDB:GetKey(dbC, "Logs", 3), { entry = "Log entry C1" })
+            end)
+        end,
+    }
+
     local function FormatTime(ms)
         if ms < 1.0 then
             return format("%.2fus", ms * 1000)
@@ -5685,43 +6131,81 @@ if DEBUG and TESTING then
         end,
     }
 
-    local function RunTest(testFn)
-        -- Store current prefixes and databases
-        local originalPrefixes = Private.prefixes
-        local originalDatabases = Private.databases
-
-        -- Reset prefixes and databases for isolated test environment
-        Private.prefixes = setmetatable({}, { __mode = "v" })
-        Private.databases = setmetatable({}, { __mode = "k" })
-
-        -- Run the test
-        testFn()
-
-        -- Restore previous prefixes and databases
-        Private.prefixes = originalPrefixes
-        Private.databases = originalDatabases
-    end
-
     local GREEN_CHECKMARK = "|TInterface\\RaidFrame\\ReadyCheck-Ready:16|t"
 
     local function RunTests()
         Print("Running LibP2PDB tests...")
+
+        -- Run unit tests
+        local count = 0
         local startTime = debugprofilestop()
-        for _, v in pairs(UnitTests) do
-            RunTest(v)
+        for _, testFn in pairs(UnitTests) do
+            PrivateScope(MakePrivateInstance("PlayerABC", "Player-1234-C0DE60D5"), testFn)
+            count = count + 1
         end
+
+        -- Run network tests
+        for _, testFn in pairs(NetworkTests) do
+            -- Override C_Timer.NewTimer to call the callback immediately
+            local _NewTimer = C_Timer.NewTimer
+            ---@diagnostic disable-next-line: duplicate-set-field
+            C_Timer.NewTimer = function(delay, callback)
+                ---@diagnostic disable-next-line: missing-parameter
+                callback()
+                return nil
+            end
+
+            -- Override C_ChatInfo.IsAddonMessagePrefixRegistered to check our fake registered prefixes
+            local _IsAddonMessagePrefixRegistered = C_ChatInfo.IsAddonMessagePrefixRegistered
+            ---@diagnostic disable-next-line: duplicate-set-field
+            C_ChatInfo.IsAddonMessagePrefixRegistered = function(prefix)
+                return Private.registeredPrefixes and Private.registeredPrefixes[prefix] ~= nil
+            end
+
+            -- Override AceComm with fake implementation
+            local _AceComm = AceComm
+            AceComm = {
+                RegisterComm = function(self, prefix)
+                    self.registeredPrefixes = self.registeredPrefixes or {}
+                    self.registeredPrefixes[prefix] = true
+                end,
+                SendCommMessage = function(self, prefix, text, distribution, target, prio)
+                    assert(self.registeredPrefixes and self.registeredPrefixes[prefix], "Prefix not registered: " .. tostring(prefix))
+                    tinsert(fakeChannels[distribution], {
+                        prefix = prefix,
+                        text = text,
+                        distribution = distribution,
+                        sender = Private.playerName,
+                        target = target,
+                        prio = prio,
+                    })
+                end,
+            }
+
+            -- Run the test
+            testFn()
+
+            -- Restore overridden functions
+            AceComm = _AceComm
+            C_ChatInfo.IsAddonMessagePrefixRegistered = _IsAddonMessagePrefixRegistered
+            C_Timer.NewTimer = _NewTimer
+            count = count + 1
+        end
+
         local endTime = debugprofilestop()
-        Print("%sAll tests passed in %.2f ms.", GREEN_CHECKMARK, endTime - startTime)
+        Print("%sAll %d tests passed in %.2f ms.", GREEN_CHECKMARK, count, endTime - startTime)
     end
 
     local function RunPerformanceTests()
         Print("Running LibP2PDB performance tests...")
+        local count = 0
         local startTime = debugprofilestop()
-        for _, v in pairs(PerformanceTests) do
-            RunTest(v)
+        for _, testFn in pairs(PerformanceTests) do
+            PrivateScope(MakePrivateInstance("PlayerABC", "Player-1234-C0DE60D5"), testFn)
+            count = count + 1
         end
         local endTime = debugprofilestop()
-        Print("%sAll performance tests completed in %.2f ms.", GREEN_CHECKMARK, endTime - startTime)
+        Print("%sAll %d performance tests completed in %.2f ms.", GREEN_CHECKMARK, count, endTime - startTime)
     end
 
     -- Register slash commands
@@ -5729,12 +6213,12 @@ if DEBUG and TESTING then
     SlashCmdList["LIBP2PDB"] = function(arg)
         if arg == "runtests" then
             RunTests()
-        elseif arg == "runperformancetests" then
+        elseif arg == "runperftests" then
             RunPerformanceTests()
         else
             Print("LibP2PDB Slash Commands:")
             Print("  /libp2pdb runtests - Run all unit tests.")
-            Print("  /libp2pdb runperformancetests - Run all performance tests.")
+            Print("  /libp2pdb runperftests - Run all performance tests.")
         end
     end
 end
