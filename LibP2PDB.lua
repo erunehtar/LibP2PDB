@@ -644,7 +644,7 @@ end
 --- @field ImportTable fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance, dbClock: LibP2PDB.Clock, tableName: LibP2PDB.TableName, rowStateMap: LibP2PDB.RowStateMap)
 --- @field ImportRow fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance, dbClock: LibP2PDB.Clock, tableName: LibP2PDB.TableName, ti: LibP2PDB.TableInstance, key: LibP2PDB.TableKey, rowState: LibP2PDB.RowState)
 --- @field ImportRowData fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance, schemaSorted: LibP2PDB.TableSchemaSorted?, rowDataState: LibP2PDB.RowDataState): LibP2PDB.RowData?
---- @field IsIncomingNewer fun(self: LibP2PDB.Private, existing: LibP2PDB.RowVersion, incoming: LibP2PDB.RowVersion): boolean
+--- @field CompareVersion fun(self: LibP2PDB.Private, existing: LibP2PDB.RowVersion, incoming: LibP2PDB.RowVersion): boolean
 --- @field GetNeighbors fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance): table<LibP2PDB.PeerID, boolean>
 --- @field Send fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance, data: any, channel: string, target: string?, priority: LibP2PDB.CommPriority)
 --- @field Broadcast fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance, data: any, channels: string[]?, priority: LibP2PDB.CommPriority)
@@ -1528,7 +1528,7 @@ function LibP2PDB:RequestKey(db, tableName, key, target)
     for _, tableName in ipairs(tableNames) do
         local ti = dbi.tables[tableName]
         assert(ti, "table '" .. tableName .. "' is not defined in the database")
-        databaseRequest[tableName] = { key } --- @type LibP2PDB.TableRequest
+        databaseRequest[tableName] = { [key] = 0 } --- @type LibP2PDB.TableRequest
     end
 
     -- Send the row request to the target player
@@ -1945,7 +1945,8 @@ end
 --- @field [2] any Exported bucket hash set of the table.
 
 --- @alias LibP2PDB.DBRequest table<LibP2PDB.TableName, LibP2PDB.TableRequest> Database request mapping table names to their table requests.
---- @alias LibP2PDB.TableRequest LibP2PDB.TableKey[] Array of keys requested from the table.
+--- @alias LibP2PDB.TableRequest table<LibP2PDB.TableKey, LibP2PDB.RowRequest> Table of row requests mapped by their keys.
+--- @alias LibP2PDB.RowRequest LibP2PDB.Clock Current Lamport clock for the row.
 
 --- Set a row in a table, overwriting any existing row.
 --- @param dbi LibP2PDB.DBInstance Database instance.
@@ -2019,14 +2020,8 @@ end
 function Private:MergeKey(dbi, dbClock, tableName, ti, key, rowData, rowVersion)
     -- Determine if the incoming row is newer
     local existingRow = ti.rows[key]
-    if existingRow then
-        if existingRow.version.clock > rowVersion.clock then
-            return true -- existing row is newer, skip
-        elseif existingRow.version.clock == rowVersion.clock then
-            if existingRow.version.peer >= rowVersion.peer then
-                return true -- existing row is same or newer, skip
-            end
-        end
+    if existingRow and priv:CompareVersion(rowVersion, existingRow.version) then
+        return true -- existing row is newer, skip
     end
 
     -- Run custom validation if provided
@@ -2415,20 +2410,25 @@ function Private:ImportRowData(dbi, schemaSorted, rowDataState)
     return importedRowData
 end
 
---- Determine if incoming version metadata is newer than existing version metadata.
---- @param existing LibP2PDB.RowVersion Existing version metadata.
---- @param incoming LibP2PDB.RowVersion Incoming version metadata.
---- @return boolean isNewer Returns true if incoming is newer, false otherwise.
-function Private:IsIncomingNewer(existing, incoming)
-    if not existing then
+--- Compare two version for ordering.
+--- Returns true if version a precedes version b (is older), false otherwise.
+--- @param a LibP2PDB.RowVersion? First version metadata, or nil.
+--- @param b LibP2PDB.RowVersion? Second version metadata, or nil.
+--- @return boolean result True if a is strictly less than (precedes) b, false otherwise (if the two are equivalent or b precedes a)
+function Private:CompareVersion(a, b)
+    if a == nil and b == nil then
+        return false
+    elseif a == nil then
         return true
+    elseif b == nil then
+        return false
     end
-    if incoming.clock > existing.clock then
+    if a.clock < b.clock then
         return true
-    elseif incoming.clock < existing.clock then
+    elseif a.clock > b.clock then
         return false
     else
-        return incoming.peer > existing.peer -- clocks are equal, use peer ID as tiebreaker
+        return a.peer < b.peer
     end
 end
 
@@ -2813,7 +2813,7 @@ function Private:DigestResponseHandler(message)
             local theirBucketHashSet = (tableDigest[2] ~= NIL_MARKER) and LibBucketHashSet.Import(tableDigest[2]) or nil
 
             -- Make our own bucket hash set to compare later
-            local ourBucketHashSet = theirBucketHashSet and LibBucketHashSet.New(64) or nil
+            local ourBucketHashSet = theirBucketHashSet and LibBucketHashSet.New(theirBucketHashSet.numBuckets) or nil
             local keyBucketIndex = theirBucketHashSet and {} or nil
 
             -- Iterate each row in our table
@@ -2839,12 +2839,13 @@ function Private:DigestResponseHandler(message)
             if theirBucketHashSet and ourBucketHashSet and keyBucketIndex then
                 -- Iterate each row in our table again to find outdated rows
                 local tableRequest = {} --- @type LibP2PDB.TableRequest
-                local tableRequestIndex = 1
-                for key in pairs(ti.rows) do
-                    local bucketIndex = keyBucketIndex[key]
-                    if ourBucketHashSet.buckets[bucketIndex] ~= theirBucketHashSet.buckets[bucketIndex] then
-                        tableRequest[tableRequestIndex] = key
-                        tableRequestIndex = tableRequestIndex + 1
+                for key, row in pairs(ti.rows) do
+                    -- Do not request keys we know they are missing
+                    if not rowStateMap[key] then
+                        local bucketIndex = keyBucketIndex[key]
+                        if ourBucketHashSet.buckets[bucketIndex] ~= theirBucketHashSet.buckets[bucketIndex] then
+                            tableRequest[key] = row.version.clock
+                        end
                     end
                 end
 
@@ -2888,6 +2889,7 @@ end
 function Private:RowsRequestHandler(message)
     local dbi = message.dbi
     local sender = message.sender
+    local peerID = message.peer
     Spam("received rows request from '%s'", tostring(sender))
 
     -- Export requested rows for each table
@@ -2898,9 +2900,9 @@ function Private:RowsRequestHandler(message)
         if ti then
             -- Export each requested row
             local rowStateMap = {} --- @type LibP2PDB.RowStateMap
-            for _, key in ipairs(tableRequest or {}) do
+            for key, clock in pairs(tableRequest or {}) do
                 local row = ti.rows[key]
-                if row then
+                if row and priv:CompareVersion({ clock = clock, peer = peerID }, row.version) then
                     rowStateMap[key] = self:ExportRow(row, ti.schemaSorted)
                 end
             end
@@ -6225,7 +6227,7 @@ if DEBUG and TESTING then
         return db
     end
 
-    local sampleCount = 1000
+    local sampleCount = 1024
 
     local PerformanceTests = {
         InsertKey = function()
