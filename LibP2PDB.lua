@@ -27,10 +27,7 @@ local LibBucketedHashSet = LibStub("LibBucketedHashSet")
 -- Optional Dependencies
 ------------------------------------------------------------------------------------------------------------------------
 
-local LibBloomFilter = LibStub("LibBloomFilter", true)
 local LibPatternedBloomFilter = LibStub("LibPatternedBloomFilter", true)
-local LibCuckooFilter = LibStub("LibCuckooFilter", true)
-local AceSerializer = LibStub("AceSerializer-3.0", true)
 local LibSerialize = LibStub("LibSerialize", true)
 local LibDeflate = LibStub("LibDeflate", true)
 
@@ -708,8 +705,8 @@ local priv = Private.New(assert(UnitName("player"), "unable to get player name")
 --- @field prefix LibP2PDB.DBPrefix Unique communication prefix for the database (max 16 chars).
 --- @field version LibP2PDB.DBVersion? Optional database version number (default: 1).
 --- @field onError LibP2PDB.DBOnErrorCallback? Optional callback function(errMsg, stack) invoked on errors.
---- @field filter LibP2PDB.Filter? Optional custom filter digest generation (default: LibPatternedBloomFilter, LibBloomFilter, or LibCuckooFilter if available).
---- @field serializer LibP2PDB.Serializer? Optional custom serializer for encoding/decoding data (default: LibSerialize or AceSerializer if available).
+--- @field filter LibP2PDB.Filter? Optional custom filter digest generation (default: LibPatternedBloomFilter if available).
+--- @field serializer LibP2PDB.Serializer? Optional custom serializer for encoding/decoding data (default: LibSerialize if available).
 --- @field compressor LibP2PDB.Compressor? Optional custom compressor for compressing/decompressing data (default: LibDeflate if available).
 --- @field encoder LibP2PDB.Encoder? Optional custom encoder for encoding/decoding data for chat channels and print (default: LibDeflate if available).
 --- @field channels string[]? Optional array of custom channels to use for broadcasts, in addition to default channels (GUILD, RAID, PARTY, YELL).
@@ -810,63 +807,18 @@ function LibP2PDB:NewDatabase(desc)
     -- Setup default filter if none provided
     if not dbi.filter then
         if LibPatternedBloomFilter then
+            --- @class LibP2PDB.DefaultFilter : LibP2PDB.Filter
             dbi.filter = {
                 New = function(capacity, seed)
                     return LibPatternedBloomFilter.New(capacity, seed, 0.01)
                 end,
-                Insert = function(self, value)
-                    self:Insert(value)
-                    return true
-                end,
-                Contains = function(self, value)
-                    return self:Contains(value)
-                end,
-                Export = function(self)
-                    return self:Export()
-                end,
-                Import = function(state)
-                    return LibPatternedBloomFilter.Import(state)
-                end,
-            }
-        elseif LibBloomFilter then
-            dbi.filter = {
-                New = function(capacity, seed)
-                    return LibBloomFilter.New(capacity, seed, 0.01)
-                end,
-                Insert = function(self, value)
-                    self:Insert(value)
-                    return true
-                end,
-                Contains = function(self, value)
-                    return self:Contains(value)
-                end,
-                Export = function(self)
-                    return self:Export()
-                end,
-                Import = function(state)
-                    return LibBloomFilter.Import(state)
-                end,
-            }
-        elseif LibCuckooFilter then
-            dbi.filter = {
-                New = function(capacity, seed)
-                    return LibCuckooFilter.New(capacity * 2, seed)
-                end,
-                Insert = function(self, value)
-                    return self:Insert(value)
-                end,
-                Contains = function(self, value)
-                    return self:Contains(value)
-                end,
-                Export = function(self)
-                    return self:Export()
-                end,
-                Import = function(state)
-                    return LibCuckooFilter.Import(state)
-                end,
+                Insert = LibPatternedBloomFilter.Insert,
+                Contains = LibPatternedBloomFilter.Contains,
+                Export = LibPatternedBloomFilter.Export,
+                Import = LibPatternedBloomFilter.Import,
             }
         else
-            error("filter required but none found; provide custom filter via desc.filter")
+            error("LibP2PDB requires a filter implementation; load LibPatternedBloomFilter or provide custom filter via desc.filter")
         end
     end
 
@@ -883,6 +835,7 @@ function LibP2PDB:NewDatabase(desc)
     -- Setup default serializer if none provided
     if not dbi.serializer then
         if LibSerialize then
+            --- @class LibP2PDB.DefaultSerializer : LibP2PDB.Serializer
             dbi.serializer = {
                 Serialize = function(self, data)
                     return LibSerialize:Serialize(data)
@@ -900,26 +853,8 @@ function LibP2PDB:NewDatabase(desc)
                     end
                 end,
             }
-        elseif AceSerializer then
-            dbi.serializer = {
-                Serialize = function(self, data)
-                    return AceSerializer:Serialize(data)
-                end,
-                Deserialize = function(self, str)
-                    local success, data = AceSerializer:Deserialize(str)
-                    if success then
-                        return data
-                    else
-                        if type(data) == "string" then
-                            ReportError(dbi, "AceSerializer failed to deserialize data: %s", data)
-                        else
-                            ReportError(dbi, "AceSerializer failed to deserialize data")
-                        end
-                    end
-                end,
-            }
         else
-            error("serializer required but none found; provide custom serializer via desc.serializer")
+            error("LibP2PDB requires a serializer implementation; load LibSerialize or provide custom serializer via desc.serializer")
         end
     end
 
@@ -934,6 +869,7 @@ function LibP2PDB:NewDatabase(desc)
     -- Setup default compressor if none provided
     if not dbi.compressor then
         if LibDeflate then
+            --- @class LibP2PDB.DefaultCompressor : LibP2PDB.Compressor
             dbi.compressor = {
                 Compress = function(self, str)
                     return (LibDeflate:CompressDeflate(str))
@@ -948,7 +884,7 @@ function LibP2PDB:NewDatabase(desc)
                 end,
             }
         else
-            error("compressor required but none found; provide custom compressor via desc.compressor")
+            error("LibP2PDB requires a compressor implementation; load LibDeflate or provide custom compressor via desc.compressor")
         end
     end
 
@@ -963,7 +899,7 @@ function LibP2PDB:NewDatabase(desc)
     -- Setup default encoder if none provided
     if not dbi.encoder then
         if LibDeflate then
-            --- @class LibP2PDB.LibDeflateEncoder : LibP2PDB.Encoder
+            --- @class LibP2PDB.DefaultEncoder : LibP2PDB.Encoder
             --- @field channelCodec LibDeflate.Codec? Custom codec instance
             dbi.encoder = {
                 -- Create custom codec that rejects \000 (NULL), \010 (LF), and \013 (CR).
@@ -994,7 +930,7 @@ function LibP2PDB:NewDatabase(desc)
                 end,
             }
         else
-            error("encoder required but none found; provide custom encoder via desc.encoder")
+            error("LibP2PDB requires an encoder implementation; load LibDeflate or provide custom encoder via desc.encoder")
         end
     end
 
@@ -3346,7 +3282,10 @@ if DEBUG and TESTING then
                     prefix = "LibP2PDBTests2",
                     version = 2,
                     onError = function(dbi, msg) end,
-                    serializer = AceSerializer,
+                    serializer = {
+                        Serialize = function(self, obj) return obj end,
+                        Deserialize = function(self, str) return str end
+                    },
                     filter = (function()
                         local TestFilter = {}
                         TestFilter.New = function(numItems)
@@ -6355,204 +6294,6 @@ if DEBUG and TESTING then
             Print("Database (%d rows) encoded for channel: %s (%s)", sampleCount, FormatSize(#encodedForChannel), FormatSize(#encodedForChannel / sampleCount, true))
             local encodedForPrint = LibP2PDB:EncodeForPrint(db, compressed)
             Print("Database (%d rows) encoded for print: %s (%s)", sampleCount, FormatSize(#encodedForPrint), FormatSize(#encodedForPrint / sampleCount, true))
-        end,
-
-        LibBloomFilter = function()
-            if LibBloomFilter then
-                local db = GenerateDatabase(sampleCount)
-                local filter = nil
-                ProfileReset("BloomFilter.New")
-                for i = 1, sampleCount do
-                    ProfileBegin("BloomFilter.New")
-                    filter = LibBloomFilter.New(sampleCount)
-                    ProfileEnd("BloomFilter.New")
-                end
-                PrintProfileMarker("BloomFilter.New", "BloomFilter.New")
-
-                ProfileReset("BloomFilter:Insert")
-                local tables = LibP2PDB:ListTables(db)
-                for _, tableName in ipairs(tables) do
-                    local keys = LibP2PDB:ListKeys(db, tableName)
-                    for _, key in ipairs(keys) do
-                        ProfileBegin("BloomFilter:Insert")
-                        filter:Insert(key)
-                        ProfileEnd("BloomFilter:Insert")
-                    end
-                end
-                PrintProfileMarker("BloomFilter:Insert", "BloomFilter:Insert")
-
-                ProfileReset("BloomFilter:Contains")
-                ProfileBegin("BloomFilter:Contains")
-                for _, tableName in ipairs(tables) do
-                    local keys = LibP2PDB:ListKeys(db, tableName)
-                    for _, key in ipairs(keys) do
-                        ProfileBegin("BloomFilter:Contains")
-                        filter:Contains(key)
-                        ProfileEnd("BloomFilter:Contains")
-                    end
-                end
-                PrintProfileMarker("BloomFilter:Contains", "BloomFilter:Contains")
-
-                ProfileReset("BloomFilter:Export")
-                local state = nil
-                for i = 1, sampleCount do
-                    ProfileBegin("BloomFilter:Export")
-                    state = filter:Export()
-                    ProfileEnd("BloomFilter:Export")
-                end
-                PrintProfileMarker("BloomFilter:Export", "BloomFilter:Export")
-
-                ProfileReset("BloomFilter.Import")
-                for i = 1, sampleCount do
-                    ProfileBegin("BloomFilter.Import")
-                    LibBloomFilter.Import(state)
-                    ProfileEnd("BloomFilter.Import")
-                end
-                PrintProfileMarker("BloomFilter.Import", "BloomFilter.Import")
-
-                Print("BloomFilter estimated FPR: %.4f%%", filter:EstimateFalsePositiveRate(sampleCount) * 100.0)
-
-                local serialized = LibP2PDB:Serialize(db, state)
-                Print("BloomFilter (%d keys) serialized: %s (%s)", sampleCount, FormatSize(#serialized), FormatSize(#serialized / sampleCount, true))
-                local compressed = LibP2PDB:Compress(db, serialized)
-                Print("BloomFilter (%d keys) compressed: %s (%s)", sampleCount, FormatSize(#compressed), FormatSize(#compressed / sampleCount, true))
-                local encodedForChannel = LibP2PDB:EncodeForChannel(db, compressed)
-                Print("BloomFilter (%d keys) encoded for channel: %s (%s)", sampleCount, FormatSize(#encodedForChannel), FormatSize(#encodedForChannel / sampleCount, true))
-                local encodedForPrint = LibP2PDB:EncodeForPrint(db, compressed)
-                Print("BloomFilter (%d keys) encoded for print: %s (%s)", sampleCount, FormatSize(#encodedForPrint), FormatSize(#encodedForPrint / sampleCount, true))
-            end
-        end,
-
-        PatternedBloomFilter = function()
-            if LibPatternedBloomFilter then
-                local db = GenerateDatabase(sampleCount)
-                local filter = nil
-                ProfileReset("PatternedBloomFilter.New")
-                for i = 1, sampleCount do
-                    ProfileBegin("PatternedBloomFilter.New")
-                    filter = LibPatternedBloomFilter.New(sampleCount)
-                    ProfileEnd("PatternedBloomFilter.New")
-                end
-                PrintProfileMarker("PatternedBloomFilter.New", "PatternedBloomFilter.New")
-
-                ProfileReset("PatternedBloomFilter:Insert")
-                local tables = LibP2PDB:ListTables(db)
-                for _, tableName in ipairs(tables) do
-                    local keys = LibP2PDB:ListKeys(db, tableName)
-                    for _, key in ipairs(keys) do
-                        ProfileBegin("PatternedBloomFilter:Insert")
-                        filter:Insert(key)
-                        ProfileEnd("PatternedBloomFilter:Insert")
-                    end
-                end
-                PrintProfileMarker("PatternedBloomFilter:Insert", "PatternedBloomFilter:Insert")
-
-                ProfileReset("PatternedBloomFilter:Contains")
-                ProfileBegin("PatternedBloomFilter:Contains")
-                for _, tableName in ipairs(tables) do
-                    local keys = LibP2PDB:ListKeys(db, tableName)
-                    for _, key in ipairs(keys) do
-                        ProfileBegin("PatternedBloomFilter:Contains")
-                        filter:Contains(key)
-                        ProfileEnd("PatternedBloomFilter:Contains")
-                    end
-                end
-                PrintProfileMarker("PatternedBloomFilter:Contains", "PatternedBloomFilter:Contains")
-
-                local state = nil
-                ProfileReset("PatternedBloomFilter:Export")
-                for i = 1, sampleCount do
-                    ProfileBegin("PatternedBloomFilter:Export")
-                    state = filter:Export()
-                    ProfileEnd("PatternedBloomFilter:Export")
-                end
-                PrintProfileMarker("PatternedBloomFilter:Export", "PatternedBloomFilter:Export")
-
-                ProfileReset("PatternedBloomFilter.Import")
-                for i = 1, sampleCount do
-                    ProfileBegin("PatternedBloomFilter.Import")
-                    LibPatternedBloomFilter.Import(state)
-                    ProfileEnd("PatternedBloomFilter.Import")
-                end
-                PrintProfileMarker("PatternedBloomFilter.Import", "PatternedBloomFilter.Import")
-
-                Print("PatternedBloomFilter estimated FPR: %.4f%%", filter:EstimateFalsePositiveRate(sampleCount) * 100.0)
-
-                local serialized = LibP2PDB:Serialize(db, state)
-                Print("PatternedBloomFilter (%d keys) serialized: %s (%s)", sampleCount, FormatSize(#serialized), FormatSize(#serialized / sampleCount, true))
-                local compressed = LibP2PDB:Compress(db, serialized)
-                Print("PatternedBloomFilter (%d keys) compressed: %s (%s)", sampleCount, FormatSize(#compressed), FormatSize(#compressed / sampleCount, true))
-                local encodedForChannel = LibP2PDB:EncodeForChannel(db, compressed)
-                Print("PatternedBloomFilter (%d keys) encoded for channel: %s (%s)", sampleCount, FormatSize(#encodedForChannel), FormatSize(#encodedForChannel / sampleCount, true))
-                local encodedForPrint = LibP2PDB:EncodeForPrint(db, compressed)
-                Print("PatternedBloomFilter (%d keys) encoded for print: %s (%s)", sampleCount, FormatSize(#encodedForPrint), FormatSize(#encodedForPrint / sampleCount, true))
-            end
-        end,
-
-        CuckooFilter = function()
-            if LibCuckooFilter then
-                local db = GenerateDatabase(sampleCount)
-                local filter = nil
-                ProfileReset("CuckooFilter.New")
-                for i = 1, sampleCount do
-                    ProfileBegin("CuckooFilter.New")
-                    filter = LibCuckooFilter.New(sampleCount * 2) -- Avoid high load factor
-                    ProfileEnd("CuckooFilter.New")
-                end
-                PrintProfileMarker("CuckooFilter.New", "CuckooFilter.New")
-
-                ProfileReset("CuckooFilter:Insert")
-                local tables = LibP2PDB:ListTables(db)
-                for _, tableName in ipairs(tables) do
-                    local keys = LibP2PDB:ListKeys(db, tableName)
-                    for _, key in ipairs(keys) do
-                        ProfileBegin("CuckooFilter:Insert")
-                        filter:Insert(key)
-                        ProfileEnd("CuckooFilter:Insert")
-                    end
-                end
-                PrintProfileMarker("CuckooFilter:Insert", "CuckooFilter:Insert")
-
-                ProfileReset("CuckooFilter:Contains")
-                ProfileBegin("CuckooFilter:Contains")
-                for _, tableName in ipairs(tables) do
-                    local keys = LibP2PDB:ListKeys(db, tableName)
-                    for _, key in ipairs(keys) do
-                        ProfileBegin("CuckooFilter:Contains")
-                        filter:Contains(key)
-                        ProfileEnd("CuckooFilter:Contains")
-                    end
-                end
-                PrintProfileMarker("CuckooFilter:Contains", "CuckooFilter:Contains")
-
-                local state = nil
-                ProfileReset("CuckooFilter:Export")
-                for i = 1, sampleCount do
-                    ProfileBegin("CuckooFilter:Export")
-                    state = filter:Export()
-                    ProfileEnd("CuckooFilter:Export")
-                end
-                PrintProfileMarker("CuckooFilter:Export", "CuckooFilter:Export")
-
-                ProfileReset("CuckooFilter.Import")
-                for i = 1, sampleCount do
-                    ProfileBegin("CuckooFilter.Import")
-                    LibCuckooFilter.Import(state)
-                    ProfileEnd("CuckooFilter.Import")
-                end
-                PrintProfileMarker("CuckooFilter.Import", "CuckooFilter.Import")
-
-                Print("CuckooFilter estimated FPR: %.4f%%", filter:EstimateFalsePositiveRate(sampleCount) * 100.0)
-
-                local serialized = LibP2PDB:Serialize(db, state)
-                Print("CuckooFilter (%d keys) serialized: %s (%s)", sampleCount, FormatSize(#serialized), FormatSize(#serialized / sampleCount, true))
-                local compressed = LibP2PDB:Compress(db, serialized)
-                Print("CuckooFilter (%d keys) compressed: %s (%s)", sampleCount, FormatSize(#compressed), FormatSize(#compressed / sampleCount, true))
-                local encodedForChannel = LibP2PDB:EncodeForChannel(db, compressed)
-                Print("CuckooFilter (%d keys) encoded for channel: %s (%s)", sampleCount, FormatSize(#encodedForChannel), FormatSize(#encodedForChannel / sampleCount, true))
-                local encodedForPrint = LibP2PDB:EncodeForPrint(db, compressed)
-                Print("CuckooFilter (%d keys) encoded for print: %s (%s)", sampleCount, FormatSize(#encodedForPrint), FormatSize(#encodedForPrint / sampleCount, true))
-            end
         end,
     }
 
