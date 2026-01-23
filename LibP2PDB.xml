@@ -1,4 +1,4 @@
 <Ui xmlns="http://www.blizzard.com/wow/ui/">
-	<Include file="LibBucketHashSet.lua" />
+	<Include file="LibBucketedHashSet.lua" />
 	<Include file="LibP2PDB.lua" />
 </Ui>

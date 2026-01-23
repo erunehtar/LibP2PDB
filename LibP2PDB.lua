@@ -13,7 +13,7 @@ if not LibP2PDB then return end -- no upgrade needed
 ------------------------------------------------------------------------------------------------------------------------
 
 local DEBUG = false   -- Set to true to enable debug output
-local VERBOSITY = 4   -- 0 = None, 1 = Errors, 2 = Warnings, 3 = Debug, 4 = Spam
+local VERBOSITY = 4   -- 0 = None, 1 = Errors, 2 = Warnings, 3 = Debug, 4 = Spam, 5 = Trace (detailed)
 local TESTING = false -- Set to true to enable internal tests
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -21,7 +21,7 @@ local TESTING = false -- Set to true to enable internal tests
 ------------------------------------------------------------------------------------------------------------------------
 
 local AceComm = LibStub("AceComm-3.0")
-local LibBucketHashSet = LibStub("LibBucketHashSet")
+local LibBucketedHashSet = LibStub("LibBucketedHashSet")
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Optional Dependencies
@@ -413,7 +413,7 @@ local function IsInterfaceOrNil(value, ...)
 end
 
 --- Compute the next power of two greater than or equal to the given value.
---- @param value number Input value.
+--- @param value integer Input value.
 local function NextPowerOfTwo(value)
     if value == 0 then
         return 1
@@ -640,8 +640,8 @@ end
 --- @field ExportDatabase fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance): LibP2PDB.DBState?
 --- @field ExportTable fun(self: LibP2PDB.Private, ti: LibP2PDB.TableInstance): LibP2PDB.RowStateMap?
 --- @field ExportRow fun(self: LibP2PDB.Private, row: LibP2PDB.TableRow, schemaSorted: LibP2PDB.TableSchemaSorted?): LibP2PDB.RowState
---- @field ImportDatabase fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance, state: LibP2PDB.DBState): boolean
---- @field ImportTable fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance, dbClock: LibP2PDB.Clock, tableName: LibP2PDB.TableName, rowStateMap: LibP2PDB.RowStateMap)
+--- @field ImportDatabase fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance, state: LibP2PDB.DBState, thread: thread?, maxTime: number?): boolean
+--- @field ImportTable fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance, dbClock: LibP2PDB.Clock, tableName: LibP2PDB.TableName, rowStateMap: LibP2PDB.RowStateMap, thread: thread?, maxTime: number?): boolean
 --- @field ImportRow fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance, dbClock: LibP2PDB.Clock, tableName: LibP2PDB.TableName, ti: LibP2PDB.TableInstance, key: LibP2PDB.TableKey, rowState: LibP2PDB.RowState)
 --- @field ImportRowData fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance, schemaSorted: LibP2PDB.TableSchemaSorted?, rowDataState: LibP2PDB.RowDataState): LibP2PDB.RowData?
 --- @field CompareVersion fun(self: LibP2PDB.Private, existing: LibP2PDB.RowVersion, incoming: LibP2PDB.RowVersion): boolean
@@ -1432,6 +1432,44 @@ function LibP2PDB:ImportDatabase(db, state)
     return priv:ImportDatabase(dbi, state)
 end
 
+--- @alias LibP2PDB.ImportCompleteCallback fun(success: boolean, duration: number) Callback function invoked when async import completes.
+
+--- Asynchronously import a database state from a compact table format.
+--- Merges the imported state with existing data based on version metadata.
+--- Validates incoming data against table definitions, skipping invalid entries.
+--- The import process yields periodically to avoid blocking the main thread.
+--- Calls onComplete callback when finished with success status and duration in seconds.
+--- @param db LibP2PDB.DBHandle Database handle.
+--- @param state LibP2PDB.DBState The database state to import.
+--- @param onComplete LibP2PDB.ImportCompleteCallback Callback function(success, duration) invoked when import completes.
+--- @param maxTime number? Optional maximum time in seconds to spend per processing slice (defaults to 0.01 seconds).
+function LibP2PDB:ImportDatabaseAsync(db, state, onComplete, maxTime)
+    assert(IsEmptyTable(db), "db must be an empty table")
+    assert(IsNonEmptyTable(state), "state must be a non-empty table")
+    assert(IsFunction(onComplete), "onComplete must be a function")
+    assert(IsNumberOrNil(maxTime), "maxTime must be a number if provided")
+
+    -- Validate db instance
+    local dbi = priv.databases[db]
+    assert(dbi, "db is not a recognized database handle")
+
+    -- Define the import workload
+    local workload = function(thread)
+        local startTime = GetTimePreciseSec()
+        local success = priv:ImportDatabase(dbi, state, thread, maxTime or 0.01)
+        SafeCall(dbi, onComplete, success, GetTimePreciseSec() - startTime)
+    end
+
+    -- Create and run the coroutine workload
+    local thread = coroutine.create(workload)
+    C_Timer.NewTicker(0, function(ticker)
+        local success = coroutine.resume(thread, thread)
+        if not success then
+            ticker:Cancel() -- Coroutine finished or errored
+        end
+    end)
+end
+
 ------------------------------------------------------------------------------------------------------------------------
 -- Public API: Sync / Gossip Controls
 ------------------------------------------------------------------------------------------------------------------------
@@ -1941,8 +1979,8 @@ end
 --- @alias LibP2PDB.DBDigest table<LibP2PDB.TableName, LibP2PDB.TableDigest> Database digest mapping table names to their table digests.
 
 --- @class LibP2PDB.TableDigest
---- @field [1] any Exported filter of the table.
---- @field [2] any Exported bucket hash set of the table.
+--- @field filter any Bloom filter representing the table's keys.
+--- @field summary any Summary of the table's keys, stored in a bucketed hash set.
 
 --- @alias LibP2PDB.DBRequest table<LibP2PDB.TableName, LibP2PDB.TableRequest> Database request mapping table names to their table requests.
 --- @alias LibP2PDB.TableRequest table<LibP2PDB.TableKey, LibP2PDB.RowRequest> Table of row requests mapped by their keys.
@@ -2234,8 +2272,10 @@ end
 --- Validates incoming data against table definitions, skipping invalid entries.
 --- @param dbi LibP2PDB.DBInstance Database instance.
 --- @param state LibP2PDB.DBState The database state to import.
+--- @param thread thread? Optional coroutine thread for yielding during long imports.
+--- @param maxTime number? Optional maximum time in seconds to spend importing before yielding.
 --- @return boolean success Returns true on success, false otherwise.
-function Private:ImportDatabase(dbi, state)
+function Private:ImportDatabase(dbi, state, thread, maxTime)
     -- Validate database state format
     if not IsNonEmptyTable(state) then
         ReportError(dbi, "invalid database state format")
@@ -2246,6 +2286,10 @@ function Private:ImportDatabase(dbi, state)
     local databaseVersion = state[1] --- @type LibP2PDB.DBVersion
     if not IsInteger(databaseVersion, 1) then
         ReportError(dbi, "invalid database version in state")
+        return false
+    end
+    if databaseVersion ~= dbi.version then
+        ReportError(dbi, "cannot import database version %d, expected %d", databaseVersion, dbi.version)
         return false
     end
 
@@ -2265,7 +2309,7 @@ function Private:ImportDatabase(dbi, state)
 
     -- Import each table (skipping invalid table entries)
     for tableName, rowStateMap in pairs(tableStateMap or {}) do
-        self:ImportTable(dbi, databaseClock, tableName, rowStateMap)
+        self:ImportTable(dbi, databaseClock, tableName, rowStateMap, thread, maxTime)
     end
 
     return true
@@ -2276,7 +2320,9 @@ end
 --- @param dbClock LibP2PDB.Clock Incoming database clock from the state.
 --- @param tableName LibP2PDB.TableName Name of the table.
 --- @param rowStateMap LibP2PDB.RowStateMap Row state map to import.
-function Private:ImportTable(dbi, dbClock, tableName, rowStateMap)
+--- @param thread thread? Optional coroutine thread for yielding during long imports.
+--- @param maxTime number? Optional maximum time in seconds to spend importing before yielding.
+function Private:ImportTable(dbi, dbClock, tableName, rowStateMap, thread, maxTime)
     -- Validate table state format
     if not IsNonEmptyTable(rowStateMap) then
         ReportError(dbi, "invalid table state format")
@@ -2291,8 +2337,16 @@ function Private:ImportTable(dbi, dbClock, tableName, rowStateMap)
     end
 
     -- Import each row (skipping invalid row entries)
+    local startTime = GetTimePreciseSec()
     for key, rowState in pairs(rowStateMap or {}) do
         self:ImportRow(dbi, dbClock, tableName, ti, key, rowState)
+        if thread then
+            local now = GetTimePreciseSec()
+            if now - startTime >= maxTime then
+                startTime = now
+                coroutine.yield()
+            end
+        end
     end
 end
 
@@ -2749,22 +2803,21 @@ function Private:DigestRequestHandler(message)
     local sender = message.sender
     Spam("received digest request from '%s'", sender)
 
-    -- Build filter for each table
+    -- Build filter and summary for each table
     local databaseDigest = {} --- @type LibP2PDB.DBDigest
     for tableName, ti in pairs(dbi.tables) do
         if ti.rowCount > 0 then
             local filter = dbi.filter.New(ti.rowCount, ti.seed)
-            local bucketHashSet = LibBucketHashSet.New(64)
+            local summary = LibBucketedHashSet.New(max(32, NextPowerOfTwo(ti.rowCount) / 32))
             ti.seed = ti.seed + 1 -- increment seed for next use
             for key, row in pairs(ti.rows) do
                 filter:Insert(key)
-                bucketHashSet:Insert(key, row.version.clock)
+                summary:Insert(key, row.version.clock)
             end
-            local tableDigest = { --- @type LibP2PDB.TableDigest
-                filter:Export(),
-                bucketHashSet:Export(),
+            databaseDigest[tableName] = { --- @type LibP2PDB.TableDigest
+                filter = filter:Export(),
+                summary = summary:Export(),
             }
-            databaseDigest[tableName] = tableDigest
         else
             databaseDigest[tableName] = {
                 NIL_MARKER,
@@ -2807,16 +2860,20 @@ function Private:DigestResponseHandler(message)
         local ti = dbi.tables[tableName]
         if ti then
             -- Reconstruct the filter, which is used to check what rows they are missing
-            local filter = (tableDigest[1] ~= NIL_MARKER) and dbi.filter.Import(tableDigest[1]) or nil
+            local filter = nil
+            if tableDigest.filter and tableDigest.filter ~= NIL_MARKER then
+                filter = dbi.filter.Import(tableDigest.filter)
+            end
 
-            -- Reconstruct the bucket hash set, which is used to check which rows we have are outdated
-            local theirBucketHashSet = (tableDigest[2] ~= NIL_MARKER) and LibBucketHashSet.Import(tableDigest[2]) or nil
+            -- Reconstruct the bucketed hash set, which is used to check which rows we have are outdated
+            local incomingSummary, summary, keyBucketIndexMap = nil, nil, nil
+            if tableDigest.summary and tableDigest.summary ~= NIL_MARKER then
+                incomingSummary = LibBucketedHashSet.Import(tableDigest.summary)
+                summary = LibBucketedHashSet.New(incomingSummary.numBuckets)
+                keyBucketIndexMap = {} --- @type table<LibP2PDB.TableKey, integer>
+            end
 
-            -- Make our own bucket hash set to compare later
-            local ourBucketHashSet = theirBucketHashSet and LibBucketHashSet.New(theirBucketHashSet.numBuckets) or nil
-            local keyBucketIndex = theirBucketHashSet and {} or nil
-
-            -- Iterate each row in our table
+            -- Find rows they are missing and record our bucket indices
             local rowStateMap = {} --- @type LibP2PDB.RowStateMap
             for key, row in pairs(ti.rows) do
                 -- Check if they are missing our row
@@ -2826,8 +2883,8 @@ function Private:DigestResponseHandler(message)
                 end
 
                 -- Record our bucket index for this key
-                if theirBucketHashSet and ourBucketHashSet and keyBucketIndex then
-                    keyBucketIndex[key] = ourBucketHashSet:Insert(key, row.version.clock)
+                if summary and keyBucketIndexMap then
+                    keyBucketIndexMap[key] = summary:Insert(key, row.version.clock)
                 end
             end
 
@@ -2836,14 +2893,16 @@ function Private:DigestResponseHandler(message)
                 tableStateMap[tableName] = rowStateMap
             end
 
-            if theirBucketHashSet and ourBucketHashSet and keyBucketIndex then
-                -- Iterate each row in our table again to find outdated rows
+            -- Find rows we have that are outdated
+            if incomingSummary and summary and keyBucketIndexMap then
+                -- Iterate each row in our table find outdated rows
                 local tableRequest = {} --- @type LibP2PDB.TableRequest
                 for key, row in pairs(ti.rows) do
                     -- Do not request keys we know they are missing
                     if not rowStateMap[key] then
-                        local bucketIndex = keyBucketIndex[key]
-                        if ourBucketHashSet.buckets[bucketIndex] ~= theirBucketHashSet.buckets[bucketIndex] then
+                        local bucketIndex = keyBucketIndexMap[key]
+                        if incomingSummary.buckets[bucketIndex] ~= summary.buckets[bucketIndex] then
+                            -- Their summary differs from ours for this key, request the row
                             tableRequest[key] = row.version.clock
                         end
                     end

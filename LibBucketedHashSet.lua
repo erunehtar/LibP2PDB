@@ -28,16 +28,15 @@
 -- It is essentially a partitioned anti‑entropy structure. Each bucket holds a combined
 -- hash of all inserted items, allowing for efficient divergence detection.
 
-local MAJOR, MINOR = "LibBucketHashSet", 1
+local MAJOR, MINOR = "LibBucketedHashSet", 1
 assert(LibStub, MAJOR .. " requires LibStub")
 
-local LibBucketHashSet = LibStub:NewLibrary(MAJOR, MINOR)
-if not LibBucketHashSet then return end -- no upgrade needed
+local LibBucketedHashSet = LibStub:NewLibrary(MAJOR, MINOR)
+if not LibBucketedHashSet then return end -- no upgrade needed
 
 -- Local lua references
 local tostring = tostring
 local bxor = bit.bxor
-local band = bit.band
 local strbyte = string.byte
 local select = select
 local setmetatable = setmetatable
@@ -62,7 +61,7 @@ local function FNV1a32(value, seed)
 end
 
 --- Computes the bucket index and combined hash for the given key and values.
---- @param self LibBucketHashSet The bucket hash set instance.
+--- @param self LibBucketedHashSet The bucket hash set instance.
 --- @param key string The key to include in the hash.
 --- @param ... any Additional values to include in the hash.
 local function Hash(self, key, ...)
@@ -78,28 +77,28 @@ local function Hash(self, key, ...)
     return bucketIndex, hash % UINT32_MODULO
 end
 
---- @class LibBucketHashSet
---- @field New fun(numBuckets: integer, seed: integer?): LibBucketHashSet
---- @field Insert fun(self: LibBucketHashSet, key: any, ...: any): integer
---- @field Matches fun(self: LibBucketHashSet, key: any, ...: any): boolean
---- @field Clear fun(self: LibBucketHashSet)
---- @field Export fun(self: LibBucketHashSet): LibBucketHashSet.State
---- @field Import fun(state: LibBucketHashSet.State): LibBucketHashSet
+--- @class LibBucketedHashSet
+--- @field New fun(numBuckets: integer, seed: integer?): LibBucketedHashSet
+--- @field Insert fun(self: LibBucketedHashSet, key: any, ...: any): integer
+--- @field Matches fun(self: LibBucketedHashSet, key: any, ...: any): boolean
+--- @field Clear fun(self: LibBucketedHashSet)
+--- @field Export fun(self: LibBucketedHashSet): LibBucketedHashSet.State
+--- @field Import fun(state: LibBucketedHashSet.State): LibBucketedHashSet
 --- @field seed integer
 --- @field numBuckets integer
 --- @field buckets integer[]
 
---- @class LibBucketHashSet.State
+--- @class LibBucketedHashSet.State
 --- @field numBuckets integer
 --- @field buckets integer[]
 
-LibBucketHashSet.__index = LibBucketHashSet
+LibBucketedHashSet.__index = LibBucketedHashSet
 
 --- Creates a new bucket hash set instance.
 --- @param numBuckets integer Number of buckets to use.
 --- @param seed integer? Seed for the hashing function (default: 0).
---- @return LibBucketHashSet instance The new bucket hash set instance.
-function LibBucketHashSet.New(numBuckets, seed)
+--- @return LibBucketedHashSet instance The new bucket hash set instance.
+function LibBucketedHashSet.New(numBuckets, seed)
     assert(numBuckets > 0, "numBuckets must be greater than 0")
     seed = seed or 0
     assert(type(seed) == "number", "seed must be a number")
@@ -112,7 +111,7 @@ function LibBucketHashSet.New(numBuckets, seed)
         seed = seed or 0,
         numBuckets = numBuckets,
         buckets = buckets,
-    }, LibBucketHashSet)
+    }, LibBucketedHashSet)
 end
 
 --- Inserts a combined hash of the key and values into the bucket hash set.
@@ -120,7 +119,7 @@ end
 --- @param key any The key to include in the hash.
 --- @param ... any Additional values to include in the hash.
 --- @return integer bucketIndex The index of the bucket where the hash was inserted.
-function LibBucketHashSet:Insert(key, ...)
+function LibBucketedHashSet:Insert(key, ...)
     local bucketIndex, hash = Hash(self, key, ...)
     self.buckets[bucketIndex] = bxor(self.buckets[bucketIndex], hash) % UINT32_MODULO
     return bucketIndex
@@ -131,21 +130,21 @@ end
 --- @param key any The key to include in the hash.
 --- @param ... any Additional values to include in the hash.
 --- @return boolean result True if the combined hash differs from the bucket's stored hash, false otherwise.
-function LibBucketHashSet:Matches(key, ...)
+function LibBucketedHashSet:Matches(key, ...)
     local bucketIndex, hash = Hash(self, key, ...)
     return self.buckets[bucketIndex] == hash
 end
 
 --- Clears all entries in the bucket hash set.
-function LibBucketHashSet:Clear()
+function LibBucketedHashSet:Clear()
     for i = 1, self.numBuckets do
         self.buckets[i] = 0
     end
 end
 
 --- Exports the current state of the bucket hash set.
---- @return LibBucketHashSet.State state The exported state.
-function LibBucketHashSet:Export()
+--- @return LibBucketedHashSet.State state The exported state.
+function LibBucketedHashSet:Export()
     return {
         self.seed,
         self.numBuckets,
@@ -154,9 +153,9 @@ function LibBucketHashSet:Export()
 end
 
 --- Imports a new bucket hash set from an exported state.
---- @param state LibBucketHashSet.State The bucket hash set state to import.
---- @return LibBucketHashSet instance The imported bucket hash set instance.
-function LibBucketHashSet.Import(state)
+--- @param state LibBucketedHashSet.State The bucket hash set state to import.
+--- @return LibBucketedHashSet instance The imported bucket hash set instance.
+function LibBucketedHashSet.Import(state)
     assert(type(state) == "table", "state must be a table")
     assert(type(state[1]) == "number", "invalid seed in state")
     assert(state[2] > 0, "invalid numBuckets in state")
@@ -165,18 +164,18 @@ function LibBucketHashSet.Import(state)
         seed = state[1],
         numBuckets = state[2],
         buckets = state[3],
-    }, LibBucketHashSet)
+    }, LibBucketedHashSet)
 end
 
 --[[ -- Uncomment to run tests when loading this file
 
-local function RunLibBucketHashSetTests()
-    print("=== LibBucketHashSet Tests ===")
+local function RunLibBucketedHashSetTests()
+    print("=== LibBucketedHashSet Tests ===")
 
     do
         -- Test 1: Identical sets remain identical
-        local setA = LibBucketHashSet.New(4)
-        local setB = LibBucketHashSet.New(4)
+        local setA = LibBucketedHashSet.New(4)
+        local setB = LibBucketedHashSet.New(4)
         setA:Insert("foo", 123)
         setB:Insert("foo", 123)
         for i = 1, 4 do
@@ -187,8 +186,8 @@ local function RunLibBucketHashSetTests()
 
     do
         -- Test 2: Divergence after different insert
-        local setA = LibBucketHashSet.New(4)
-        local setB = LibBucketHashSet.New(4)
+        local setA = LibBucketedHashSet.New(4)
+        local setB = LibBucketedHashSet.New(4)
         setA:Insert("foo", 123)
         setB:Insert("foo", 123)
         setB:Insert("bar", 456)
@@ -205,8 +204,8 @@ local function RunLibBucketHashSetTests()
 
     do
         -- Test 3: Convergence after same sequence
-        local setA = LibBucketHashSet.New(4)
-        local setB = LibBucketHashSet.New(4)
+        local setA = LibBucketedHashSet.New(4)
+        local setB = LibBucketedHashSet.New(4)
         setA:Insert("foo", 123)
         setB:Insert("foo", 123)
         setB:Insert("bar", 456)
@@ -219,8 +218,8 @@ local function RunLibBucketHashSetTests()
 
     do
         -- Test 4: Clear resets to identical
-        local setA = LibBucketHashSet.New(4)
-        local setB = LibBucketHashSet.New(4)
+        local setA = LibBucketedHashSet.New(4)
+        local setB = LibBucketedHashSet.New(4)
         setA:Insert("foo", 123)
         setB:Insert("foo", 123)
         setA:Clear()
@@ -233,10 +232,10 @@ local function RunLibBucketHashSetTests()
 
     do
         -- Test 5: Export and Import preserves state
-        local setA = LibBucketHashSet.New(4)
+        local setA = LibBucketedHashSet.New(4)
         setA:Insert("baz", 789)
         local state = setA:Export()
-        local setC = LibBucketHashSet.Import(state)
+        local setC = LibBucketedHashSet.Import(state)
         for i = 1, 4 do
             assert(setA.buckets[i] == setC.buckets[i], "Test 5 Failed: Import should preserve bucket state")
         end
@@ -245,7 +244,7 @@ local function RunLibBucketHashSetTests()
 
     do
         -- Test 6: Matches returns true for matching input
-        local set = LibBucketHashSet.New(4)
+        local set = LibBucketedHashSet.New(4)
         set:Insert("foo", 123)
         assert(set:Matches("foo", 123), "Test 6 Failed: Matches should return true for consistent input")
         print("Test 6 PASSED: Matches returns true for consistent input")
@@ -253,7 +252,7 @@ local function RunLibBucketHashSetTests()
 
     do
         -- Test 7: Matches returns false for divergent input
-        local set = LibBucketHashSet.New(4)
+        local set = LibBucketedHashSet.New(4)
         set:Insert("foo", 123)
         assert(not set:Matches("foo", 999), "Test 7 Failed: Matches should return false for divergent input")
         print("Test 7 PASSED: Matches returns false for divergent input")
@@ -261,8 +260,8 @@ local function RunLibBucketHashSetTests()
 
     do
         -- Test 8: Matches detects missing entries
-        local setA = LibBucketHashSet.New(4)
-        local setB = LibBucketHashSet.New(4)
+        local setA = LibBucketedHashSet.New(4)
+        local setB = LibBucketedHashSet.New(4)
         setA:Insert("foo", 123)
         -- B is missing foo
         assert(not setB:Matches("foo", 123), "Test 8 Failed: Matches should detect missing entry")
@@ -271,8 +270,8 @@ local function RunLibBucketHashSetTests()
 
     do
         -- Test 9: Matches detects extra entries
-        local setA = LibBucketHashSet.New(4)
-        local setB = LibBucketHashSet.New(4)
+        local setA = LibBucketedHashSet.New(4)
+        local setB = LibBucketedHashSet.New(4)
 
         setB:Insert("foo", 123)
 
@@ -283,7 +282,7 @@ local function RunLibBucketHashSetTests()
 
     do
         -- Test 10: Matches works with multiple values
-        local set = LibBucketHashSet.New(4)
+        local set = LibBucketedHashSet.New(4)
         set:Insert("foo", 1, 2, 3)
         assert(set:Matches("foo", 1, 2, 3), "Test 10 Failed: Matches should match multi-value insert")
         assert(not set:Matches("foo", 1, 2, 4), "Test 10 Failed: Matches should detect multi-value divergence")
@@ -292,7 +291,7 @@ local function RunLibBucketHashSetTests()
 
     do
         -- Test 11: Keys hashing to same bucket behave correctly
-        local set = LibBucketHashSet.New(1) -- force all keys into same bucket
+        local set = LibBucketedHashSet.New(1) -- force all keys into same bucket
         set:Insert("foo", 123)
         set:Insert("bar", 456)
 
@@ -303,8 +302,8 @@ local function RunLibBucketHashSetTests()
 
     do
         -- Test 12: Different seeds produce different hashes
-        local setA = LibBucketHashSet.New(4, 123)
-        local setB = LibBucketHashSet.New(4, 456)
+        local setA = LibBucketedHashSet.New(4, 123)
+        local setB = LibBucketedHashSet.New(4, 456)
         setA:Insert("foo", 123)
         setB:Insert("foo", 123)
         local diverged = false
@@ -321,14 +320,14 @@ local function RunLibBucketHashSetTests()
     do
         -- Test 13: Invalid state raises error on import
         ---@diagnostic disable-next-line: param-type-mismatch
-        local status, err = pcall(function() LibBucketHashSet.Import("invalid") end)
+        local status, err = pcall(function() LibBucketedHashSet.Import("invalid") end)
         assert(not status, "Test 13 Failed: Importing invalid state should raise error")
         print("Test 13 PASSED: Invalid state raises error on import")
     end
 
     do
         -- Test 14: Zero buckets raises error
-        local status, err = pcall(function() LibBucketHashSet.New(0) end)
+        local status, err = pcall(function() LibBucketedHashSet.New(0) end)
         assert(not status, "Test 14 Failed: Creating set with zero buckets should raise error")
         print("Test 14 PASSED: Zero buckets raises error")
     end
@@ -336,14 +335,14 @@ local function RunLibBucketHashSetTests()
     do
         -- Test 15: Non-number seed raises error
         ---@diagnostic disable-next-line: param-type-mismatch
-        local status, err = pcall(function() LibBucketHashSet.New(4, "notanumber") end)
+        local status, err = pcall(function() LibBucketedHashSet.New(4, "notanumber") end)
         assert(not status, "Test 15 Failed: Non-number seed should raise error")
         print("Test 15 PASSED: Non-number seed raises error")
     end
 
     do
         -- Test 16: Exported state structure
-        local set = LibBucketHashSet.New(4, 789)
+        local set = LibBucketedHashSet.New(4, 789)
         set:Insert("foo", 123)
         local state = set:Export()
         assert(type(state) == "table", "Test 16 Failed: Exported state should be a table")
@@ -355,7 +354,7 @@ local function RunLibBucketHashSetTests()
 
     do
         -- Test 17: Bucket hash values are within 32-bit range
-        local set = LibBucketHashSet.New(1000)
+        local set = LibBucketedHashSet.New(1000)
         for i = 1, 1000 do
             set:Insert("key" .. i * 13, i * 37)
         end
@@ -369,15 +368,15 @@ local function RunLibBucketHashSetTests()
 
     do
         -- Test 18: Equal key and value doesn't result in zero hash
-        local set = LibBucketHashSet.New(4)
+        local set = LibBucketedHashSet.New(4)
         local bucketIndex = set:Insert("same", "same")
         assert(set.buckets[bucketIndex] ~= 0, "Test 18 Failed: Bucket hash should not be zero for equal key and value")
         print("Test 18 PASSED: Equal key and value doesn't result in zero hash")
     end
 
-    print("=== All LibBucketHashSet Tests PASSED ===\n")
+    print("=== All LibBucketedHashSet Tests PASSED ===\n")
 end
 
-RunLibBucketHashSetTests()
+RunLibBucketedHashSetTests()
 
 ]]--

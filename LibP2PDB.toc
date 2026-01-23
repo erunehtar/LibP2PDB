@@ -4,5 +4,5 @@
 ## Notes: A lightweight, embeddable library for peer-to-peer distributed-database synchronization in WoW addons.
 ## Version: 1
 
-LibBucketHashSet.lua
+LibBucketedHashSet.lua
 LibP2PDB.lua
