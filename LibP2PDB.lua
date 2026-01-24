@@ -5612,7 +5612,7 @@ local NetworkTests = {
 
         -- Check that other peers know only about peer 1
         for i = 2, numPeers do
-            local db = databases[1]
+            local db = databases[i]
             local dbi = instances[i].databases[db]
             Assert.ContainsKey(dbi.peers, instances[1].peerId)
             Assert.AreEqual(dbi.peers[instances[1].peerId].name, "Player1")
@@ -6327,6 +6327,7 @@ local PerformanceTests = {
 
         ProfileReset("LibP2PDB:ImportDatabase")
         ProfileBegin("LibP2PDB:ImportDatabase")
+        --- @cast state LibP2PDB.DBState
         LibP2PDB:ImportDatabase(db, state)
         ProfileEnd("LibP2PDB:ImportDatabase")
         PrintProfileMarker("LibP2PDB:ImportDatabase", "ImportDatabase")
