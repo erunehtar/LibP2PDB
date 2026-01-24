@@ -6,5 +6,4 @@
 ## Dependencies: AceComm-3.0, LibBucketedHashSet
 ## OptionalDeps: LibPatternedBloomFilter, LibSerialize, LibDeflate
 
-LibBucketedHashSet.lua
 LibP2PDB.lua

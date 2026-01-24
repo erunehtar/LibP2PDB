@@ -35,6 +35,8 @@ local LibDeflate = LibStub("LibDeflate", true)
 -- Local Lua References
 ------------------------------------------------------------------------------------------------------------------------
 
+local rawequal = rawequal
+
 local assert, print = assert, print
 local type, ipairs, pairs = type, ipairs, pairs
 local min, max, abs, floor, ceil, sin, log = min, max, abs, floor, ceil, sin, log
@@ -472,7 +474,7 @@ end
 --- @param b any Second value to compare.
 --- @return boolean isEqual True if the values are deeply equal, false otherwise.
 local function DeepEqual(a, b)
-    if a == b then
+    if rawequal(a, b) then
         return true
     end
     if type(a) ~= "table" or type(b) ~= "table" then
@@ -513,7 +515,7 @@ end
 --- @param b any Second value to compare.
 --- @return boolean isEqual True if the values are shallowly equal, false otherwise.
 local function ShallowEqual(a, b)
-    if a == b then
+    if rawequal(a, b) then
         return true
     end
     if type(a) ~= "table" or type(b) ~= "table" then
@@ -633,6 +635,7 @@ end
 --- @field SetKey fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance, tableName: LibP2PDB.TableName, ti: LibP2PDB.TableInstance, key: LibP2PDB.TableKey, data: LibP2PDB.RowData?): boolean
 --- @field MergeKey fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance, tableName: LibP2PDB.TableName, ti: LibP2PDB.TableInstance, key: LibP2PDB.TableKey, rowData: LibP2PDB.RowData?, rowVersion: LibP2PDB.RowVersion): boolean
 --- @field PrepareRowData fun(self: LibP2PDB.Private, tableName: LibP2PDB.TableName, ti: LibP2PDB.TableInstance, data: table?): LibP2PDB.RowData?
+--- @field ResizeTableSummary fun(self: LibP2PDB.Private, ti: LibP2PDB.TableInstance, newSize: integer)
 --- @field InvokeChangeCallbacks fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance, tableName: LibP2PDB.TableName, ti: LibP2PDB.TableInstance, key: LibP2PDB.TableKey, data: LibP2PDB.RowData?)
 --- @field ExportDatabase fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance): LibP2PDB.DBState?
 --- @field ExportTable fun(self: LibP2PDB.Private, ti: LibP2PDB.TableInstance): LibP2PDB.RowStateMap?
@@ -1050,6 +1053,10 @@ function LibP2PDB:NewTable(db, desc)
         end
     end
 
+    -- Create the bucketed hash set for the summary
+    local summary = LibBucketedHashSet.New(32)
+    summary.keyIndex = {} --- @type table<LibP2PDB.TableKey, integer>
+
     -- Create the table instance
     --- @type LibP2PDB.TableInstance
     dbi.tables[desc.name] = {
@@ -1062,6 +1069,7 @@ function LibP2PDB:NewTable(db, desc)
         seed = 0,
         rowCount = 0,
         rows = {},
+        summary = summary,
     }
 end
 
@@ -1898,6 +1906,7 @@ end
 --- @field seed integer Seed value for the table's filter and bucket hash set.
 --- @field rowCount integer Total number of rows in the table (including tombstones).
 --- @field rows table<LibP2PDB.TableKey, LibP2PDB.TableRow> Registry of rows in the table.
+--- @field summary any Summary of the table's keys, stored in a bucketed hash set.
 
 --- @class LibP2PDB.TableRow Table row definition.
 --- @field data LibP2PDB.RowData? Data for the row, or nil if the row is a tombstone (deleted).
@@ -1960,6 +1969,17 @@ function Private:SetKey(dbi, tableName, ti, key, rowData)
         -- Versioning (Lamport clock)
         dbi.clock = dbi.clock + 1
 
+        -- Update row count (must be done before storing the row and updating summary)
+        if not existingRow then
+            ti.rowCount = ti.rowCount + 1
+
+            -- Resize summary if needed
+            local requiredNumBucket = max(32, NextPowerOfTwo(ti.rowCount) / 32)
+            if requiredNumBucket > ti.summary.numBuckets then
+                self:ResizeTableSummary(ti, requiredNumBucket)
+            end
+        end
+
         -- Store the row
         ti.rows[key] = {
             data = rowData,
@@ -1970,10 +1990,11 @@ function Private:SetKey(dbi, tableName, ti, key, rowData)
             },
         }
 
-        -- Update row count
-        if not existingRow then
-            ti.rowCount = ti.rowCount + 1
+        -- Update summary
+        if existingRow then
+            ti.summary:Toggle(key .. existingRow.version.clock)
         end
+        ti.summary.keyIndex[key] = ti.summary:Toggle(key .. dbi.clock)
 
         -- Invoke row changed callbacks
         self:InvokeChangeCallbacks(dbi, tableName, ti, key, rowData)
@@ -1994,7 +2015,7 @@ end
 function Private:MergeKey(dbi, dbClock, tableName, ti, key, rowData, rowVersion)
     -- Determine if the incoming row is newer
     local existingRow = ti.rows[key]
-    if existingRow and priv:CompareVersion(rowVersion, existingRow.version) then
+    if existingRow and self:CompareVersion(rowVersion, existingRow.version) then
         return true -- existing row is newer, skip
     end
 
@@ -2027,6 +2048,17 @@ function Private:MergeKey(dbi, dbClock, tableName, ti, key, rowData, rowVersion)
         -- Versioning (Lamport clock)
         dbi.clock = max(dbi.clock, dbClock)
 
+        -- Update row count (must be done before storing the row and updating summary)
+        if not existingRow then
+            ti.rowCount = ti.rowCount + 1
+
+            -- Resize summary if needed
+            local requiredNumBucket = max(32, NextPowerOfTwo(ti.rowCount) / 32)
+            if requiredNumBucket > ti.summary.numBuckets then
+                self:ResizeTableSummary(ti, requiredNumBucket)
+            end
+        end
+
         -- Store the row
         ti.rows[key] = {
             data = rowData,
@@ -2037,10 +2069,11 @@ function Private:MergeKey(dbi, dbClock, tableName, ti, key, rowData, rowVersion)
             },
         }
 
-        -- Update row count
-        if not existingRow then
-            ti.rowCount = ti.rowCount + 1
+        -- Update summary
+        if existingRow then
+            ti.summary:Toggle(key .. existingRow.version.clock)
         end
+        ti.summary.keyIndex[key] = ti.summary:Toggle(key .. rowVersion.clock)
 
         -- Invoke row changed callbacks
         self:InvokeChangeCallbacks(dbi, tableName, ti, key, rowData)
@@ -2087,6 +2120,22 @@ function Private:PrepareRowData(tableName, ti, data)
         end
     end
     return rowData
+end
+
+--- Resize a table's summary to accommodate more rows.
+--- @param ti LibP2PDB.TableInstance Table instance.
+--- @param requiredNumBucket integer Required number of buckets for the summary.
+function Private:ResizeTableSummary(ti, requiredNumBucket)
+    -- Create new summary
+    local summary = LibBucketedHashSet.New(requiredNumBucket)
+
+    -- Rehash existing keys into new summary
+    for key, row in pairs(ti.rows) do
+        summary.keyIndex[key] = summary:Toggle(key .. row.version.clock)
+    end
+
+    -- Replace old summary with new summary
+    ti.summary = summary
 end
 
 --- Invoke change callbacks for a row change.
@@ -2739,20 +2788,18 @@ function Private:DigestRequestHandler(message)
     local sender = message.sender
     Spam("received digest request from '%s'", sender)
 
-    -- Build filter and summary for each table
+    -- Build digest for each table
     local databaseDigest = {} --- @type LibP2PDB.DBDigest
     for tableName, ti in pairs(dbi.tables) do
         if ti.rowCount > 0 then
             local filter = dbi.filter.New(ti.rowCount, ti.seed)
-            local summary = LibBucketedHashSet.New(max(32, NextPowerOfTwo(ti.rowCount) / 32))
             ti.seed = ti.seed + 1 -- increment seed for next use
-            for key, row in pairs(ti.rows) do
+            for key in pairs(ti.rows) do
                 filter:Insert(key)
-                summary:Insert(key, row.version.clock)
             end
-            databaseDigest[tableName] = { --- @type LibP2PDB.TableDigest
+            databaseDigest[tableName] = {
                 filter = filter:Export(),
-                summary = summary:Export(),
+                summary = ti.summary:Export(),
             }
         else
             databaseDigest[tableName] = {
@@ -2795,59 +2842,50 @@ function Private:DigestResponseHandler(message)
         -- Check if table is defined in the database
         local ti = dbi.tables[tableName]
         if ti then
-            -- Reconstruct the filter, which is used to check what rows they are missing
+            -- Reconstruct the filter
             local filter = nil
             if tableDigest.filter and tableDigest.filter ~= NIL_MARKER then
                 filter = dbi.filter.Import(tableDigest.filter)
             end
 
-            -- Reconstruct the bucketed hash set, which is used to check which rows we have are outdated
-            local incomingSummary, summary, keyBucketIndexMap = nil, nil, nil
+            -- Reconstruct the summary
+            local summary = nil
             if tableDigest.summary and tableDigest.summary ~= NIL_MARKER then
-                incomingSummary = LibBucketedHashSet.Import(tableDigest.summary)
-                summary = LibBucketedHashSet.New(incomingSummary.numBuckets)
-                keyBucketIndexMap = {} --- @type table<LibP2PDB.TableKey, integer>
+                summary = LibBucketedHashSet.Import(tableDigest.summary)
+
+                -- Resize our summary if needed, to match theirs
+                if summary.numBuckets > ti.summary.numBuckets then
+                    self:ResizeTableSummary(ti, summary.numBuckets)
+                elseif summary.numBuckets < ti.summary.numBuckets then
+                    summary = nil -- Their summary is smaller than ours, so we cannot compare properly
+                end
             end
 
-            -- Find rows they are missing and record our bucket indices
-            local rowStateMap = {} --- @type LibP2PDB.RowStateMap
+            -- Find rows they are missing, and rows we have that differs from their summary
+            local rowStateMap = {}  --- @type LibP2PDB.RowStateMap
+            local tableRequest = {} --- @type LibP2PDB.TableRequest
             for key, row in pairs(ti.rows) do
                 -- Check if they are missing our row
                 if not filter or not filter:Contains(key) then
-                    -- Export row for sending
+                    -- They are missing our row, send it to them
                     rowStateMap[key] = self:ExportRow(row, ti.schemaSorted)
-                end
-
-                -- Record our bucket index for this key
-                if summary and keyBucketIndexMap then
-                    keyBucketIndexMap[key] = summary:Insert(key, row.version.clock)
+                elseif summary then -- Check if our row differs from their summary
+                    local bucketIndex = ti.summary.keyIndex[key]
+                    if summary.buckets[bucketIndex] ~= ti.summary.buckets[bucketIndex] then
+                        -- Their summary differs from ours for this key, request the row
+                        tableRequest[key] = row.version.clock
+                    end
                 end
             end
 
-            -- Include the table only if there are any rows to send
+            -- Send the table only if there are any rows to send
             if IsNonEmptyTable(rowStateMap) then
                 tableStateMap[tableName] = rowStateMap
             end
 
-            -- Find rows we have that are outdated
-            if incomingSummary and summary and keyBucketIndexMap then
-                -- Iterate each row in our table find outdated rows
-                local tableRequest = {} --- @type LibP2PDB.TableRequest
-                for key, row in pairs(ti.rows) do
-                    -- Do not request keys we know they are missing
-                    if not rowStateMap[key] then
-                        local bucketIndex = keyBucketIndexMap[key]
-                        if incomingSummary.buckets[bucketIndex] ~= summary.buckets[bucketIndex] then
-                            -- Their summary differs from ours for this key, request the row
-                            tableRequest[key] = row.version.clock
-                        end
-                    end
-                end
-
-                -- Include the table only if there are any rows to request
-                if IsNonEmptyTable(tableRequest) then
-                    databaseRequest[tableName] = tableRequest
-                end
+            -- Request the table only if there are any rows to request
+            if IsNonEmptyTable(tableRequest) then
+                databaseRequest[tableName] = tableRequest
             end
         else
             ReportError(dbi, "table '%s' in digest response from '%s' is not defined in the database", tableName, tostring(sender))
@@ -2865,7 +2903,7 @@ function Private:DigestResponseHandler(message)
         self:Send(dbi, obj, "WHISPER", sender, CommPriority.Normal)
     end
 
-    -- Request outdated rows
+    -- Request rows that differs from their summary
     if IsNonEmptyTable(databaseRequest) then
         Spam("sending outdated rows request to '%s'", sender)
         local obj = {
@@ -2897,7 +2935,7 @@ function Private:RowsRequestHandler(message)
             local rowStateMap = {} --- @type LibP2PDB.RowStateMap
             for key, clock in pairs(tableRequest or {}) do
                 local row = ti.rows[key]
-                if row and priv:CompareVersion({ clock = clock, peer = peerID }, row.version) then
+                if row and self:CompareVersion({ clock = clock, peer = peerID }, row.version) then
                     rowStateMap[key] = self:ExportRow(row, ti.schemaSorted)
                 end
             end
@@ -3127,11 +3165,13 @@ if DEBUG and TESTING then
         return unpack(result)
     end
 
-    local function FormatTime(ms)
-        if ms < 1.0 then
-            return format("%.2fus", ms * 1000)
+    local function FormatTime(milliseconds)
+        if milliseconds < 1.0 then
+            return format("%.2fus", milliseconds * 1000.0)
+        elseif milliseconds < 1000.0 then
+            return format("%.2fms", milliseconds)
         else
-            return format("%.2fms", ms)
+            return format("%.2fs", milliseconds / 1000.0)
         end
     end
 
@@ -3539,6 +3579,7 @@ if DEBUG and TESTING then
                 Assert.IsTable(ti.subscribers)
                 Assert.AreEqual(ti.rowCount, 0)
                 Assert.IsEmptyTable(ti.rows)
+                Assert.IsTable(ti.summary)
             end
             do -- check new table creation with full description
                 LibP2PDB:NewTable(db, {
@@ -3562,6 +3603,7 @@ if DEBUG and TESTING then
                 Assert.IsTable(ti.subscribers)
                 Assert.AreEqual(ti.rowCount, 0)
                 Assert.IsEmptyTable(ti.rows)
+                Assert.IsTable(ti.summary)
             end
             do -- check schema allowed types
                 local schemaDef = {
@@ -5513,7 +5555,7 @@ if DEBUG and TESTING then
                 for _, instance in ipairs(instances) do
                     for _, msg in ipairs(messages[channel] or {}) do
                         if channel ~= "WHISPER" or msg.target == instance.playerName then
-                            PrivateScope(instance, function() priv:OnCommReceived(msg.prefix, msg.text, msg.distribution, msg.sender) end)
+                            PrivateScope(instance, function() instance:OnCommReceived(msg.prefix, msg.text, msg.distribution, msg.sender) end)
                         end
                     end
                 end
@@ -6105,7 +6147,7 @@ if DEBUG and TESTING then
                     local dbi = priv.databases[databases[i]]
                     Assert.IsNonEmptyTable(dbi.peers)
                     Assert.IsNonEmptyTable(dbi.peersSorted)
-                    local neighbors = priv:GetNeighbors(dbi)
+                    local neighbors = instances[i]:GetNeighbors(dbi)
                     for neighborId in pairs(neighbors) do
                         peers[neighborId] = true
                     end
