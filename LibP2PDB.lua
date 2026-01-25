@@ -34,10 +34,8 @@ local LibDeflate = LibStub("LibDeflate", true)
 -- Local Lua References
 ------------------------------------------------------------------------------------------------------------------------
 
-local rawequal = rawequal
-
 local assert, print = assert, print
-local type, ipairs, pairs = type, ipairs, pairs
+local type, ipairs, pairs, rawequal = type, ipairs, pairs, rawequal
 local min, max, abs, floor, ceil, sin, log = min, max, abs, floor, ceil, sin, log
 local bnot, band, bor, bxor, lshift, rshift = bit.bnot, bit.band, bit.bor, bit.bxor, bit.lshift, bit.rshift
 local tonumber, tostring, tostringall = tonumber, tostring, tostringall
@@ -454,7 +452,7 @@ local function Contains(array, value)
     return false
 end
 
---- Deep copy a value (recursively copies all nested tables).
+--- Deep copy a value (include nested tables recursively).
 --- @param value any Value to deep copy.
 --- @return any copy The deep copied value.
 local function DeepCopy(value)
@@ -468,10 +466,10 @@ local function DeepCopy(value)
     return copy
 end
 
---- Deep compare two values for equality.
+--- Deep compare two values for equality (include nested tables recursively).
 --- @param a any First value to compare.
 --- @param b any Second value to compare.
---- @return boolean isEqual True if the values are deeply equal, false otherwise.
+--- @return boolean isEqual True if the values are equal, false otherwise.
 local function DeepEqual(a, b)
     if rawequal(a, b) then
         return true
@@ -495,7 +493,7 @@ local function DeepEqual(a, b)
     return count == 0
 end
 
---- Shallow copy a value (non-recursively copies nested tables).
+--- Shallow copy a value (skip nested tables).
 --- @param value any Value to shallow copy.
 --- @return any copy The shallow copied value.
 local function ShallowCopy(value)
@@ -509,10 +507,10 @@ local function ShallowCopy(value)
     return copy
 end
 
---- Shallow compare two values for equality.
+--- Shallow compare two values for equality (skip nested tables).
 --- @param a any First value to compare.
 --- @param b any Second value to compare.
---- @return boolean isEqual True if the values are shallowly equal, false otherwise.
+--- @return boolean isEqual True if the values are equal, false otherwise.
 local function ShallowEqual(a, b)
     if rawequal(a, b) then
         return true
@@ -630,48 +628,13 @@ end
 -- Private State
 ------------------------------------------------------------------------------------------------------------------------
 
---- @class LibP2PDB.Private Private library state.
---- @field SetKey fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance, tableName: LibP2PDB.TableName, ti: LibP2PDB.TableInstance, key: LibP2PDB.TableKey, data: LibP2PDB.RowData?): boolean
---- @field MergeKey fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance, tableName: LibP2PDB.TableName, ti: LibP2PDB.TableInstance, key: LibP2PDB.TableKey, rowData: LibP2PDB.RowData?, rowVersion: LibP2PDB.RowVersion): boolean
---- @field PrepareRowData fun(self: LibP2PDB.Private, tableName: LibP2PDB.TableName, ti: LibP2PDB.TableInstance, data: table?): LibP2PDB.RowData?
---- @field ResizeTableSummary fun(self: LibP2PDB.Private, ti: LibP2PDB.TableInstance, newSize: integer)
---- @field InvokeChangeCallbacks fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance, tableName: LibP2PDB.TableName, ti: LibP2PDB.TableInstance, key: LibP2PDB.TableKey, data: LibP2PDB.RowData?)
---- @field ExportDatabase fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance): LibP2PDB.DBState?
---- @field ExportTable fun(self: LibP2PDB.Private, ti: LibP2PDB.TableInstance): LibP2PDB.RowStateMap?
---- @field ExportRow fun(self: LibP2PDB.Private, row: LibP2PDB.TableRow, schemaSorted: LibP2PDB.TableSchemaSorted?): LibP2PDB.RowState
---- @field ImportDatabase fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance, state: LibP2PDB.DBState, thread: thread?, maxTime: number?): boolean
---- @field ImportTable fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance, dbClock: LibP2PDB.Clock, tableName: LibP2PDB.TableName, rowStateMap: LibP2PDB.RowStateMap, thread: thread?, maxTime: number?): boolean
---- @field ImportRow fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance, dbClock: LibP2PDB.Clock, tableName: LibP2PDB.TableName, ti: LibP2PDB.TableInstance, key: LibP2PDB.TableKey, rowState: LibP2PDB.RowState)
---- @field ImportRowData fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance, schemaSorted: LibP2PDB.TableSchemaSorted?, rowDataState: LibP2PDB.RowDataState): LibP2PDB.RowData?
---- @field CompareVersion fun(self: LibP2PDB.Private, existing: LibP2PDB.RowVersion, incoming: LibP2PDB.RowVersion): boolean
---- @field GetNeighbors fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance): table<LibP2PDB.PeerID, boolean>
---- @field Send fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance, data: any, channel: string, target: string?, priority: LibP2PDB.CommPriority)
---- @field Broadcast fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance, data: any, channels: string[]?, priority: LibP2PDB.CommPriority)
---- @field OnCommReceived fun(self: LibP2PDB.Private, prefix: string, encoded: string, channel: string, sender: string)
---- @field DispatchMessage fun(self: LibP2PDB.Private, message: LibP2PDB.Message)
---- @field PeerDiscoveryRequestHandler fun(self: LibP2PDB.Private, message: LibP2PDB.Message)
---- @field PeerDiscoveryResponseHandler fun(self: LibP2PDB.Private, message: LibP2PDB.Message)
---- @field DigestRequestHandler fun(self: LibP2PDB.Private, message: LibP2PDB.Message)
---- @field DigestResponseHandler fun(self: LibP2PDB.Private, message: LibP2PDB.Message)
---- @field RowsRequestHandler fun(self: LibP2PDB.Private, message: LibP2PDB.Message)
---- @field RowsResponseHandler fun(self: LibP2PDB.Private, message: LibP2PDB.Message)
---- @field OnUpdate fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance)
---- @field RecordPeer fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance, peerId: LibP2PDB.PeerID, peerName: string, peerClock: LibP2PDB.Clock)
---- @field PruneTimedOutPeers fun(self: LibP2PDB.Private, dbi: LibP2PDB.DBInstance)
---- @field playerName string
---- @field playerGUID string
---- @field peerId string
---- @field prefixes table<string, LibP2PDB.DBHandle>
---- @field databases table<LibP2PDB.DBHandle, LibP2PDB.DBInstance>
---- @field frame Frame
-
 local Private = {}
 Private.__index = Private
 
 --- Create a new private library state instance.
 --- @param playerName string Player name.
 --- @param playerGUID string Player GUID.
---- @return LibP2PDB.Private instance New private library state instance.
+--- @return table instance New private library state instance.
 function Private.New(playerName, playerGUID)
     assert(IsNonEmptyString(playerName), "player name must be a non-empty string")
     assert(IsNonEmptyString(playerGUID), "player GUID must be a non-empty string")
@@ -707,6 +670,9 @@ local priv = Private.New(assert(UnitName("player"), "unable to get player name")
 --- @field prefix LibP2PDB.DBPrefix Unique communication prefix for the database (max 16 chars).
 --- @field version LibP2PDB.DBVersion? Optional database version number (default: 1).
 --- @field onError LibP2PDB.DBOnErrorCallback? Optional callback function(errMsg, stack) invoked on errors.
+--- @field onMigrateDB LibP2PDB.DBOnMigrateDBCallback? Optional callback function(target, source) invoked when database migration is needed.
+--- @field onMigrateTable LibP2PDB.DBOnMigrateTableCallback? Optional callback function(target, source) invoked when table migration is needed.
+--- @field onMigrateRow LibP2PDB.DBOnMigrateRowCallback? Optional callback function(target, source) invoked when row migration is needed.
 --- @field filter LibP2PDB.Filter? Optional custom filter digest generation (default: LibPatternedBloomFilter if available).
 --- @field serializer LibP2PDB.Serializer? Optional custom serializer for encoding/decoding data (default: LibSerialize if available).
 --- @field compressor LibP2PDB.Compressor? Optional custom compressor for compressing/decompressing data (default: LibDeflate if available).
@@ -716,7 +682,7 @@ local priv = Private.New(assert(UnitName("player"), "unable to get player name")
 --- @field discoveryQuietPeriod number? Optional seconds of quiet time with no new peers before considering discovery complete (default: 1.5).
 --- @field discoveryMaxTime number? Optional maximum seconds to wait for peer discovery before considering it complete (default: 3.0).
 --- @field onDiscoveryComplete LibP2PDB.DBOnDiscoveryCompleteCallback? Optional callback function() invoked when peers discovery completes.
---- @field peerTimeout number? Optional seconds of inactivity after which a peer is considered inactive (default: 120.0).
+--- @field peerTimeout number? Optional seconds of inactivity after which a peer is considered inactive (default: 100.0).
 
 --- @class LibP2PDB.Filter Filter interface for generating data digests.
 --- @field New fun(capacity: integer, seed: integer): LibP2PDB.Filter Creates a new filter instance.
@@ -740,8 +706,18 @@ local priv = Private.New(assert(UnitName("player"), "unable to get player name")
 --- @field DecodeFromPrint fun(self: LibP2PDB.Encoder, str: string): string? Decodes a string from display/storage, restoring the original string.
 
 --- @alias LibP2PDB.DBOnErrorCallback fun(errMsg: string, stack: string?) Callback function invoked on errors.
+--- @alias LibP2PDB.DBOnMigrateDBCallback fun(target: LibP2PDB.MigrationContext, source: LibP2PDB.MigrationContext) Callback function invoked when database migration is needed.
+--- @alias LibP2PDB.DBOnMigrateTableCallback fun(target: LibP2PDB.MigrationContext, source: LibP2PDB.MigrationContext): LibP2PDB.TableName? Callback function invoked when table migration is needed.
+--- @alias LibP2PDB.DBOnMigrateRowCallback fun(target: LibP2PDB.MigrationContext, source: LibP2PDB.MigrationContext): LibP2PDB.TableKey?, LibP2PDB.RowData? Callback function invoked when row migration is needed.
 --- @alias LibP2PDB.DBOnChangeCallback fun(tableName: string, key: LibP2PDB.TableKey, data: LibP2PDB.RowData?) Callback function invoked on any row change.
 --- @alias LibP2PDB.DBOnDiscoveryCompleteCallback fun() Callback function invoked when peer discovery completes.
+
+--- @class LibP2PDB.MigrationContext Context information for database/table/row migrations.
+--- @field db LibP2PDB.DBHandle Database handle.
+--- @field version LibP2PDB.DBVersion Database version number.
+--- @field tableName LibP2PDB.TableName? Table name if applicable.
+--- @field key LibP2PDB.TableKey? Table key if applicable.
+--- @field data LibP2PDB.RowData? Row data if applicable.
 
 --- Create a new peer-to-peer synchronized database instance.
 --- Each database is identified by a unique prefix and operates independently.
@@ -754,6 +730,9 @@ function LibP2PDB:NewDatabase(desc)
     assert(IsNonEmptyStringEx(desc.prefix, 1, 16), "desc.prefix must be a non-empty string (1-16 chars)")
     assert(IsIntegerOrNil(desc.version, 1), "desc.version must be an integer greater than 0 if provided")
     assert(IsFunctionOrNil(desc.onError), "desc.onError must be a function if provided")
+    assert(IsFunctionOrNil(desc.onMigrateDB), "desc.onMigrateDB must be a function if provided")
+    assert(IsFunctionOrNil(desc.onMigrateTable), "desc.onMigrateTable must be a function if provided")
+    assert(IsFunctionOrNil(desc.onMigrateRow), "desc.onMigrateRow must be a function if provided")
     assert(IsInterfaceOrNil(desc.filter, "New", "Insert", "Contains", "Export", "Import"), "desc.filter must be a filter interface if provided")
     assert(IsInterfaceOrNil(desc.serializer, "Serialize", "Deserialize"), "desc.serializer must be a serializer interface if provided")
     assert(IsInterfaceOrNil(desc.compressor, "Compress", "Decompress"), "desc.compressor must be a compressor interface if provided")
@@ -788,7 +767,7 @@ function LibP2PDB:NewDatabase(desc)
         channels = desc.channels,
         discoveryQuietPeriod = desc.discoveryQuietPeriod or 1.5,
         discoveryMaxTime = desc.discoveryMaxTime or 3.0,
-        peerTimeout = desc.peerTimeout or 120.0,
+        peerTimeout = desc.peerTimeout or 100.0,
         -- Networking
         peers = {},
         peersSorted = {},
@@ -797,6 +776,9 @@ function LibP2PDB:NewDatabase(desc)
         tables = {},
         -- Callbacks
         onError = desc.onError,
+        onMigrateDB = desc.onMigrateDB,
+        onMigrateTable = desc.onMigrateTable,
+        onMigrateRow = desc.onMigrateRow,
         onChange = desc.onChange,
         onDiscoveryComplete = desc.onDiscoveryComplete,
         -- Access control
@@ -1885,6 +1867,9 @@ end
 --- @field buckets table Communication event buckets for burst control.
 --- @field tables table<LibP2PDB.TableName, LibP2PDB.TableInstance> Defined tables in the database.
 --- @field onError LibP2PDB.DBOnErrorCallback? Callback for error events.
+--- @field onMigrateDB LibP2PDB.DBOnMigrateDBCallback? Callback for database migrations.
+--- @field onMigrateTable LibP2PDB.DBOnMigrateTableCallback? Callback for table migrations.
+--- @field onMigrateRow LibP2PDB.DBOnMigrateRowCallback? Callback for row migrations.
 --- @field onChange LibP2PDB.DBOnChangeCallback? Callback for row changes.
 --- @field onDiscoveryComplete LibP2PDB.DBOnDiscoveryCompleteCallback? Callback for discovery completion.
 --- @field discoveryStartTime number? Local timestamp when discovery started.
@@ -2251,6 +2236,15 @@ function Private:ExportRow(row, schemaSorted)
     }
 end
 
+--- @class LibP2PDB.ImportContext
+--- @field db LibP2PDB.DBHandle Database handle.
+--- @field dbi LibP2PDB.DBInstance Database instance.
+--- @field tableName LibP2PDB.TableName? Name of the table if applicable.
+--- @field ti LibP2PDB.TableInstance? Table instance if applicable.
+--- @field key LibP2PDB.TableKey? Primary key of the row if applicable.
+--- @field rowData LibP2PDB.RowData? Data of the row if applicable.
+--- @field rowVersion LibP2PDB.RowVersion? Version of the row if applicable.
+
 --- Import the database state from a compact format.
 --- Merges the imported state with existing data based on version metadata.
 --- Validates incoming data against table definitions, skipping invalid entries.
@@ -2267,19 +2261,15 @@ function Private:ImportDatabase(dbi, state, thread, maxTime)
     end
 
     -- Validate database state version
-    local databaseVersion = state[1] --- @type LibP2PDB.DBVersion
-    if not IsInteger(databaseVersion, 1) then
+    local dbVersion = state[1] --- @type LibP2PDB.DBVersion
+    if not IsInteger(dbVersion, 1) then
         ReportError(dbi, "invalid database version in state")
-        return false
-    end
-    if databaseVersion ~= dbi.version then
-        ReportError(dbi, "cannot import database version %d, expected %d", databaseVersion, dbi.version)
         return false
     end
 
     -- Validate database state clock
-    local databaseClock = state[2] --- @type LibP2PDB.Clock
-    if not IsInteger(databaseClock, 0) then
+    local dbClock = state[2] --- @type LibP2PDB.Clock
+    if not IsInteger(dbClock, 0) then
         ReportError(dbi, "invalid database clock in state")
         return false
     end
@@ -2291,9 +2281,56 @@ function Private:ImportDatabase(dbi, state, thread, maxTime)
         return false
     end
 
+    -- If migration is needed, import into a temporary migration database first
+    local migrationDB = nil  --- @type LibP2PDB.DBHandle
+    local migrationDBI = nil --- @type LibP2PDB.DBInstance
+    if dbVersion ~= dbi.version and dbi.onMigrateDB then
+        migrationDB = {}
+        ---@diagnostic disable-next-line: missing-fields
+        migrationDBI = {
+            version = dbVersion,
+            clock = dbClock,
+            tables = {},
+            onError = dbi.onError,
+        }
+        self.databases[migrationDB] = migrationDBI
+
+        -- Give the user a chance to set up the migration database tables
+        local targetCtx = { --- @type LibP2PDB.MigrationContext
+            db = priv.prefixes[dbi.prefix],
+            version = dbi.version,
+        }
+        local sourceCtx = { --- @type LibP2PDB.MigrationContext
+            db = migrationDB,
+            version = dbVersion,
+        }
+        local success = SafeCall(dbi, dbi.onMigrateDB, targetCtx, sourceCtx)
+        if not success then
+            ReportError(dbi, "database migration failed")
+            return false
+        end
+    end
+
     -- Import each table (skipping invalid table entries)
     for tableName, rowStateMap in pairs(tableStateMap or {}) do
-        self:ImportTable(dbi, databaseClock, tableName, rowStateMap, thread, maxTime)
+        self:ImportTable(migrationDBI or dbi, dbClock, tableName, rowStateMap, thread, maxTime)
+    end
+
+    -- If migration is needed, migrate each table from the migration database
+    if dbVersion ~= dbi.version and migrationDB and migrationDBI then
+        local target = { --- @type LibP2PDB.ImportContext
+            db = priv.prefixes[dbi.prefix],
+            dbi = dbi,
+        }
+        local source = { --- @type LibP2PDB.ImportContext
+            db = migrationDB,
+            dbi = migrationDBI,
+        }
+        for tableName, ti in pairs(source.dbi.tables) do
+            source.tableName = tableName
+            source.ti = ti
+            self:MigrateTable(target, source)
+        end
     end
 
     return true
@@ -2446,6 +2483,116 @@ function Private:ImportRowData(dbi, schemaSorted, rowDataState)
 
     -- Return row data
     return importedRowData
+end
+
+--- Migrate a single table's data using the migration callback.
+--- @param target LibP2PDB.ImportContext Target import context.
+--- @param source LibP2PDB.ImportContext Source import context.
+function Private:MigrateTable(target, source)
+    local tableName = source.tableName
+    if target.dbi.onMigrateTable then
+        -- Migrate table using the callback
+        local targetCtx = { --- @type LibP2PDB.MigrationContext
+            db = target.db,
+            version = target.dbi.version,
+        }
+        local sourceCtx = { --- @type LibP2PDB.MigrationContext
+            db = source.db,
+            version = source.dbi.version,
+            tableName = source.tableName,
+        }
+        local success, newTableName = SafeCall(target.dbi, target.dbi.onMigrateTable, targetCtx, sourceCtx)
+        if not success then
+            ReportError(target.dbi, "table migration failed for table '%s'", source.tableName)
+            return
+        end
+        if newTableName then
+            tableName = newTableName
+        end
+    end
+
+    -- Validate table name
+    if not IsNonEmptyString(tableName) then
+        ReportError(target.dbi, "migrated table name must be a non-empty string for table '%s'", source.tableName)
+        return
+    end
+
+    -- Check target table exists in target database
+    local ti = target.dbi.tables[tableName]
+    if not ti then
+        ReportError(target.dbi, "migrated table '%s' does not exist in target database", tableName)
+        return
+    end
+    target.tableName = tableName
+    target.ti = ti
+
+    -- Migrate each row in the table
+    for key, row in pairs(source.ti.rows) do
+        source.key = key
+        source.rowData = row.data
+        source.rowVersion = row.version
+        self:MigrateRow(target, source)
+    end
+end
+
+--- Migrate a single row's data using the migration callback.
+--- @param target LibP2PDB.ImportContext Target import context.
+--- @param source LibP2PDB.ImportContext Source import context.
+function Private:MigrateRow(target, source)
+    local targetKey = source.key
+    local targetRowData = source.rowData
+    if target.dbi.onMigrateRow then
+        -- Migrate row data using the callback
+        local targetCtx = { --- @type LibP2PDB.MigrationContext
+            db = target.db,
+            version = target.dbi.version,
+            tableName = target.tableName,
+        }
+        local sourceCtx = { --- @type LibP2PDB.MigrationContext
+            db = source.db,
+            version = source.dbi.version,
+            tableName = source.tableName,
+            key = source.key,
+            data = ShallowCopy(source.rowData),
+        }
+        local success, newKey, newRowData = SafeCall(target.dbi, target.dbi.onMigrateRow, targetCtx, sourceCtx)
+        if not success then
+            ReportError(target.dbi, "row data migration failed for key '%s' in table '%s'", tostring(source.key), source.tableName)
+            return
+        end
+        if newKey then
+            targetKey = newKey
+        end
+        if newRowData then
+            targetRowData = newRowData
+        end
+    end
+
+    -- Validate key
+    if not IsNonEmptyString(targetKey) and not IsNumber(targetKey) then
+        ReportError(target.dbi, "migrated key must be a non-empty string or number for key '%s' in table '%s'", tostring(source.key), source.tableName)
+        return
+    end
+
+    -- Check key type matches table definition
+    --- @cast targetKey LibP2PDB.TableKey
+    if type(targetKey) ~= target.ti.keyType then
+        ReportError(target.dbi, "expected migrated key of type '%s' for table '%s', but was '%s'", target.ti.keyType, target.tableName, type(targetKey))
+        return
+    end
+
+    -- Validate row data
+    if not IsTableOrNil(targetRowData) then
+        ReportError(target.dbi, "migrated row data must be a table or nil for key '%s' in table '%s'", tostring(source.key), source.tableName)
+        return
+    end
+
+    -- Prepare the migrated row data
+    local success, rowData = SafeCall(target.dbi, Private.PrepareRowData, self, target.tableName, target.ti, targetRowData)
+    if success then
+        -- Merge the migrated row
+        self:MergeKey(target.dbi, source.dbi.clock, target.tableName, target.ti, targetKey, rowData, source.rowVersion)
+    end
 end
 
 --- Compare two version for ordering.
@@ -3138,7 +3285,7 @@ local Assert = {
 }
 
 --- @param index integer Player index.
---- @return LibP2PDB.Private instance New private instance.
+--- @return table instance New private instance.
 local function NewPrivateInstance(index)
     return Private.New(format("Player%d", index), format("Player-%04d-%08X", index % 10000, index))
 end
@@ -3301,7 +3448,7 @@ local UnitTests = {
             Assert.IsNil(dbi.channels)
             Assert.AreEqual(dbi.discoveryQuietPeriod, 1.5)
             Assert.AreEqual(dbi.discoveryMaxTime, 3.0)
-            Assert.AreEqual(dbi.peerTimeout, 120.0)
+            Assert.AreEqual(dbi.peerTimeout, 100.0)
             Assert.IsInterface(dbi.filter, { "New", "Insert", "Contains", "Export", "Import" })
             Assert.IsInterface(dbi.serializer, { "Serialize", "Deserialize" })
             Assert.IsInterface(dbi.compressor, { "Compress", "Decompress" })
@@ -3311,6 +3458,9 @@ local UnitTests = {
             Assert.IsEmptyTable(dbi.buckets)
             Assert.IsEmptyTable(dbi.tables)
             Assert.IsNil(dbi.onError)
+            Assert.IsNil(dbi.onMigrateDB)
+            Assert.IsNil(dbi.onMigrateTable)
+            Assert.IsNil(dbi.onMigrateRow)
             Assert.IsNil(dbi.onChange)
             Assert.IsNil(dbi.onDiscoveryComplete)
             Assert.IsNil(dbi.discoveryStartTime)
@@ -3322,6 +3472,9 @@ local UnitTests = {
                 prefix = "LibP2PDBTests2",
                 version = 2,
                 onError = function(dbi, msg) end,
+                onMigrateDB = function(target, source) end,
+                onMigrateTable = function(target, source) return "" end,
+                onMigrateRow = function(target, source) return 1, {} end,
                 serializer = {
                     Serialize = function(self, obj) return obj end,
                     Deserialize = function(self, str) return str end
@@ -5349,6 +5502,376 @@ local UnitTests = {
         Assert.IsNil(rows[6])
     end,
 
+    Migration = function()
+        local state = nil
+        do
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", version = 1 })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 })
+            LibP2PDB:InsertKey(db, "Users", 2, { name = "Alice", age = 30 })
+            LibP2PDB:InsertKey(db, "Users", 3, { name = "Eve", age = 35 })
+            state = LibP2PDB:ExportDatabase(db)
+        end
+        do
+            local db = LibP2PDB:NewDatabase({
+                prefix = "LibP2PDBImport",
+                version = 2,
+                onMigrateDB = function(target, source)
+                    if source.version == 1 then
+                        LibP2PDB:NewTable(source.db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+                    end
+                end,
+                onMigrateTable = function(target, source)
+                    if source.version == 1 then
+                        if source.tableName == "Users" then
+                            return "Accounts"
+                        end
+                    end
+                end,
+                onMigrateRow = function(target, source)
+                    if source.version == 1 then
+                        if source.tableName == "Users" then
+                            local key = "user" .. source.key
+                            local data = {
+                                username = key,
+                                name = source.data.name,
+                                age = source.data.age,
+                                email = nil,
+                            }
+                            return key, data
+                        end
+                    end
+                end,
+            })
+            LibP2PDB:NewTable(db, { name = "Accounts", keyType = "string", schema = { username = "string", name = "string", age = "number", email = { "string", "nil" } } })
+            LibP2PDB:ImportDatabase(db, state)
+
+            local dbi = priv.databases[db]
+            Assert.IsNonEmptyTable(dbi)
+            Assert.AreEqual(dbi.clock, 3)
+            Assert.IsNonEmptyTable(dbi.tables)
+            Assert.IsNil(dbi.tables["Users"])
+
+            local ti = dbi.tables["Accounts"]
+            Assert.IsNonEmptyTable(ti)
+            Assert.AreEqual(ti.rowCount, 3)
+
+            local rows = ti.rows
+            Assert.IsNonEmptyTable(rows)
+            Assert.AreEqual(rows["user1"], {
+                data = {
+                    username = "user1",
+                    name = "Bob",
+                    age = 25,
+                    email = nil,
+                },
+                version = {
+                    clock = 1,
+                    peer = priv.peerId,
+                    tombstone = nil
+                },
+            })
+            Assert.AreEqual(rows["user2"], {
+                data = {
+                    username = "user2",
+                    name = "Alice",
+                    age = 30,
+                    email = nil,
+                },
+                version = {
+                    clock = 2,
+                    peer = priv.peerId,
+                    tombstone = nil
+                },
+            })
+            Assert.AreEqual(rows["user3"], {
+                data = {
+                    username = "user3",
+                    name = "Eve",
+                    age = 35,
+                    email = nil,
+                },
+                version = {
+                    clock = 3,
+                    peer = priv.peerId,
+                    tombstone = nil
+                },
+            })
+        end
+    end,
+
+    Migration_SkipUnknownTables = function()
+        local state = nil
+        do
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", version = 1 })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 })
+            LibP2PDB:InsertKey(db, "Users", 2, { name = "Alice", age = 30 })
+            LibP2PDB:InsertKey(db, "Users", 3, { name = "Eve", age = 35 })
+            state = LibP2PDB:ExportDatabase(db)
+        end
+        do
+            local db = LibP2PDB:NewDatabase({
+                prefix = "LibP2PDBImport",
+                version = 2,
+                onMigrateTable = function(target, source)
+                    LibP2PDB:NewTable(source.db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+                end,
+            })
+            Assert.ExpectErrors(function() LibP2PDB:ImportDatabase(db, state) end)
+
+            local dbi = priv.databases[db]
+            Assert.IsNonEmptyTable(dbi)
+            Assert.AreEqual(dbi.clock, 0)
+            Assert.IsEmptyTable(dbi.tables)
+            Assert.IsNil(dbi.tables["Users"])
+        end
+    end,
+
+    Migration_SkipUnmigratedKeys = function()
+        local state = nil
+        do
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", version = 1 })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 })
+            LibP2PDB:InsertKey(db, "Users", 2, { name = "Alice", age = 30 })
+            LibP2PDB:InsertKey(db, "Users", 3, { name = "Eve", age = 35 })
+            state = LibP2PDB:ExportDatabase(db)
+        end
+        do
+            local db = LibP2PDB:NewDatabase({
+                prefix = "LibP2PDBImport",
+                version = 2,
+                onMigrateDB = function(target, source)
+                    LibP2PDB:NewTable(source.db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+                end,
+                onMigrateTable = function(target, source)
+                    if source.version == 1 then
+                        if source.tableName == "Users" then
+                            return "Accounts"
+                        end
+                    end
+                end,
+            })
+            LibP2PDB:NewTable(db, { name = "Accounts", keyType = "string", schema = { username = "string", name = "string", age = "number" } })
+            Assert.ExpectErrors(function() LibP2PDB:ImportDatabase(db, state) end)
+
+            local dbi = priv.databases[db]
+            Assert.IsNonEmptyTable(dbi)
+            Assert.AreEqual(dbi.clock, 0)
+            Assert.IsNonEmptyTable(dbi.tables)
+
+            local ti = dbi.tables["Accounts"]
+            Assert.IsNonEmptyTable(ti)
+            Assert.AreEqual(ti.rowCount, 0)
+
+            local rows = ti.rows
+            Assert.IsEmptyTable(rows)
+        end
+    end,
+
+    Migration_SkipUnmigratedRows = function()
+        local state = nil
+        do
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", version = 1 })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 })
+            LibP2PDB:InsertKey(db, "Users", 2, { name = "Alice", age = 30 })
+            LibP2PDB:InsertKey(db, "Users", 3, { name = "Eve", age = 35 })
+            state = LibP2PDB:ExportDatabase(db)
+        end
+        do
+            local db = LibP2PDB:NewDatabase({
+                prefix = "LibP2PDBImport",
+                version = 2,
+                onMigrateDB = function(target, source)
+                    LibP2PDB:NewTable(source.db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+                end,
+                onMigrateTable = function(target, source)
+                    if source.version == 1 then
+                        if source.tableName == "Users" then
+                            return "Accounts"
+                        end
+                    end
+                end,
+                onMigrateRow =function (target, source)
+                    if source.version == 1 then
+                        if source.tableName == "Users" then
+                            return "user" .. source.key, nil -- always return invalid data to skip all rows
+                        end
+                    end
+                end
+            })
+            LibP2PDB:NewTable(db, { name = "Accounts", keyType = "string", schema = { username = "string", name = "string", age = "number" } })
+            Assert.ExpectErrors(function() LibP2PDB:ImportDatabase(db, state) end)
+
+            local dbi = priv.databases[db]
+            Assert.IsNonEmptyTable(dbi)
+            Assert.AreEqual(dbi.clock, 0)
+            Assert.IsNonEmptyTable(dbi.tables)
+
+            local ti = dbi.tables["Accounts"]
+            Assert.IsNonEmptyTable(ti)
+            Assert.AreEqual(ti.rowCount, 0)
+
+            local rows = ti.rows
+            Assert.IsEmptyTable(rows)
+        end
+    end,
+
+    Migration_SkipInvalidRowData = function()
+        local state = nil
+        do
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", version = 1 })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 })
+            LibP2PDB:InsertKey(db, "Users", 2, { name = "Alice", age = 30 })
+            LibP2PDB:InsertKey(db, "Users", 3, { name = "Eve", age = 35 })
+            state = LibP2PDB:ExportDatabase(db)
+        end
+        do
+            local db = LibP2PDB:NewDatabase({
+                prefix = "LibP2PDBImport",
+                version = 2,
+                onMigrateDB = function(target, source)
+                    LibP2PDB:NewTable(source.db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+                end,
+                onMigrateTable = function(target, source)
+                    if source.version == 1 then
+                        if source.tableName == "Users" then
+                            return "Accounts"
+                        end
+                    end
+                end,
+                onMigrateRow =function (target, source)
+                    if source.version == 1 then
+                        if source.tableName == "Users" then
+                            local key = "user" .. source.key
+                            local data = {
+                                --username = key, -- omit required field to make data invalid
+                                name = source.data.name,
+                                age = source.data.age,
+                            }
+                            return key, data
+                        end
+                    end
+                end
+            })
+            LibP2PDB:NewTable(db, { name = "Accounts", keyType = "string", schema = { username = "string", name = "string", age = "number" } })
+            Assert.ExpectErrors(function() LibP2PDB:ImportDatabase(db, state) end)
+
+            local dbi = priv.databases[db]
+            Assert.IsNonEmptyTable(dbi)
+            Assert.AreEqual(dbi.clock, 0)
+            Assert.IsNonEmptyTable(dbi.tables)
+
+            local ti = dbi.tables["Accounts"]
+            Assert.IsNonEmptyTable(ti)
+            Assert.AreEqual(ti.rowCount, 0)
+
+            local rows = ti.rows
+            Assert.IsEmptyTable(rows)
+        end
+    end,
+
+    Migration_SkipRowsThatFailValidation = function()
+        local state = nil
+        do
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", version = 1 })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 })
+            LibP2PDB:InsertKey(db, "Users", 2, { name = "Alice", age = 30 })
+            LibP2PDB:InsertKey(db, "Users", 3, { name = "Eve", age = 35 })
+            state = LibP2PDB:ExportDatabase(db)
+        end
+        do
+            local db = LibP2PDB:NewDatabase({
+                prefix = "LibP2PDBImport",
+                version = 2,
+                onMigrateDB = function(target, source)
+                    LibP2PDB:NewTable(source.db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+                end,
+                onMigrateTable = function(target, source)
+                    if source.version == 1 then
+                        if source.tableName == "Users" then
+                            return "Accounts"
+                        end
+                    end
+                end,
+                onMigrateRow =function (target, source)
+                    if source.version == 1 then
+                        if source.tableName == "Users" then
+                            local key = "user" .. source.key
+                            local age = source.data.age
+                            if source.data.name == "Alice" then
+                                age = age + 200 -- make age invalid for validation
+                            end
+                            local data = {
+                                username = key,
+                                name = source.data.name,
+                                age = age,
+                            }
+                            return key, data
+                        end
+                    end
+                end
+            })
+            LibP2PDB:NewTable(db, {
+                name = "Accounts",
+                keyType = "string",
+                schema = {
+                    username = "string",
+                    name = "string",
+                    age = "number"
+                },
+                onValidate = function(key, data)
+                    return data and data.age < 200
+                end
+            })
+            LibP2PDB:ImportDatabase(db, state)
+
+            local dbi = priv.databases[db]
+            Assert.IsNonEmptyTable(dbi)
+            Assert.AreEqual(dbi.clock, 3)
+            Assert.IsNonEmptyTable(dbi.tables)
+            Assert.IsNil(dbi.tables["Users"])
+
+            local ti = dbi.tables["Accounts"]
+            Assert.IsNonEmptyTable(ti)
+            Assert.AreEqual(ti.rowCount, 2)
+
+            local rows = ti.rows
+            Assert.IsNonEmptyTable(rows)
+            Assert.AreEqual(rows["user1"], {
+                data = {
+                    username = "user1",
+                    name = "Bob",
+                    age = 25,
+                    email = nil,
+                },
+                version = {
+                    clock = 1,
+                    peer = priv.peerId,
+                    tombstone = nil
+                },
+            })
+            Assert.IsNil(rows["user2"])
+            Assert.AreEqual(rows["user3"], {
+                data = {
+                    username = "user3",
+                    name = "Eve",
+                    age = 35,
+                    email = nil,
+                },
+                version = {
+                    clock = 3,
+                    peer = priv.peerId,
+                    tombstone = nil
+                },
+            })
+        end
+    end,
+
     ListTables = function()
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
         LibP2PDB:NewTable(db, { name = "Users", keyType = "number" })
@@ -5537,7 +6060,7 @@ local testChannels = {
 }
 
 --- Simulates ticking multiple private instances, processing their outgoing messages and OnUpdate handlers.
---- @param instances LibP2PDB.Private[] Array of private instances to tick.
+--- @param instances table[] Array of private instances to tick.
 local function TickPrivateInstances(instances)
     local orderedChannels = { "GUILD", "RAID", "PARTY", "YELL", "WHISPER" }
 
@@ -6342,9 +6865,6 @@ local PerformanceTests = {
         Print("Database (%d rows) encoded for print: %s (%s)", sampleCount, FormatSize(#encodedForPrint), FormatSize(#encodedForPrint / sampleCount, true))
     end,
 }
-
---- @class LibP2PDB.Private
---- @field registeredPrefixes table<string, boolean>
 
 local GREEN_CHECKMARK = "|TInterface\\RaidFrame\\ReadyCheck-Ready:16|t"
 
