@@ -44,6 +44,7 @@ local tinsert, tremove, tconcat, tsort = table.insert, table.remove, table.conca
 local unpack, select = unpack, select
 local setmetatable, getmetatable = setmetatable, getmetatable
 local securecallfunction = securecallfunction
+local fastrandom = fastrandom
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Local WoW API References
@@ -2621,6 +2622,7 @@ function Private:GetNeighbors(dbi)
     -- Compute our virtual index, zero-based
     local peerIndex = IndexOf(dbi.peersSorted, self.peerId)
     if not peerIndex then
+        Error("local peer ID '%s' not found in peer list for prefix '%s'", tostring(self.peerId), tostring(dbi.prefix))
         return {}
     end
 
@@ -2643,6 +2645,9 @@ function Private:GetNeighbors(dbi)
     local multiplier = FindCoprimeMultiplier(numPeers)
     if multiplier then
         local skipIndex = (((peerIndex - 1) * multiplier) % numPeers) + 1
+        if skipIndex == peerIndex and numPeers >= 8 then
+            skipIndex = fastrandom(1, numPeers) -- Fallback to random if we land on ourselves
+        end
         if skipIndex ~= peerIndex then
             neighbors[dbi.peersSorted[skipIndex]] = true
         end
@@ -5686,7 +5691,7 @@ local UnitTests = {
                         end
                     end
                 end,
-                onMigrateRow =function (target, source)
+                onMigrateRow = function(target, source)
                     if source.version == 1 then
                         if source.tableName == "Users" then
                             return "user" .. source.key, nil -- always return invalid data to skip all rows
@@ -5735,7 +5740,7 @@ local UnitTests = {
                         end
                     end
                 end,
-                onMigrateRow =function (target, source)
+                onMigrateRow = function(target, source)
                     if source.version == 1 then
                         if source.tableName == "Users" then
                             local key = "user" .. source.key
@@ -5790,7 +5795,7 @@ local UnitTests = {
                         end
                     end
                 end,
-                onMigrateRow =function (target, source)
+                onMigrateRow = function(target, source)
                     if source.version == 1 then
                         if source.tableName == "Users" then
                             local key = "user" .. source.key
