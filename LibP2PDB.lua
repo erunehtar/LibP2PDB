@@ -67,7 +67,8 @@ end
 
 local NIL_MARKER = strchar(0) --- @type string Marker for nil values in serialization.
 local LOG2 = log(2)           --- @type number Precomputed log(2) for efficiency.
-local BUCKET_SIZE = 32        --- @type integer Default bucket size for summary filters.
+local MIN_BUCKET_COUNT = 32   --- @type integer Minimum number of buckets for summary filters.
+local KEYS_PER_BUCKET = 32    --- @type integer Default bucket size for summary filters.
 
 --- @enum LibP2PDB.Color Color codes for console output.
 local Color = {
@@ -1049,7 +1050,7 @@ function LibP2PDB:NewTable(db, desc)
     end
 
     -- Create the bucketed hash set for the summary
-    local summary = LibBucketedHashSet.New(BUCKET_SIZE)
+    local summary = LibBucketedHashSet.New(MIN_BUCKET_COUNT)
     summary.keyIndex = {} --- @type table<LibP2PDB.TableKey, integer>
 
     -- Create the table instance
@@ -1987,7 +1988,7 @@ function Private:SetKey(dbi, tableName, ti, key, rowData)
             ti.rowCount = ti.rowCount + 1
 
             -- Resize summary if needed
-            local requiredNumBucket = max(BUCKET_SIZE, NextPowerOfTwo(ti.rowCount) / BUCKET_SIZE)
+            local requiredNumBucket = max(MIN_BUCKET_COUNT, NextPowerOfTwo(ti.rowCount) / MIN_BUCKET_COUNT)
             if requiredNumBucket > ti.summary.numBuckets then
                 self:ResizeTableSummary(ti, requiredNumBucket)
             end
@@ -2066,7 +2067,7 @@ function Private:MergeKey(dbi, dbClock, tableName, ti, key, rowData, rowVersion)
             ti.rowCount = ti.rowCount + 1
 
             -- Resize summary if needed
-            local requiredNumBucket = max(BUCKET_SIZE, NextPowerOfTwo(ti.rowCount) / BUCKET_SIZE)
+            local requiredNumBucket = max(MIN_BUCKET_COUNT, NextPowerOfTwo(ti.rowCount) / KEYS_PER_BUCKET)
             if requiredNumBucket > ti.summary.numBuckets then
                 self:ResizeTableSummary(ti, requiredNumBucket)
             end
