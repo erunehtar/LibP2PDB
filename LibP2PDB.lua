@@ -2881,8 +2881,8 @@ function Private:OnCommReceived(prefix, encoded, channel, sender)
         return
     end
 
-    -- Create a timer to process this message after 200 milliseconds
-    bucket[message.peer] = C_Timer.NewTimer(0.2, function()
+    -- Create a timer to process this message after 400 milliseconds
+    bucket[message.peer] = C_Timer.NewTimer(0.4, function()
         -- Update peer information
         self:UpdatePeer(message)
 
