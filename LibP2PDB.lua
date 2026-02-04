@@ -995,6 +995,7 @@ end
 --- @class LibP2PDB.TableDesc Description for creating a new table in the database.
 --- @field name LibP2PDB.TableName Name of the table to create.
 --- @field keyType LibP2PDB.TableKeyType Data type of the primary key.
+--- @field sync boolean? Optional flag indicating if the table should be synchronized with peers (default: true).
 --- @field schema LibP2PDB.TableSchema? Optional table schema defining field names and their allowed data types.
 --- @field onValidate LibP2PDB.TableOnValidateCallback? Optional callback function(key, data) for custom row validation. Must return true if valid, false otherwise. Data is a copy and has not yet been applied when this is called.
 --- @field onChange LibP2PDB.TableOnChangeCallback? Optional callback function(key, data) on row data changes. Data is nil for deletions. Data is a copy, and has already been applied when this is called.
@@ -1009,6 +1010,7 @@ function LibP2PDB:NewTable(db, desc)
     assert(IsNonEmptyString(desc.name), "desc.name must be a non-empty string")
     assert(IsNonEmptyString(desc.keyType), "desc.keyType must be a non-empty string")
     assert(desc.keyType == "string" or desc.keyType == "number", "desc.keyType must be 'string' or 'number'")
+    assert(IsBooleanOrNil(desc.sync), "desc.sync must be a boolean if provided")
     assert(IsNonEmptyTableOrNil(desc.schema), "desc.schema must be a non-empty table if provided")
     for fieldKey, allowedTypes in pairs(desc.schema or {}) do
         assert(IsNonEmptyString(fieldKey) or IsNumber(fieldKey), "each field key in desc.schema must be a non-empty string or number")
@@ -1035,6 +1037,12 @@ function LibP2PDB:NewTable(db, desc)
     -- Ensure table name is unique
     assert(dbi.tables[desc.name] == nil, "table '" .. desc.name .. "' already exists in the database")
 
+    -- Determine sync setting
+    local sync = desc.sync
+    if sync == nil then
+        sync = true
+    end
+
     -- Generate sorted schema
     local schemaSorted = nil --- @type LibP2PDB.TableSchemaSorted
     if desc.schema then
@@ -1057,6 +1065,7 @@ function LibP2PDB:NewTable(db, desc)
     --- @type LibP2PDB.TableInstance
     dbi.tables[desc.name] = {
         keyType = desc.keyType,
+        sync = sync,
         schema = desc.schema,
         schemaSorted = schemaSorted,
         onValidate = desc.onValidate,
@@ -1912,6 +1921,7 @@ end
 
 --- @class LibP2PDB.TableInstance Table instance.
 --- @field keyType LibP2PDB.TableKeyType Primary key type for the table.
+--- @field sync boolean Whether the table is included in gossip syncs.
 --- @field schema LibP2PDB.TableSchema? Optional schema definition for the table.
 --- @field schemaSorted LibP2PDB.TableSchemaSorted? Cached sorted schema for the table.
 --- @field onValidate LibP2PDB.TableOnValidateCallback? Optional validation callback for rows.
@@ -2971,21 +2981,23 @@ function Private:DigestRequestHandler(message)
     -- Build digest for each table
     local databaseDigest = {} --- @type LibP2PDB.DBDigest
     for tableName, ti in pairs(dbi.tables) do
-        if ti.rowCount > 0 then
-            local filter = dbi.filter.New(ti.rowCount, ti.seed)
-            ti.seed = ti.seed + 1 -- increment seed for next use
-            for key in pairs(ti.rows) do
-                filter:Insert(key)
+        if ti.sync then       -- Only include tables marked for synchronization
+            if ti.rowCount > 0 then
+                local filter = dbi.filter.New(ti.rowCount, ti.seed)
+                ti.seed = ti.seed + 1 -- increment seed for next use
+                for key in pairs(ti.rows) do
+                    filter:Insert(key)
+                end
+                databaseDigest[tableName] = {
+                    filter = filter:Export(),
+                    summary = ti.summary:Export(),
+                }
+            else
+                databaseDigest[tableName] = {
+                    NIL_MARKER,
+                    NIL_MARKER,
+                }
             end
-            databaseDigest[tableName] = {
-                filter = filter:Export(),
-                summary = ti.summary:Export(),
-            }
-        else
-            databaseDigest[tableName] = {
-                NIL_MARKER,
-                NIL_MARKER,
-            }
         end
     end
 
@@ -3018,6 +3030,8 @@ function Private:DigestResponseHandler(message)
     local databaseDigest = message.data --- @type LibP2PDB.DBDigest
     local tableStateMap = {}            --- @type LibP2PDB.TableStateMap
     local databaseRequest = {}          --- @type LibP2PDB.DBRequest
+    local missingRowsCount = 0
+    local outdatedRowsCount = 0
     for tableName, tableDigest in pairs(databaseDigest or {}) do
         -- Check if table is defined in the database
         local ti = dbi.tables[tableName]
@@ -3049,11 +3063,13 @@ function Private:DigestResponseHandler(message)
                 if not filter or not filter:Contains(key) then
                     -- They are missing our row, send it to them
                     rowStateMap[key] = self:ExportRow(row, ti.schemaSorted)
+                    missingRowsCount = missingRowsCount + 1
                 elseif summary then -- Check if our row differs from their summary
                     local bucketIndex = ti.summary.keyIndex[key]
                     if summary.buckets[bucketIndex] ~= ti.summary.buckets[bucketIndex] then
                         -- Their summary differs from ours for this key, request the row
                         tableRequest[key] = row.version.clock
+                        outdatedRowsCount = outdatedRowsCount + 1
                     end
                 end
             end
@@ -3074,7 +3090,7 @@ function Private:DigestResponseHandler(message)
 
     -- Send rows they are missing
     if IsNonEmptyTable(tableStateMap) then
-        Spam("sending missing rows response to '%s'", sender)
+        Spam("sending %d missing rows response to '%s'", missingRowsCount, sender)
         local obj = {
             type = CommMessageType.RowsResponse,
             peer = self.peerId,
@@ -3085,7 +3101,7 @@ function Private:DigestResponseHandler(message)
 
     -- Request rows that differs from their summary
     if IsNonEmptyTable(databaseRequest) then
-        Spam("sending outdated rows request to '%s'", sender)
+        Spam("sending %d outdated rows request to '%s'", outdatedRowsCount, sender)
         local obj = {
             type = CommMessageType.RowsRequest,
             peer = self.peerId,
@@ -3758,6 +3774,7 @@ local UnitTests = {
             local ti = dbi.tables["Users1"]
             Assert.IsNonEmptyTable(ti)
             Assert.AreEqual(ti.keyType, "string")
+            Assert.AreEqual(ti.sync, true)
             Assert.IsNil(ti.schema)
             Assert.IsNil(ti.schemaSorted)
             Assert.IsNil(ti.onValidate)
@@ -3771,6 +3788,7 @@ local UnitTests = {
             LibP2PDB:NewTable(db, {
                 name = "Users2",
                 keyType = "number",
+                sync = false,
                 schema = {
                     name = "string",
                     age = { "number", "nil" },
@@ -3782,6 +3800,7 @@ local UnitTests = {
             local ti = dbi.tables["Users2"]
             Assert.IsNonEmptyTable(ti)
             Assert.AreEqual(ti.keyType, "number")
+            Assert.AreEqual(ti.sync, false)
             Assert.AreEqual(ti.schema, { name = "string", age = { "number", "nil" } })
             Assert.AreEqual(ti.schemaSorted, { { "age", { "number", "nil" } }, { "name", "string" } })
             Assert.IsFunction(ti.onValidate)
@@ -6283,6 +6302,8 @@ local NetworkTests = {
                 local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
                 LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
                 LibP2PDB:InsertKey(db, "Users", i, { name = "Player" .. i, age = 20 + i })
+                LibP2PDB:NewTable(db, { name = "Scores", keyType = "number", sync = false, schema = { score = "number" } })
+                LibP2PDB:InsertKey(db, "Scores", i, { score = i * 10 })
                 return db
             end)
         end
@@ -6308,13 +6329,138 @@ local NetworkTests = {
         -- Check that all peers have all data
         for i = 1, numPeers do
             PrivateScope(instances[i], function()
+                -- Check that sync table got fully synchronized
                 local keys = LibP2PDB:ListKeys(databases[i], "Users")
-                --Debug("Peer " .. i .. " has keys: " .. table.concat(keys, ", "))
                 for j = 1, numPeers do
                     Assert.AreEqual(#keys, numPeers)
                     Assert.AreEqual(LibP2PDB:GetKey(databases[i], "Users", j), { name = "Player" .. j, age = 20 + j })
                 end
+
+                -- Check that non-sync table did not get synchronized
+                local scoreKeys = LibP2PDB:ListKeys(databases[i], "Scores")
+                Assert.AreEqual(#scoreKeys, 1)
+                Assert.AreEqual(LibP2PDB:GetKey(databases[i], "Scores", i), { score = i * 10 })
             end)
+        end
+    end,
+
+    SyncDatabase_OneKeyChange = function()
+        local instances = {}
+        local databases = {}
+        local numPeers = 4
+        for i = 1, numPeers do
+            instances[i] = NewPrivateInstance(i)
+            databases[i] = PrivateScope(instances[i], function()
+                local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+                LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+                for i = 1, 10 do
+                    LibP2PDB:InsertKey(db, "Users", i, { name = "Name" .. i, age = 20 + i })
+                end
+                return db
+            end)
+        end
+
+        -- Make all peers broadcast their presence
+        VerbosityScope(3, function()
+            for i = 1, numPeers do
+                PrivateScope(instances[i], function() LibP2PDB:BroadcastPresence(databases[i]) end)
+            end
+            TickPrivateInstances(instances)
+        end)
+
+        -- Make all peers sync their databases
+        VerbosityScope(3, function()
+            for r = 1, numRounds do
+                for i = 1, numPeers do
+                    PrivateScope(instances[i], function() LibP2PDB:SyncDatabase(databases[i]) end)
+                end
+                TickPrivateInstances(instances)
+            end
+        end)
+
+        -- Change one key on peer 1
+        PrivateScope(instances[1], function()
+            LibP2PDB:UpdateKey(databases[1], "Users", 5, function(data)
+                data.name = "Bob"
+                data.age = 35
+                return data
+            end)
+        end)
+
+        -- Sync databases again
+        VerbosityScope(3, function()
+            for r = 1, numRounds do
+                for i = 1, numPeers do
+                    PrivateScope(instances[i], function() LibP2PDB:SyncDatabase(databases[i]) end)
+                end
+                TickPrivateInstances(instances)
+            end
+        end)
+
+        -- Check that all peers have the updated key
+        for i = 1, numPeers do
+            PrivateScope(instances[i], function()
+                Assert.AreEqual(LibP2PDB:GetKey(databases[i], "Users", 5), { name = "Bob", age = 35 })
+            end)
+        end
+    end,
+
+    SyncDatabase_NoKeyChange = function()
+        local instances = {}
+        local databases = {}
+        local numPeers = 4
+        for i = 1, numPeers do
+            instances[i] = NewPrivateInstance(i)
+            databases[i] = PrivateScope(instances[i], function()
+                local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+                LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+                for i = 1, 10 do
+                    LibP2PDB:InsertKey(db, "Users", i, { name = "Name" .. i, age = 20 + i })
+                end
+                return db
+            end)
+        end
+
+        -- Make all peers broadcast their presence
+        VerbosityScope(3, function()
+            for i = 1, numPeers do
+                PrivateScope(instances[i], function() LibP2PDB:BroadcastPresence(databases[i]) end)
+            end
+            TickPrivateInstances(instances)
+        end)
+
+        -- Make all peers sync their databases
+        VerbosityScope(3, function()
+            for r = 1, numRounds do
+                for i = 1, numPeers do
+                    PrivateScope(instances[i], function() LibP2PDB:SyncDatabase(databases[i]) end)
+                end
+                TickPrivateInstances(instances)
+            end
+        end)
+
+        -- Record the state of each database after complete sync
+        local dbStates = {}
+        for i = 1, numPeers do
+            dbStates[i] = PrivateScope(instances[i], function()
+                return LibP2PDB:ExportDatabase(databases[i])
+            end)
+        end
+
+        -- Call SyncDatabase again on all peers
+        VerbosityScope(3, function()
+            for i = 1, numPeers do
+                PrivateScope(instances[i], function() LibP2PDB:SyncDatabase(databases[i]) end)
+            end
+            TickPrivateInstances(instances)
+        end)
+
+        -- Check that the state of each database is unchanged
+        for i = 1, numPeers do
+            local currentState = PrivateScope(instances[i], function()
+                return LibP2PDB:ExportDatabase(databases[i])
+            end)
+            Assert.AreEqual(currentState, dbStates[i])
         end
     end,
 
