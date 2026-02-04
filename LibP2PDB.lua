@@ -54,6 +54,13 @@ local UnitName, UnitGUID = UnitName, UnitGUID
 local GetTime, GetServerTime = GetTime, GetServerTime
 local IsInGuild, IsInRaid, IsInGroup, IsInInstance = IsInGuild, IsInRaid, IsInGroup, IsInInstance
 
+local InActiveBattlefield
+if C_PvP and C_PvP.IsActiveBattlefield then
+    InActiveBattlefield = C_PvP.IsActiveBattlefield
+else
+    InActiveBattlefield = InActiveBattlefield --- @type fun(): boolean
+end
+
 ------------------------------------------------------------------------------------------------------------------------
 -- Constants
 ------------------------------------------------------------------------------------------------------------------------
@@ -2729,7 +2736,7 @@ function Private:Broadcast(dbi, data, channels, priority)
         AceComm.SendCommMessage(self, dbi.prefix, encoded, "GUILD", nil, priority)
     end
 
-    if IsInRaid() then
+    if IsInRaid() and not InActiveBattlefield() then
         --- @cast priority "ALERT"|"BULK"|"NORMAL"
         AceComm.SendCommMessage(self, dbi.prefix, encoded, "RAID", nil, priority)
     elseif IsInGroup() then
