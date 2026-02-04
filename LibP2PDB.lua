@@ -84,12 +84,13 @@ local Color = {
 
 --- @enum LibP2PDB.CommMessageType Communication message types.
 local CommMessageType = {
-    PeerDiscoveryRequest = 1,
-    PeerDiscoveryResponse = 2,
-    DigestRequest = 3,
-    DigestResponse = 4,
-    RowsRequest = 5,
-    RowsResponse = 6,
+    Empty = 1,
+    PeerDiscoveryRequest = 2,
+    PeerDiscoveryResponse = 3,
+    DigestRequest = 4,
+    DigestResponse = 5,
+    RowsRequest = 6,
+    RowsResponse = 7,
 }
 
 --- @enum LibP2PDB.CommPriority Communication priorities.
@@ -794,8 +795,12 @@ function LibP2PDB:NewDatabase(desc)
         --writePolicy = nil,
     }
 
-    -- Record self in peers list for easier comparisons (but never updated)
-    priv:RecordPeer(dbi, priv.peerId, priv.playerName, dbi.clock)
+    -- Add self in peers list for easier comparisons (but never updated)
+    dbi.peers[priv.peerId] = {
+        name = priv.playerName,
+        lastSeen = 0,
+    }
+    tinsert(dbi.peersSorted, priv.peerId)
 
     -- Setup default filter if none provided
     if not dbi.filter then
@@ -1408,9 +1413,33 @@ end
 -- Public API: Sync / Gossip Controls
 ------------------------------------------------------------------------------------------------------------------------
 
+--- Broadcast presence to all peers on the database's communication prefix.
+--- Used to announce availability to peers without having to send a key.
+--- If you periodically broadcast any keys, this may not be necessary.
+--- @param db LibP2PDB.DBHandle Database handle.
+function LibP2PDB:BroadcastPresence(db)
+    assert(IsEmptyTable(db), "db must be an empty table")
+
+    -- Validate db instance
+    local dbi = priv.databases[db]
+    assert(dbi, "db is not a recognized database handle")
+
+    -- Prune timed-out peers
+    priv:PruneTimedOutPeers(dbi)
+
+    -- Send an empty message
+    Spam("broadcasting presence message")
+    local obj = {
+        type = CommMessageType.Empty,
+        peer = priv.peerId,
+    }
+    priv:Broadcast(dbi, obj, dbi.channels, CommPriority.Low)
+end
+
 --- Discover peers on the database's communication prefix.
 --- If onDiscoveryComplete callback is defined, it will be invoked when discovery completes.
 --- @param db LibP2PDB.DBHandle Database handle.
+--- @deprecated Use LibP2PDB:BroadcastPresence instead.
 function LibP2PDB:DiscoverPeers(db)
     assert(IsEmptyTable(db), "db must be an empty table")
 
@@ -1862,7 +1891,7 @@ end
 --- @field serializer LibP2PDB.Serializer Serializer interface.
 --- @field compressor LibP2PDB.Compressor Compressor interface.
 --- @field encoder LibP2PDB.Encoder Encoder interface.
---- @field peers table<string, LibP2PDB.PeerInfo> Known peers for this session.
+--- @field peers table<LibP2PDB.PeerID, LibP2PDB.PeerInfo> Known peers for this session.
 --- @field peersSorted LibP2PDB.PeerID[] Sorted array of peer IDs for efficient neighbors lookup.
 --- @field peerTimeout number Timeout in seconds for considering a peer inactive.
 --- @field buckets table Communication event buckets for burst control.
@@ -1878,7 +1907,6 @@ end
 
 --- @class LibP2PDB.PeerInfo Peer information.
 --- @field name string Name of the peer.
---- @field clock LibP2PDB.Clock Lamport clock of the peer's database.
 --- @field lastSeen number Local timestamp of the last time the peer was seen.
 
 --- @class LibP2PDB.TableInstance Table instance.
@@ -2854,6 +2882,9 @@ function Private:OnCommReceived(prefix, encoded, channel, sender)
 
     -- Create a timer to process this message after 200 milliseconds
     bucket[message.peer] = C_Timer.NewTimer(0.2, function()
+        -- Update peer information
+        self:UpdatePeer(message)
+
         -- Process the message
         self:DispatchMessage(message)
 
@@ -2870,7 +2901,9 @@ end
 --- Dispatch a received message to the appropriate handler.
 --- @param message LibP2PDB.Message
 function Private:DispatchMessage(message)
-    if message.type == CommMessageType.PeerDiscoveryRequest then
+    if message.type == CommMessageType.Empty then
+        -- Nothing to do
+    elseif message.type == CommMessageType.PeerDiscoveryRequest then
         self:PeerDiscoveryRequestHandler(message)
     elseif message.type == CommMessageType.PeerDiscoveryResponse then
         self:PeerDiscoveryResponseHandler(message)
@@ -2896,9 +2929,7 @@ function Private:PeerDiscoveryRequestHandler(message)
     Spam("received peer discovery request from '%s'", tostring(sender))
 
     -- Record the peer
-    local peerID = message.peer
-    local peerClock = message.data --- @type LibP2PDB.Clock
-    self:RecordPeer(dbi, peerID, sender, peerClock)
+    self:UpdatePeer(message)
 
     -- Send peer discovery response
     Spam("sending peer discovery response to '%s'", tostring(sender))
@@ -2924,10 +2955,7 @@ function Private:PeerDiscoveryResponseHandler(message)
         dbi.lastDiscoveryResponseTime = now
     end
 
-    -- Record the peer
-    local peerID = message.peer
-    local clock = message.data --- @type LibP2PDB.Clock
-    self:RecordPeer(dbi, peerID, sender, clock)
+    self:UpdatePeer(message)
 end
 
 --- Handler for digest request messages.
@@ -3151,24 +3179,23 @@ function Private:OnUpdate(dbi)
     end
 end
 
---- Record information about a new or existing peer.
---- @param dbi LibP2PDB.DBInstance Database instance.
---- @param peerID LibP2PDB.PeerID Peer ID.
---- @param peerName string Peer name.
---- @param peerClock LibP2PDB.Clock Peer clock.
-function Private:RecordPeer(dbi, peerID, peerName, peerClock)
+--- Update information about a new or existing peer.
+--- @param message LibP2PDB.Message The received message containing peer information.
+function Private:UpdatePeer(message)
+    local dbi = message.dbi
+    local peerID = message.peer
+    local peerName = message.sender
+
     -- Lookup existing peer info
     local now = GetTime()
     local peerInfo = dbi.peers[peerID]
 
     -- Update existing peer
     if peerInfo then
-        peerInfo.clock = peerClock
         peerInfo.lastSeen = now
     else -- Insert new peer
         peerInfo = {
             name = peerName,
-            clock = peerClock,
             lastSeen = now,
         }
         dbi.peers[peerID] = peerInfo
@@ -6114,6 +6141,86 @@ local numPeers = 8
 local numRounds = ceil(log(numPeers + 1) / log(2))
 
 local NetworkTests = {
+    BroadcastPresence = function()
+        local instances = {}
+        local databases = {}
+        for i = 1, numPeers do
+            instances[i] = NewPrivateInstance(i)
+            databases[i] = PrivateScope(instances[i], function()
+                return LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+            end)
+        end
+
+        -- Have peer 1 broadcast its presence to all other peers
+        VerbosityScope(3, function()
+            PrivateScope(instances[1], function() LibP2PDB:BroadcastPresence(databases[1]) end)
+            TickPrivateInstances(instances)
+        end)
+
+        -- Check that peer 1 doesn't know about any other peers yet
+        local db = databases[1]
+        local dbi = instances[1].databases[db]
+        local peerCount = 0
+        for _ in pairs(dbi.peers) do
+            peerCount = peerCount + 1
+        end
+        Assert.AreEqual(peerCount, 1)
+
+        -- Check that all other peers know about peer 1
+        for i = 2, numPeers do
+            local db = databases[i]
+            local dbi = instances[i].databases[db]
+            Assert.ContainsKey(dbi.peers, instances[1].peerId)
+            Assert.AreEqual(dbi.peers[instances[1].peerId].name, "Player1")
+        end
+
+        -- Now have all other peers broadcast their presence
+        VerbosityScope(3, function()
+            for i = 2, numPeers do
+                PrivateScope(instances[i], function() LibP2PDB:BroadcastPresence(databases[i]) end)
+            end
+            TickPrivateInstances(instances)
+        end)
+
+        -- Check that all peers know about all other peers
+        for i = 1, numPeers do
+            local db = databases[i]
+            local dbi = instances[i].databases[db]
+            for j = 1, numPeers do
+                if i ~= j then
+                    Assert.ContainsKey(dbi.peers, instances[j].peerId)
+                    Assert.AreEqual(dbi.peers[instances[j].peerId].name, "Player" .. j)
+                end
+            end
+        end
+
+        -- Check that the sorted peers list is correct
+        for i = 1, numPeers do
+            PrivateScope(instances[i], function()
+                local db = databases[i]
+                local dbi = instances[i].databases[db]
+                local sortedPeers = ShallowCopy(dbi.peersSorted)
+                Assert.AreEqual(#sortedPeers, numPeers)
+                tsort(sortedPeers, function(a, b) return a < b end)
+                Assert.AreEqual(dbi.peersSorted, sortedPeers)
+            end)
+        end
+    end,
+
+    BroadcastPresence_DBIsInvalid_Throws = function()
+        local instance = NewPrivateInstance(1)
+        PrivateScope(instance, function()
+            Assert.Throws(function() LibP2PDB:BroadcastPresence(nil) end)
+            Assert.Throws(function() LibP2PDB:BroadcastPresence(true) end)
+            Assert.Throws(function() LibP2PDB:BroadcastPresence(false) end)
+            Assert.Throws(function() LibP2PDB:BroadcastPresence("") end)
+            Assert.Throws(function() LibP2PDB:BroadcastPresence("invalid") end)
+            Assert.Throws(function() LibP2PDB:BroadcastPresence(123) end)
+            Assert.Throws(function() LibP2PDB:BroadcastPresence({}) end)
+        end)
+    end,
+
+    --- @diagnostic disable: deprecated
     DiscoverPeers = function()
         local instances = {}
         local databases = {}
@@ -6164,6 +6271,7 @@ local NetworkTests = {
             Assert.Throws(function() LibP2PDB:DiscoverPeers({}) end)
         end)
     end,
+    --- @diagnostic enable: deprecated
 
     SyncDatabase = function()
         local instances = {}
@@ -6178,10 +6286,10 @@ local NetworkTests = {
             end)
         end
 
-        -- Make all peers discover each other
+        -- Make all peers broadcast their presence
         VerbosityScope(3, function()
             for i = 1, numPeers do
-                PrivateScope(instances[i], function() LibP2PDB:DiscoverPeers(databases[i]) end)
+                PrivateScope(instances[i], function() LibP2PDB:BroadcastPresence(databases[i]) end)
             end
             TickPrivateInstances(instances)
         end)
@@ -6235,10 +6343,10 @@ local NetworkTests = {
             end)
         end
 
-        -- Make all peers discover each other
+        -- Make all peers broadcast their presence
         VerbosityScope(3, function()
             for i = 1, numPeers do
-                PrivateScope(instances[i], function() LibP2PDB:DiscoverPeers(databases[i]) end)
+                PrivateScope(instances[i], function() LibP2PDB:BroadcastPresence(databases[i]) end)
             end
             TickPrivateInstances(instances)
         end)
@@ -6287,10 +6395,10 @@ local NetworkTests = {
             end)
         end
 
-        -- Make all peers discover each other
+        -- Make all peers broadcast their presence
         VerbosityScope(3, function()
             for i = 1, numPeers do
-                PrivateScope(instances[i], function() LibP2PDB:DiscoverPeers(databases[i]) end)
+                PrivateScope(instances[i], function() LibP2PDB:BroadcastPresence(databases[i]) end)
             end
             TickPrivateInstances(instances)
         end)
@@ -6398,10 +6506,10 @@ local NetworkTests = {
             end)
         end
 
-        -- Make all peers discover each other
+        -- Make all peers broadcast their presence
         VerbosityScope(3, function()
             for i = 1, numPeers do
-                PrivateScope(instances[i], function() LibP2PDB:DiscoverPeers(databases[i]) end)
+                PrivateScope(instances[i], function() LibP2PDB:BroadcastPresence(databases[i]) end)
             end
             TickPrivateInstances(instances)
         end)
@@ -6442,10 +6550,10 @@ local NetworkTests = {
             end)
         end
 
-        -- Make all peers discover each other
+        -- Make all peers broadcast their presence
         VerbosityScope(3, function()
             for i = 1, numPeers do
-                PrivateScope(instances[i], function() LibP2PDB:DiscoverPeers(databases[i]) end)
+                PrivateScope(instances[i], function() LibP2PDB:BroadcastPresence(databases[i]) end)
             end
             TickPrivateInstances(instances)
         end)
@@ -6540,10 +6648,10 @@ local NetworkTests = {
             end)
         end
 
-        -- Make all peers discover each other
+        -- Make all peers broadcast their presence
         VerbosityScope(3, function()
             for i = 1, numPeers do
-                PrivateScope(instances[i], function() LibP2PDB:DiscoverPeers(databases[i]) end)
+                PrivateScope(instances[i], function() LibP2PDB:BroadcastPresence(databases[i]) end)
             end
             TickPrivateInstances(instances)
         end)
@@ -6582,10 +6690,10 @@ local NetworkTests = {
             end)
         end
 
-        -- Make all peers discover each other
+        -- Make all peers broadcast their presence
         VerbosityScope(3, function()
             for i = 1, numPeers do
-                PrivateScope(instances[i], function() LibP2PDB:DiscoverPeers(databases[i]) end)
+                PrivateScope(instances[i], function() LibP2PDB:BroadcastPresence(databases[i]) end)
             end
             TickPrivateInstances(instances)
         end)
@@ -6662,10 +6770,10 @@ local NetworkTests = {
             end)
         end
 
-        -- Make all peers discover each other
+        -- Make all peers broadcast their presence
         VerbosityScope(3, function()
             for i = 1, numPeers do
-                PrivateScope(instances[i], function() LibP2PDB:DiscoverPeers(databases[i]) end)
+                PrivateScope(instances[i], function() LibP2PDB:BroadcastPresence(databases[i]) end)
             end
             TickPrivateInstances(instances)
         end)
