@@ -69,6 +69,7 @@ local NIL_MARKER = strchar(0) --- @type string Marker for nil values in serializ
 local LOG2 = log(2)           --- @type number Precomputed log(2) for efficiency.
 local MIN_BUCKET_COUNT = 32   --- @type integer Minimum number of buckets for summary filters.
 local KEYS_PER_BUCKET = 32    --- @type integer Default bucket size for summary filters.
+local ROWS_PER_CHUNK = 256    --- @type integer Number of rows per chunk for chunked transmission.
 
 --- @enum LibP2PDB.Color Color codes for console output.
 local Color = {
@@ -3091,23 +3092,13 @@ function Private:DigestResponseHandler(message)
     -- Send rows they are missing
     if IsNonEmptyTable(tableStateMap) then
         Spam("sending %d missing rows response to '%s'", missingRowsCount, sender)
-        local obj = {
-            type = CommMessageType.RowsResponse,
-            peer = self.peerId,
-            data = { dbi.version, dbi.clock, tableStateMap }, --- @type LibP2PDB.DBState
-        }
-        self:Send(dbi, obj, "WHISPER", sender, CommPriority.Normal)
+        self:SendChunkedRowsResponse(dbi, ROWS_PER_CHUNK, sender, tableStateMap)
     end
 
     -- Request rows that differs from their summary
     if IsNonEmptyTable(databaseRequest) then
         Spam("sending %d outdated rows request to '%s'", outdatedRowsCount, sender)
-        local obj = {
-            type = CommMessageType.RowsRequest,
-            peer = self.peerId,
-            data = databaseRequest, --- @type LibP2PDB.DBRequest
-        }
-        self:Send(dbi, obj, "WHISPER", sender, CommPriority.Normal)
+        self:SendChunkedRowsRequest(dbi, ROWS_PER_CHUNK, sender, databaseRequest)
     end
 end
 
@@ -3124,6 +3115,7 @@ function Private:RowsRequestHandler(message)
     -- Export requested rows for each table
     local databaseRequest = message.data                           --- @type LibP2PDB.DBRequest
     local tableStateMap = {}                                       --- @type LibP2PDB.TableStateMap
+    local rowCount = 0
     for tableName, tableRequest in pairs(databaseRequest or {}) do --- @cast tableRequest LibP2PDB.TableRequest
         local ti = dbi.tables[tableName]
         if ti then
@@ -3133,6 +3125,7 @@ function Private:RowsRequestHandler(message)
                 local row = ti.rows[key]
                 if row and self:CompareVersion({ clock = clock, peer = peerID }, row.version) then
                     rowStateMap[key] = self:ExportRow(row, ti.schemaSorted)
+                    rowCount = rowCount + 1
                 end
             end
 
@@ -3152,13 +3145,8 @@ function Private:RowsRequestHandler(message)
     end
 
     -- Send rows response
-    Spam("sending rows response to '%s'", tostring(sender))
-    local obj = {
-        type = CommMessageType.RowsResponse,
-        peer = self.peerId,
-        data = { dbi.version, dbi.clock, tableStateMap }, --- @type LibP2PDB.DBState
-    }
-    self:Send(dbi, obj, "WHISPER", sender, CommPriority.Normal)
+    Spam("sending %d rows response to '%s'", rowCount, sender)
+    self:SendChunkedRowsResponse(dbi, ROWS_PER_CHUNK, sender, tableStateMap)
 end
 
 --- Handler for rows response messages.
@@ -3193,6 +3181,110 @@ function Private:OnUpdate(dbi)
         if dbi.onDiscoveryComplete then
             securecallfunction(dbi.onDiscoveryComplete)
         end
+    end
+end
+
+--- Send rows response in chunks to avoid transmission timeouts.
+--- @param dbi LibP2PDB.DBInstance Database instance.
+--- @param chunkSize integer Number of rows per chunk.
+--- @param sender string Target peer name.
+--- @param tableStateMap LibP2PDB.TableStateMap Complete table state map to send in chunks.
+function Private:SendChunkedRowsResponse(dbi, chunkSize, sender, tableStateMap)
+    local chunkTableStateMap = {} --- @type LibP2PDB.TableStateMap
+    local chunkRowCount = 0
+
+    -- Iterate through all tables and rows
+    for tableName, rowStateMap in pairs(tableStateMap) do
+        local chunkRowStateMap = {} --- @type LibP2PDB.RowStateMap
+
+        for key, rowState in pairs(rowStateMap) do
+            -- Add row to current chunk
+            chunkRowStateMap[key] = rowState
+            chunkRowCount = chunkRowCount + 1
+
+            -- Send chunk when it reaches the limit
+            if chunkRowCount >= chunkSize then
+                chunkTableStateMap[tableName] = chunkRowStateMap
+                local obj = {
+                    type = CommMessageType.RowsResponse,
+                    peer = self.peerId,
+                    data = { dbi.version, dbi.clock, chunkTableStateMap }, --- @type LibP2PDB.DBState
+                }
+                self:Send(dbi, obj, "WHISPER", sender, CommPriority.Normal)
+
+                -- Reset for next chunk
+                chunkTableStateMap = {}
+                chunkRowStateMap = {}
+                chunkRowCount = 0
+            end
+        end
+
+        -- Add remaining rows from this table to chunk
+        if IsNonEmptyTable(chunkRowStateMap) then
+            chunkTableStateMap[tableName] = chunkRowStateMap
+        end
+    end
+
+    -- Send final partial chunk if any rows remain
+    if chunkRowCount > 0 then
+        local obj = {
+            type = CommMessageType.RowsResponse,
+            peer = self.peerId,
+            data = { dbi.version, dbi.clock, chunkTableStateMap }, --- @type LibP2PDB.DBState
+        }
+        self:Send(dbi, obj, "WHISPER", sender, CommPriority.Normal)
+    end
+end
+
+--- Send rows request in chunks to avoid transmission timeouts.
+--- @param dbi LibP2PDB.DBInstance Database instance.
+--- @param chunkSize integer Number of rows per chunk.
+--- @param sender string Target peer name.
+--- @param databaseRequest LibP2PDB.DBRequest Complete database request to send in chunks.
+function Private:SendChunkedRowsRequest(dbi, chunkSize, sender, databaseRequest)
+    local chunkDatabaseRequest = {} --- @type LibP2PDB.DBRequest
+    local chunkRowCount = 0
+
+    -- Iterate through all tables and keys
+    for tableName, tableRequest in pairs(databaseRequest) do
+        local chunkTableRequest = {} --- @type LibP2PDB.TableRequest
+
+        for key, clock in pairs(tableRequest) do
+            -- Add key to current chunk
+            chunkTableRequest[key] = clock
+            chunkRowCount = chunkRowCount + 1
+
+            -- Send chunk when it reaches the limit
+            if chunkRowCount >= chunkSize then
+                chunkDatabaseRequest[tableName] = chunkTableRequest
+                local obj = {
+                    type = CommMessageType.RowsRequest,
+                    peer = self.peerId,
+                    data = chunkDatabaseRequest, --- @type LibP2PDB.DBRequest
+                }
+                self:Send(dbi, obj, "WHISPER", sender, CommPriority.Normal)
+
+                -- Reset for next chunk
+                chunkDatabaseRequest = {}
+                chunkTableRequest = {}
+                chunkRowCount = 0
+            end
+        end
+
+        -- Add remaining keys from this table to chunk
+        if IsNonEmptyTable(chunkTableRequest) then
+            chunkDatabaseRequest[tableName] = chunkTableRequest
+        end
+    end
+
+    -- Send final partial chunk if any keys remain
+    if chunkRowCount > 0 then
+        local obj = {
+            type = CommMessageType.RowsRequest,
+            peer = self.peerId,
+            data = chunkDatabaseRequest, --- @type LibP2PDB.DBRequest
+        }
+        self:Send(dbi, obj, "WHISPER", sender, CommPriority.Normal)
     end
 end
 
