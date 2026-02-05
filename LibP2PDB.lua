@@ -2021,7 +2021,7 @@ function Private:SetKey(dbi, tableName, ti, key, rowData)
             ti.rowCount = ti.rowCount + 1
 
             -- Resize summary if needed
-            local requiredNumBucket = max(MIN_BUCKET_COUNT, NextPowerOfTwo(ti.rowCount) / MIN_BUCKET_COUNT)
+            local requiredNumBucket = max(MIN_BUCKET_COUNT, NextPowerOfTwo(ti.rowCount) / KEYS_PER_BUCKET)
             if requiredNumBucket > ti.summary.numBuckets then
                 self:ResizeTableSummary(ti, requiredNumBucket)
             end
