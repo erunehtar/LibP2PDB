@@ -3248,7 +3248,7 @@ function Private:SendChunkedRowsResponse(dbi, chunkSize, sender, tableStateMap)
     end
 
     -- Send final partial chunk if any rows remain
-    if chunkRowCount > 0 then
+    if IsNonEmptyTable(chunkTableStateMap) then
         local obj = {
             type = CommMessageType.RowsResponse,
             peer = self.peerId,
@@ -3300,7 +3300,7 @@ function Private:SendChunkedRowsRequest(dbi, chunkSize, sender, databaseRequest)
     end
 
     -- Send final partial chunk if any keys remain
-    if chunkRowCount > 0 then
+    if IsNonEmptyTable(chunkDatabaseRequest) then
         local obj = {
             type = CommMessageType.RowsRequest,
             peer = self.peerId,
