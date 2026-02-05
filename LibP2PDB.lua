@@ -592,7 +592,7 @@ end
 --- @param ... any Format arguments.
 --- @return string message The error message.
 local function ReportError(dbi, fmt, ...)
-    local success, message = pcall(format, fmt, ...)
+    local success, message = pcall(format, fmt, tostringall(...))
     if not success then
         message = fmt
     end
@@ -1597,7 +1597,7 @@ function LibP2PDB:SendKey(db, tableName, key, target)
     end
 
     -- Send the row to the target player
-    Spam("sending key '%s' from table(s) '%s' to '%s'", tostring(key), strjoin(", ", unpack(tableNames)), target)
+    Spam("sending key '%s' from table(s) '%s' to '%s'", key, strjoin(", ", unpack(tableNames)), target)
     local obj = {
         type = CommMessageType.RowsResponse,
         peer = priv.peerId,
@@ -1651,7 +1651,7 @@ function LibP2PDB:BroadcastKey(db, tableName, key)
     end
 
     -- Send the row to the target player
-    Spam("broadcasting key '%s' from table(s) '%s'", tostring(key), strjoin(", ", unpack(tableNames)))
+    Spam("broadcasting key '%s' from table(s) '%s'", key, strjoin(", ", unpack(tableNames)))
     local obj = {
         type = CommMessageType.RowsResponse,
         peer = priv.peerId,
@@ -2435,28 +2435,28 @@ function Private:ImportRow(dbi, dbClock, tableName, ti, key, rowState)
     -- Validate row data (skipped for tombstone rows)
     local incomingData = rowState[1]
     if not IsTableOrNil(incomingData) and incomingData ~= NIL_MARKER then
-        ReportError(dbi, "invalid data in row state for key '%s' in table '%s'", tostring(key), tableName)
+        ReportError(dbi, "invalid data in row state for key '%s' in table '%s'", key, tableName)
         return
     end
 
     -- Validate version clock
     local incomingVersionClock = rowState[2]
     if not IsInteger(incomingVersionClock, 0) then
-        ReportError(dbi, "invalid clock in row version state for key '%s' in table '%s'", tostring(key), tableName)
+        ReportError(dbi, "invalid clock in row version state for key '%s' in table '%s'", key, tableName)
         return
     end
 
     -- Validate version peer
     local incomingVersionPeer = rowState[3]
     if not IsNonEmptyString(incomingVersionPeer) then
-        ReportError(dbi, "invalid peer in row version state for key '%s' in table '%s'", tostring(key), tableName)
+        ReportError(dbi, "invalid peer in row version state for key '%s' in table '%s'", key, tableName)
         return
     end
 
     -- Validate tombstone flag
     local incomingVersionTombstone = rowState[4]
     if not IsBooleanOrNil(incomingVersionTombstone) then
-        ReportError(dbi, "invalid tombstone flag in row version state for key '%s' in table '%s'", tostring(key), tableName)
+        ReportError(dbi, "invalid tombstone flag in row version state for key '%s' in table '%s'", key, tableName)
         return
     end
 
@@ -2598,7 +2598,7 @@ function Private:MigrateRow(target, source)
         }
         local success, newKey, newRowData = SafeCall(target.dbi, target.dbi.onMigrateRow, targetCtx, sourceCtx)
         if not success then
-            ReportError(target.dbi, "row data migration failed for key '%s' in table '%s'", tostring(source.key), source.tableName)
+            ReportError(target.dbi, "row data migration failed for key '%s' in table '%s'", source.key, source.tableName)
             return
         end
         if newKey then
@@ -2611,7 +2611,7 @@ function Private:MigrateRow(target, source)
 
     -- Validate key
     if not IsNonEmptyString(targetKey) and not IsNumber(targetKey) then
-        ReportError(target.dbi, "migrated key must be a non-empty string or number for key '%s' in table '%s'", tostring(source.key), source.tableName)
+        ReportError(target.dbi, "migrated key must be a non-empty string or number for key '%s' in table '%s'", source.key, source.tableName)
         return
     end
 
@@ -2624,7 +2624,7 @@ function Private:MigrateRow(target, source)
 
     -- Validate row data
     if not IsTableOrNil(targetRowData) then
-        ReportError(target.dbi, "migrated row data must be a table or nil for key '%s' in table '%s'", tostring(source.key), source.tableName)
+        ReportError(target.dbi, "migrated row data must be a table or nil for key '%s' in table '%s'", source.key, source.tableName)
         return
     end
 
@@ -2670,7 +2670,7 @@ function Private:GetNeighbors(dbi)
     -- Compute our virtual index, zero-based
     local peerIndex = IndexOf(dbi.peersSorted, self.peerId)
     if not peerIndex then
-        Error("local peer ID '%s' not found in peer list for prefix '%s'", tostring(self.peerId), tostring(dbi.prefix))
+        Error("local peer ID '%s' not found in peer list for prefix '%s'", self.peerId, dbi.prefix)
         return {}
     end
 
@@ -2713,26 +2713,26 @@ end
 function Private:Send(dbi, data, channel, target, priority)
     local serialized = dbi.serializer:Serialize(data)
     if not serialized then
-        Error("failed to serialize data for prefix '%s'", tostring(dbi.prefix))
+        Error("failed to serialize data for prefix '%s'", dbi.prefix)
         return
     end
 
     local compressed = dbi.compressor:Compress(serialized)
     if not compressed then
-        Error("failed to compress data for prefix '%s'", tostring(dbi.prefix))
+        Error("failed to compress data for prefix '%s'", dbi.prefix)
         return
     end
 
     local encoded = dbi.encoder:EncodeForChannel(compressed)
     if not encoded then
-        Error("failed to encode data for prefix '%s'", tostring(dbi.prefix))
+        Error("failed to encode data for prefix '%s'", dbi.prefix)
         return
     end
 
     if target then
-        Spam("sending %d bytes on prefix '%s' channel '%s' target '%s'", #encoded, tostring(dbi.prefix), tostring(channel), tostring(target))
+        Spam("sending %d bytes on prefix '%s' channel '%s' target '%s'", #encoded, dbi.prefix, channel, target)
     else
-        Spam("sending %d bytes on prefix '%s' channel '%s'", #encoded, tostring(dbi.prefix), tostring(channel))
+        Spam("sending %d bytes on prefix '%s' channel '%s'", #encoded, dbi.prefix, channel)
     end
     if DEBUG and VERBOSITY >= 5 then
         DevTools_Dump(data)
@@ -2750,23 +2750,23 @@ end
 function Private:Broadcast(dbi, data, channels, priority)
     local serialized = dbi.serializer:Serialize(data)
     if not serialized then
-        Error("failed to serialize message for prefix '%s'", tostring(dbi.prefix))
+        Error("failed to serialize message for prefix '%s'", dbi.prefix)
         return
     end
 
     local compressed = dbi.compressor:Compress(serialized)
     if not compressed then
-        Error("failed to compress message for prefix '%s'", tostring(dbi.prefix))
+        Error("failed to compress message for prefix '%s'", dbi.prefix)
         return
     end
 
     local encoded = dbi.encoder:EncodeForChannel(compressed)
     if not encoded then
-        Error("failed to encode message for prefix '%s'", tostring(dbi.prefix))
+        Error("failed to encode message for prefix '%s'", dbi.prefix)
         return
     end
 
-    Spam("broadcasting %d bytes on prefix '%s'", #encoded, tostring(dbi.prefix))
+    Spam("broadcasting %d bytes on prefix '%s'", #encoded, dbi.prefix)
     if DEBUG and VERBOSITY >= 5 then
         DevTools_Dump(data)
     end
@@ -2825,48 +2825,48 @@ function Private:OnCommReceived(prefix, encoded, channel, sender)
     -- Get the database instance for this prefix
     local db = self.prefixes[prefix]
     if not db then
-        Error("received message for unknown prefix '%s' from channel '%s' sender '%s'", tostring(prefix), tostring(channel), tostring(sender))
+        Error("received message for unknown prefix '%s' from channel '%s' sender '%s'", prefix, channel, sender)
         return
     end
 
     local dbi = self.databases[db]
     if not dbi then
-        Error("received message for unregistered database prefix '%s' from channel '%s' sender '%s'", tostring(prefix), tostring(channel), tostring(sender))
+        Error("received message for unregistered database prefix '%s' from channel '%s' sender '%s'", prefix, channel, sender)
         return
     end
 
     -- Deserialize message
     local compressed = dbi.encoder:DecodeFromChannel(encoded)
     if not compressed then
-        Error("failed to decode message from prefix '%s' channel '%s' sender '%s'", tostring(prefix), tostring(channel), tostring(sender))
+        Error("failed to decode message from prefix '%s' channel '%s' sender '%s'", prefix, channel, sender)
         return
     end
 
     local serialized = dbi.compressor:Decompress(compressed)
     if not serialized then
-        Error("failed to decompress message from prefix '%s' channel '%s' sender '%s'", tostring(prefix), tostring(channel), tostring(sender))
+        Error("failed to decompress message from prefix '%s' channel '%s' sender '%s'", prefix, channel, sender)
         return
     end
 
     local obj = dbi.serializer:Deserialize(serialized)
     if not obj then
-        Error("failed to deserialize message from prefix '%s' channel '%s' sender '%s': %s", tostring(prefix), tostring(channel), tostring(sender), Dump(obj))
+        Error("failed to deserialize message from prefix '%s' channel '%s' sender '%s': %s", prefix, channel, sender, Dump(obj))
         return
     end
 
     -- Validate message structure
     if not IsTable(obj) then
-        Error("received invalid message structure from '%s' on channel '%s'", tostring(sender), tostring(channel))
+        Error("received invalid message structure from '%s' on channel '%s'", sender, channel)
         return
     end
 
     if not IsInteger(obj.type) then
-        Error("received message with missing or invalid type from '%s' on channel '%s'", tostring(sender), tostring(channel))
+        Error("received message with missing or invalid type from '%s' on channel '%s'", sender, channel)
         return
     end
 
     if not IsNonEmptyString(obj.peer) then
-        Error("received message with missing or invalid peer from '%s' on channel '%s'", tostring(sender), tostring(channel))
+        Error("received message with missing or invalid peer from '%s' on channel '%s'", sender, channel)
         return
     end
 
@@ -2938,13 +2938,13 @@ end
 function Private:PeerDiscoveryRequestHandler(message)
     local dbi = message.dbi
     local sender = message.sender
-    Spam("received peer discovery request from '%s'", tostring(sender))
+    Spam("received peer discovery request from '%s'", sender)
 
     -- Record the peer
     self:UpdatePeer(message)
 
     -- Send peer discovery response
-    Spam("sending peer discovery response to '%s'", tostring(sender))
+    Spam("sending peer discovery response to '%s'", sender)
     local obj = {
         type = CommMessageType.PeerDiscoveryResponse,
         peer = self.peerId,
@@ -2959,7 +2959,7 @@ end
 function Private:PeerDiscoveryResponseHandler(message)
     local dbi = message.dbi
     local sender = message.sender
-    Spam("received peer discovery response from '%s'", tostring(sender))
+    Spam("received peer discovery response from '%s'", sender)
 
     -- Update last discovery time
     local now = GetTime()
@@ -3085,7 +3085,7 @@ function Private:DigestResponseHandler(message)
                 databaseRequest[tableName] = tableRequest
             end
         else
-            ReportError(dbi, "table '%s' in digest response from '%s' is not defined in the database", tableName, tostring(sender))
+            ReportError(dbi, "table '%s' in digest response from '%s' is not defined in the database", tableName, sender)
         end
     end
 
@@ -3110,7 +3110,7 @@ function Private:RowsRequestHandler(message)
     local dbi = message.dbi
     local sender = message.sender
     local peerID = message.peer
-    Spam("received rows request from '%s'", tostring(sender))
+    Spam("received rows request from '%s'", sender)
 
     -- Export requested rows for each table
     local databaseRequest = message.data                           --- @type LibP2PDB.DBRequest
@@ -3134,13 +3134,13 @@ function Private:RowsRequestHandler(message)
                 tableStateMap[tableName] = rowStateMap
             end
         else
-            ReportError(dbi, "table '%s' in rows request from '%s' is not defined in the database", tableName, tostring(sender))
+            ReportError(dbi, "table '%s' in rows request from '%s' is not defined in the database", tableName, sender)
         end
     end
 
     -- Return if there are no rows to send
     if IsEmptyTable(tableStateMap) then
-        Spam("no rows to send to '%s'", tostring(sender))
+        Spam("no rows to send to '%s'", sender)
         return
     end
 
@@ -3156,7 +3156,7 @@ end
 function Private:RowsResponseHandler(message)
     local dbi = message.dbi
     local sender = message.sender
-    Spam("received rows response from '%s'", tostring(sender))
+    Spam("received rows response from '%s'", sender)
 
     -- Import the database state we received
     local databaseState = message.data --- @type LibP2PDB.DBState
