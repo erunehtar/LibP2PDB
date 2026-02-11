@@ -2769,7 +2769,7 @@ function Private:GetNeighbors(dbi)
     -- Compute our virtual index, zero-based
     local peerIndex = IndexOf(dbi.peersSorted, self.peerID)
     if not peerIndex then
-        Error("local peer ID '%s' not found in peer list for prefix '%s'", self.peerID, dbi.prefix)
+        ReportError(dbi, "local peer ID '%s' not found in peer list for prefix '%s'", self.peerID, dbi.prefix)
         return {}
     end
 
@@ -2812,19 +2812,19 @@ end
 function Private:Send(dbi, data, channel, target, priority)
     local serialized = dbi.serializer:Serialize(data)
     if not serialized then
-        Error("failed to serialize data for prefix '%s'", dbi.prefix)
+        ReportError(dbi, "failed to serialize data for prefix '%s'", dbi.prefix)
         return
     end
 
     local compressed = dbi.compressor:Compress(serialized)
     if not compressed then
-        Error("failed to compress data for prefix '%s'", dbi.prefix)
+        ReportError(dbi, "failed to compress data for prefix '%s'", dbi.prefix)
         return
     end
 
     local encoded = dbi.encoder:EncodeForChannel(compressed)
     if not encoded then
-        Error("failed to encode data for prefix '%s'", dbi.prefix)
+        ReportError(dbi, "failed to encode data for prefix '%s'", dbi.prefix)
         return
     end
 
@@ -2849,19 +2849,19 @@ end
 function Private:Broadcast(dbi, data, channels, priority)
     local serialized = dbi.serializer:Serialize(data)
     if not serialized then
-        Error("failed to serialize message for prefix '%s'", dbi.prefix)
+        ReportError(dbi, "failed to serialize message for prefix '%s'", dbi.prefix)
         return
     end
 
     local compressed = dbi.compressor:Compress(serialized)
     if not compressed then
-        Error("failed to compress message for prefix '%s'", dbi.prefix)
+        ReportError(dbi, "failed to compress message for prefix '%s'", dbi.prefix)
         return
     end
 
     local encoded = dbi.encoder:EncodeForChannel(compressed)
     if not encoded then
-        Error("failed to encode message for prefix '%s'", dbi.prefix)
+        ReportError(dbi, "failed to encode message for prefix '%s'", dbi.prefix)
         return
     end
 
@@ -2929,44 +2929,55 @@ function Private:OnCommReceived(prefix, encoded, channel, sender)
     -- Get the database instance for this prefix
     local db = self.prefixes[prefix]
     if not db then
-        Error("received message for unknown prefix '%s' from channel '%s' sender '%s'", prefix, channel, sender)
+        Warn("received message for unknown prefix '%s' from channel '%s' sender '%s'", prefix, channel, sender)
         return
     end
 
     local dbi = self.databases[db]
     if not dbi then
-        Error("received message for unregistered database prefix '%s' from channel '%s' sender '%s'", prefix, channel, sender)
+        Warn("received message for unregistered database prefix '%s' from channel '%s' sender '%s'", prefix, channel, sender)
         return
     end
 
     -- Deserialize message
     local compressed = dbi.encoder:DecodeFromChannel(encoded)
     if not compressed then
-        Error("failed to decode message from prefix '%s' channel '%s' sender '%s'", prefix, channel, sender)
+        ReportError(dbi, "failed to decode message from prefix '%s' channel '%s' sender '%s'", prefix, channel, sender)
         return
     end
 
     local serialized = dbi.compressor:Decompress(compressed)
     if not serialized then
-        Error("failed to decompress message from prefix '%s' channel '%s' sender '%s'", prefix, channel, sender)
+        ReportError(dbi, "failed to decompress message from prefix '%s' channel '%s' sender '%s'", prefix, channel, sender)
         return
     end
 
     local obj = dbi.serializer:Deserialize(serialized)
     if not obj then
-        Error("failed to deserialize message from prefix '%s' channel '%s' sender '%s': %s", prefix, channel, sender, Dump(obj))
+        ReportError(dbi, "failed to deserialize message from prefix '%s' channel '%s' sender '%s': %s", prefix, channel, sender, Dump(obj))
         return
     end
 
     -- Validate message structure
     if not IsTable(obj) then
-        Error("received invalid message structure from '%s' on channel '%s'", sender, channel)
+        ReportError(dbi, "received invalid message structure from '%s' on channel '%s'", sender, channel)
         return
+    end
+
+    -- Migration from old message format
+    if obj.type and IsInteger(obj.type) then
+        obj[1] = obj.type
+    end
+    if obj.peer and IsNonEmptyString(obj.peer) then
+        obj[2] = obj.peer
+    end
+    if obj.data then
+        obj[3] = obj.data
     end
     --- @cast obj LibP2PDB.Packet
 
     if not IsInteger(obj[1]) then
-        Error("received message with missing or invalid type from '%s' on channel '%s'", sender, channel)
+        ReportError(dbi, "received message with missing or invalid type from '%s' on channel '%s'", sender, channel)
         return
     end
 
@@ -2975,12 +2986,12 @@ function Private:OnCommReceived(prefix, encoded, channel, sender)
         if strmatch(obj[2], "^%x%x%x%x%-%x%x%x%x%x%x%x%x$") then
             obj[2] = LibP2PDB:PlayerGUIDToPeerID("Player-" .. obj[2])
         else
-            Error("received message with invalid peer ID format (migration) from '%s' on channel '%s'", sender, channel)
+            ReportError(dbi, "received message with invalid peer ID format (migration) from '%s' on channel '%s'", sender, channel)
             return
         end
     end
     if not IsInteger(obj[2], 1, 0xFFFFFFFFFFFF) then
-        Error("received message with missing or invalid peer from '%s' on channel '%s'", sender, channel)
+        ReportError(dbi, "received message with missing or invalid peer from '%s' on channel '%s'", sender, channel)
         return
     end
 
@@ -3042,7 +3053,7 @@ function Private:DispatchMessage(message)
     elseif message.type == CommMessageType.RowsResponse then
         self:RowsResponseHandler(message)
     else
-        Error("received unknown message type %d from '%s' on channel '%s'", message.type, message.sender, message.channel)
+        ReportError(message.dbi, "received unknown message type %d from '%s' on channel '%s'", message.type, message.sender, message.channel)
     end
 end
 
