@@ -1770,7 +1770,7 @@ end
 
 --- List all defined tables in the database.
 --- @param db LibP2PDB.DBHandle Database handle.
---- @return [LibP2PDB.TableName] tables Array of table names defined in the database
+--- @return LibP2PDB.TableName[] tables Array of table names defined in the database
 function LibP2PDB:ListTables(db)
     assert(IsEmptyTable(db), "db must be an empty table")
 
@@ -1786,10 +1786,33 @@ function LibP2PDB:ListTables(db)
     return tableNames
 end
 
+--- Get the schema for a specific table in the database.
+--- If the table has a defined schema, an array of field definitions.
+--- If the table does not have a defined schema, nil is returned.
+--- Validates that the db and tableName are valid and that the table exists in the database.
+--- @param db LibP2PDB.DBHandle Database handle.
+--- @param tableName LibP2PDB.TableName Name of the table to get the schema for.
+--- @return LibP2PDB.TableSchema? schema The table schema if defined, or nil if no schema is defined for the table. The schema is an array of field definitions with name and type.
+function LibP2PDB:GetTableSchema(db, tableName)
+    assert(IsEmptyTable(db), "db must be an empty table")
+    assert(IsNonEmptyString(tableName), "tableName must be a non-empty string")
+
+    -- Validate db instance
+    local dbi = priv.databases[db]
+    assert(dbi, "db is not a recognized database handle")
+
+    -- Validate table
+    local ti = dbi.tables[tableName]
+    assert(ti, "table '" .. tableName .. "' is not defined in the database")
+
+    -- Return a copy of the schema
+    return DeepCopy(ti.schema)
+end
+
 --- List all keys of a specific table in the database.
 --- @param db LibP2PDB.DBHandle Database handle.
 --- @param tableName LibP2PDB.TableName Name of the table to list keys from
---- @return [LibP2PDB.TableKey] keys Array of keys in the specified table
+--- @return LibP2PDB.TableKey[] keys Array of keys in the specified table
 function LibP2PDB:ListKeys(db, tableName)
     assert(IsEmptyTable(db), "db must be an empty table")
     assert(IsNonEmptyString(tableName), "tableName must be a non-empty string")
@@ -2108,9 +2131,9 @@ function Private:SetKey(dbi, tableName, ti, key, rowData)
 
         -- Update summary
         if existingRow then
-            ti.summary:Toggle(key .. existingRow.version.clock)
+            ti.summary:Update(key, existingRow.version.clock)
         end
-        ti.summary.keyIndex[key] = ti.summary:Toggle(key .. dbi.clock)
+        ti.summary.keyIndex[key] = ti.summary:Update(key, dbi.clock)
 
         -- Invoke row changed callbacks
         self:InvokeChangeCallbacks(dbi, tableName, ti, key, rowData)
@@ -2187,9 +2210,9 @@ function Private:MergeKey(dbi, dbClock, tableName, ti, key, rowData, rowVersion)
 
         -- Update summary
         if existingRow then
-            ti.summary:Toggle(key .. existingRow.version.clock)
+            ti.summary:Update(key, existingRow.version.clock)
         end
-        ti.summary.keyIndex[key] = ti.summary:Toggle(key .. rowVersion.clock)
+        ti.summary.keyIndex[key] = ti.summary:Update(key, rowVersion.clock)
 
         -- Invoke row changed callbacks
         self:InvokeChangeCallbacks(dbi, tableName, ti, key, rowData)
@@ -2247,7 +2270,7 @@ function Private:ResizeTableSummary(ti, requiredNumBucket)
 
     -- Rehash existing keys into new summary
     for key, row in pairs(ti.rows) do
-        summary.keyIndex[key] = summary:Toggle(key .. row.version.clock)
+        summary.keyIndex[key] = summary:Update(key, row.version.clock)
     end
 
     -- Replace old summary with new summary
@@ -6375,7 +6398,7 @@ local function TickPrivateInstances(instances)
 end
 
 local numPeers = 8
-local numRounds = ceil(log(numPeers + 1) / log(2))
+local numRounds = ceil(log(numPeers) / log(2))
 
 local NetworkTests = {
     BroadcastPresence = function()
@@ -6564,7 +6587,6 @@ local NetworkTests = {
     SyncDatabase_OneKeyChange = function()
         local instances = {}
         local databases = {}
-        local numPeers = 4
         for i = 1, numPeers do
             instances[i] = NewPrivateInstance(i)
             databases[i] = PrivateScope(instances[i], function()
@@ -6625,7 +6647,6 @@ local NetworkTests = {
     SyncDatabase_NoKeyChange = function()
         local instances = {}
         local databases = {}
-        local numPeers = 4
         for i = 1, numPeers do
             instances[i] = NewPrivateInstance(i)
             databases[i] = PrivateScope(instances[i], function()
