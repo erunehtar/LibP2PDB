@@ -75,6 +75,7 @@ local fastrandom = fastrandom
 local UnitName, UnitGUID = UnitName, UnitGUID
 local GetTime, GetServerTime = GetTime, GetServerTime
 local IsInGuild, IsInRaid, IsInGroup, IsInInstance = IsInGuild, IsInRaid, IsInGroup, IsInInstance
+local GetPlayerInfoByGUID = GetPlayerInfoByGUID
 
 local InActiveBattlefield
 if C_PvP and C_PvP.IsActiveBattlefield then
@@ -714,6 +715,7 @@ function Private.New(playerName, playerGUID)
     assert(IsNonEmptyString(playerName), "player name must be a non-empty string")
     assert(IsNonEmptyString(playerGUID), "player GUID must be a non-empty string")
     local peerID = PlayerGUIDToPeerID(playerGUID)
+    assert(PeerIDToPlayerGUID(peerID) == playerGUID, "peerID conversion must be reversible")
     local instance = setmetatable({
         playerName = playerName,
         playerGUID = playerGUID,
@@ -1747,7 +1749,7 @@ end
 --- @return LibP2PDB.PeerID? peerID The remote peer ID if valid, or nil if not a player GUID.
 --- @deprecated Use LibP2PDB:PlayerGUIDToPeerID instead.
 function LibP2PDB:GetPeerIdFromGUID(guid)
-    return self:PlayerGUIDToPeerID(guid)
+    return PlayerGUIDToPeerID(guid)
 end
 
 --- Convert a player GUID to a peer ID.
@@ -2565,7 +2567,7 @@ function Private:ImportRow(dbi, dbClock, tableName, ti, key, rowState)
     if IsNonEmptyString(incomingVersionPeer) then
         -- Migration from old peerID format
         if strmatch(incomingVersionPeer, "^%x%x%x%x%-%x%x%x%x%x%x%x%x$") then
-            incomingVersionPeer = LibP2PDB:PlayerGUIDToPeerID("Player-" .. incomingVersionPeer)
+            incomingVersionPeer = PlayerGUIDToPeerID("Player-" .. incomingVersionPeer)
         else
             ReportError(dbi, "invalid peer ID format (migration) in row version state for key '%s' in table '%s'", key, tableName)
             return
@@ -3007,7 +3009,7 @@ function Private:OnCommReceived(prefix, encoded, channel, sender)
     if IsNonEmptyString(obj[2]) then
         -- Migration from old peerID format
         if strmatch(obj[2], "^%x%x%x%x%-%x%x%x%x%x%x%x%x$") then
-            obj[2] = LibP2PDB:PlayerGUIDToPeerID("Player-" .. obj[2])
+            obj[2] = PlayerGUIDToPeerID("Player-" .. obj[2])
         else
             ReportError(dbi, "received message with invalid peer ID format (migration) from '%s' on channel '%s'", sender, channel)
             return
@@ -3027,6 +3029,19 @@ function Private:OnCommReceived(prefix, encoded, channel, sender)
         channel = channel,
         sender = sender,
     }
+
+    -- Verify the sender and peer ID are consistent (basic spoofing protection)
+    local success, playerGUID = SafeCall(dbi, PeerIDToPlayerGUID, message.peerID)
+    if success and playerGUID then
+        local name = select(6, GetPlayerInfoByGUID(playerGUID))
+        if name ~= sender then
+            Error("received message with mismatched sender name '%s' for peer ID '%X' on channel '%s'", sender, message.peerID, channel)
+            return
+        end
+    else
+        ReportError(dbi, "received message with invalid peer ID '%X' that cannot be mapped to a player GUID from '%s' on channel '%s'", message.peerID, sender, channel)
+        return
+    end
 
     -- Get or create bucket
     local bucket = dbi.buckets[message.type]
@@ -3576,7 +3591,7 @@ local Assert = {
 --- @param index integer Player index.
 --- @return table instance New private instance.
 local function NewPrivateInstance(index)
-    return Private.New(format("Player%d", index), format("Player-%04d-%08X", index % 10000, index))
+    return Private.New(format("Player%d", index), format("Player-%04d-%08X", ((index - 1) % 9999) + 1, index))
 end
 
 --- Executes a function within the context of a given private instance.
@@ -3702,7 +3717,7 @@ local function GeneratePlayerGUID(i)
 end
 
 local function GenerateKey(i)
-    return LibP2PDB:PlayerGUIDToPeerID(GeneratePlayerGUID(i))
+    return PlayerGUIDToPeerID(GeneratePlayerGUID(i))
 end
 
 local function GenerateData(i)
@@ -7379,6 +7394,16 @@ local function RunTests()
 
     -- Run network tests
     for _, testFn in pairs(NetworkTests) do
+        -- Override GetPlayerInfoByGUID to return fake player info based on the target name
+        local _GetPlayerInfoByGUID = GetPlayerInfoByGUID
+        GetPlayerInfoByGUID = function(guid)
+            -- Data is in format "Player-0001-00000001", "Player-0002-00000002", etc.
+            local serverID, playerUID = strmatch(guid, "Player%-(%d+)%-(%d+)")
+            if serverID and playerUID then
+                return "Warrior", "WARRIOR", "Human", "HUMAN", 2, "Player" .. tonumber(playerUID), nil
+            end
+        end
+
         -- Override C_Timer.NewTimer to call the callback immediately
         local _NewTimer = C_Timer.NewTimer
         ---@diagnostic disable-next-line: duplicate-set-field
@@ -7422,6 +7447,7 @@ local function RunTests()
         AceComm = _AceComm
         C_ChatInfo.IsAddonMessagePrefixRegistered = _IsAddonMessagePrefixRegistered
         C_Timer.NewTimer = _NewTimer
+        GetPlayerInfoByGUID = _GetPlayerInfoByGUID
         count = count + 1
     end
 
