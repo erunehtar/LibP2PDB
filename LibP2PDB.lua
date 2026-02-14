@@ -1044,7 +1044,7 @@ end
 --- @alias LibP2PDB.TableKey string|number Primary key value.
 --- @alias LibP2PDB.TableSchema table<string|number, string|string[]> Table schema definition.
 --- @alias LibP2PDB.TableSchemaSorted [string|number, string|string[]] Table schema as a sorted array of field name and allowed types pairs.
---- @alias LibP2PDB.TableOnValidateCallback fun(key: LibP2PDB.TableKey, data: LibP2PDB.RowData):boolean Callback function for custom row validation.
+--- @alias LibP2PDB.TableOnValidateCallback fun(key: LibP2PDB.TableKey, data: LibP2PDB.RowData, context: LibP2PDB.TableOnValidateContext?):boolean Callback function for custom row validation.
 --- @alias LibP2PDB.TableOnChangeCallback fun(key: LibP2PDB.TableKey, data: LibP2PDB.RowData?) Callback function invoked on row data changes.
 --- @alias LibP2PDB.RowData table<LibP2PDB.RowDataKey, LibP2PDB.RowDataValue> Data for a row in a table.
 --- @alias LibP2PDB.RowDataKey string|number Key of a field in a row.
@@ -1059,12 +1059,17 @@ end
 --- @field peerID LibP2PDB.PeerID Peer ID that last modified the row.
 --- @field tombstone LibP2PDB.Tombstone? Optional flag indicating if the row is a tombstone (deleted).
 
+--- @class LibP2PDB.TableOnValidateContext Context information for row validation callbacks.
+--- @field peerID LibP2PDB.PeerID Peer ID of the source of the change that triggered validation.
+--- @field peerName LibP2PDB.PeerName Peer name of the source of the change that triggered validation.
+--- @field channel string Channel through which the change was received (e.g., "GUILD", "RAID", "PARTY", "YELL", or custom channel).
+
 --- @class LibP2PDB.TableDesc Description for creating a new table in the database.
 --- @field name LibP2PDB.TableName Name of the table to create.
 --- @field keyType LibP2PDB.TableKeyType Data type of the primary key.
 --- @field sync boolean? Optional flag indicating if the table should be synchronized with peers (default: true).
 --- @field schema LibP2PDB.TableSchema? Optional table schema defining field names and their allowed data types.
---- @field onValidate LibP2PDB.TableOnValidateCallback? Optional callback function(key, data) for custom row validation. Must return true if valid, false otherwise. Data is a copy and has not yet been applied when this is called.
+--- @field onValidate LibP2PDB.TableOnValidateCallback? Optional callback function(key, data, context) for custom row validation. Must return true if valid, false otherwise. Data is a copy and has not yet been applied when this is called.
 --- @field onChange LibP2PDB.TableOnChangeCallback? Optional callback function(key, data) on row data changes. Data is nil for deletions. Data is a copy, and has already been applied when this is called.
 
 --- Create a new table in the database with an optional schema.
@@ -1472,7 +1477,7 @@ function LibP2PDB:ImportDatabaseAsync(db, state, onComplete, maxTime)
     -- Define the import workload
     local workload = function(thread)
         local startTime = GetTimePreciseSec()
-        local success = priv:ImportDatabase(dbi, state, thread, maxTime or 0.01)
+        local success = priv:ImportDatabase(dbi, state, nil, thread, maxTime or 0.01)
         SafeCall(dbi, onComplete, success, GetTimePreciseSec() - startTime)
     end
 
@@ -2152,8 +2157,9 @@ end
 --- @param key LibP2PDB.TableKey Primary key value for the row.
 --- @param rowData LibP2PDB.RowData? Row data containing fields defined in the table schema (or nil for tombstone).
 --- @param rowVersion LibP2PDB.RowVersion Version metadata for the row.
+--- @param message LibP2PDB.Message? Optional message context from OnCommReceived (network event).
 --- @return boolean success Returns true on success, false otherwise.
-function Private:MergeKey(dbi, dbClock, tableName, ti, key, rowData, rowVersion)
+function Private:MergeKey(dbi, dbClock, tableName, ti, key, rowData, rowVersion, message)
     -- Determine if the incoming row is newer
     local existingRow = ti.rows[key]
     if existingRow and self:CompareVersion(rowVersion, existingRow.version) then
@@ -2162,7 +2168,15 @@ function Private:MergeKey(dbi, dbClock, tableName, ti, key, rowData, rowVersion)
 
     -- Run custom validation if provided
     if rowData and ti.onValidate then
-        local success, result = SafeCall(dbi, ti.onValidate, key, rowData)
+        local context = nil --- @type LibP2PDB.TableOnValidateContext
+        if message then
+            context = {
+                peerID = message.peerID,
+                peerName = message.sender,
+                channel = message.channel,
+            }
+        end
+        local success, result = SafeCall(dbi, ti.onValidate, key, rowData, context)
         if not success then
             return false -- validation threw an error
         end
@@ -2407,10 +2421,11 @@ end
 --- Validates incoming data against table definitions, skipping invalid entries.
 --- @param dbi LibP2PDB.DBInstance Database instance.
 --- @param state LibP2PDB.DBState The database state to import.
+--- @param message LibP2PDB.Message? Optional message context from OnCommReceived (network event).
 --- @param thread thread? Optional coroutine thread for yielding during long imports.
 --- @param maxTime number? Optional maximum time in seconds to spend importing before yielding.
 --- @return boolean success Returns true on success, false otherwise.
-function Private:ImportDatabase(dbi, state, thread, maxTime)
+function Private:ImportDatabase(dbi, state, message, thread, maxTime)
     -- Validate database state format
     if not IsNonEmptyTable(state) then
         ReportError(dbi, "invalid database state format")
@@ -2470,7 +2485,7 @@ function Private:ImportDatabase(dbi, state, thread, maxTime)
 
     -- Import each table (skipping invalid table entries)
     for tableName, rowStateMap in pairs(tableStateMap or {}) do
-        self:ImportTable(migrationDBI or dbi, dbClock, tableName, rowStateMap, thread, maxTime)
+        self:ImportTable(migrationDBI or dbi, dbClock, tableName, rowStateMap, message, thread, maxTime)
     end
 
     -- If migration is needed, migrate each table from the migration database
@@ -2498,9 +2513,10 @@ end
 --- @param dbClock LibP2PDB.Clock Incoming database clock from the state.
 --- @param tableName LibP2PDB.TableName Name of the table.
 --- @param rowStateMap LibP2PDB.RowStateMap Row state map to import.
+--- @param message LibP2PDB.Message? Optional message context from OnCommReceived (network event).
 --- @param thread thread? Optional coroutine thread for yielding during long imports.
 --- @param maxTime number? Optional maximum time in seconds to spend importing before yielding.
-function Private:ImportTable(dbi, dbClock, tableName, rowStateMap, thread, maxTime)
+function Private:ImportTable(dbi, dbClock, tableName, rowStateMap, message, thread, maxTime)
     -- Validate table state format
     if not IsNonEmptyTable(rowStateMap) then
         ReportError(dbi, "invalid table state format")
@@ -2517,7 +2533,7 @@ function Private:ImportTable(dbi, dbClock, tableName, rowStateMap, thread, maxTi
     -- Import each row (skipping invalid row entries)
     local startTime = GetTimePreciseSec()
     for key, rowState in pairs(rowStateMap or {}) do
-        self:ImportRow(dbi, dbClock, tableName, ti, key, rowState)
+        self:ImportRow(dbi, dbClock, tableName, ti, key, rowState, message)
         if thread then
             local now = GetTimePreciseSec()
             if now - startTime >= maxTime then
@@ -2535,7 +2551,8 @@ end
 --- @param ti LibP2PDB.TableInstance Table instance.
 --- @param key LibP2PDB.TableKey Primary key value for the row.
 --- @param rowState LibP2PDB.RowState Row state to import.
-function Private:ImportRow(dbi, dbClock, tableName, ti, key, rowState)
+--- @param message LibP2PDB.Message? Optional message context from OnCommReceived (network event).
+function Private:ImportRow(dbi, dbClock, tableName, ti, key, rowState, message)
     -- Validate row state format
     if not IsNonEmptyTable(rowState) then
         ReportError(dbi, "invalid row state format for table '%s'", tableName)
@@ -2595,13 +2612,13 @@ function Private:ImportRow(dbi, dbClock, tableName, ti, key, rowState)
     -- Merge the incoming row
     if incomingVersionTombstone then
         -- Merge the tombstone row (no data)
-        SafeCall(dbi, self.MergeKey, self, dbi, dbClock, tableName, ti, key, nil, importedVersion)
+        SafeCall(dbi, self.MergeKey, self, dbi, dbClock, tableName, ti, key, nil, importedVersion, message)
     else
         -- Import the row data
         local importedRowData = self:ImportRowData(dbi, ti.schemaSorted, incomingData)
         if importedRowData then
             -- Merge the row data
-            SafeCall(dbi, self.MergeKey, self, dbi, dbClock, tableName, ti, key, importedRowData, importedVersion)
+            SafeCall(dbi, self.MergeKey, self, dbi, dbClock, tableName, ti, key, importedRowData, importedVersion, message)
         end
     end
 end
@@ -3323,7 +3340,7 @@ function Private:RowsResponseHandler(message)
 
     -- Import the database state we received
     local databaseState = message.data --- @type LibP2PDB.DBState
-    self:ImportDatabase(dbi, databaseState)
+    self:ImportDatabase(dbi, databaseState, message)
 end
 
 --- OnUpdate handler called periodically to handle time-based events.
@@ -3513,13 +3530,21 @@ local Assert = {
     IsTrue = function(value, msg) assert(value == true, msg or "value is not true") end,
     IsFalse = function(value, msg) assert(value == false, msg or "value is not false") end,
     IsNumber = function(value, msg) assert(IsNumber(value), msg or "value is not a number") end,
+    IsNumberOrNil = function(value, msg) assert(IsNumberOrNil(value), msg or "value is not a number or nil") end,
     IsInteger = function(value, msg) assert(IsInteger(value), msg or "value is not an integer") end,
+    IsIntegerOrNil = function(value, msg) assert(IsIntegerOrNil(value), msg or "value is not an integer or nil") end,
     IsString = function(value, msg) assert(IsString(value), msg or "value is not a string") end,
+    IsStringOrNil = function(value, msg) assert(IsStringOrNil(value), msg or "value is not a string or nil") end,
     IsEmptyString = function(value, msg) assert(IsEmptyString(value), msg or "value is not an empty string") end,
+    IsEmptyStringOrNil = function(value, msg) assert(IsEmptyStringOrNil(value), msg or "value is not an empty string or nil") end,
     IsNonEmptyString = function(value, msg) assert(IsNonEmptyString(value), msg or "value is not a non-empty string") end,
+    IsNonEmptyStringOrNil = function(value, msg) assert(IsNonEmptyStringOrNil(value), msg or "value is not a non-empty string or nil") end,
     IsTable = function(value, msg) assert(IsTable(value), msg or "value is not a table") end,
+    IsTableOrNil = function(value, msg) assert(IsTableOrNil(value), msg or "value is not a table or nil") end,
     IsEmptyTable = function(value, msg) assert(IsEmptyTable(value), msg or "value is not an empty table") end,
+    IsEmptyTableOrNil = function(value, msg) assert(IsEmptyTableOrNil(value), msg or "value is not an empty table or nil") end,
     IsNonEmptyTable = function(value, msg) assert(IsNonEmptyTable(value), msg or "value is not a non-empty table") end,
+    IsNonEmptyTableOrNil = function(value, msg) assert(IsNonEmptyTableOrNil(value), msg or "value is not a non-empty table or nil") end,
     IsFunction = function(value, msg) assert(IsFunction(value), msg or "value is not a function") end,
     IsInterface = function(value, interface, msg)
         assert(IsTable(value), msg or "value is not a table")
@@ -6555,9 +6580,45 @@ local NetworkTests = {
             instances[i] = NewPrivateInstance(i)
             databases[i] = PrivateScope(instances[i], function()
                 local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-                LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+                LibP2PDB:NewTable(db, {
+                    name = "Users",
+                    keyType = "number",
+                    schema = {
+                        name = "string",
+                        age = "number"
+                    },
+                    onValidate = function(key, data, context)
+                        Assert.IsNumber(key)
+                        Assert.IsTable(data)
+                        Assert.IsTableOrNil(context)
+                        if context then
+                            Assert.IsNumber(context.peerID)
+                            Assert.IsNonEmptyString(context.peerName)
+                            Assert.IsNonEmptyString(context.channel)
+                        end
+                        return true
+                    end
+                })
                 LibP2PDB:InsertKey(db, "Users", i, { name = "Player" .. i, age = 20 + i })
-                LibP2PDB:NewTable(db, { name = "Scores", keyType = "number", sync = false, schema = { score = "number" } })
+                LibP2PDB:NewTable(db, {
+                    name = "Scores",
+                    keyType = "number",
+                    sync = false,
+                    schema = {
+                        score = "number"
+                    },
+                    onValidate = function(key, data, context)
+                        Assert.IsNumber(key)
+                        Assert.IsTable(data)
+                        Assert.IsTableOrNil(context)
+                        if context then
+                            Assert.IsNumber(context.peerID)
+                            Assert.IsNonEmptyString(context.peerName)
+                            Assert.IsNonEmptyString(context.channel)
+                        end
+                        return true
+                    end
+                })
                 LibP2PDB:InsertKey(db, "Scores", i, { score = i * 10 })
                 return db
             end)
@@ -6737,7 +6798,25 @@ local NetworkTests = {
             instances[i] = NewPrivateInstance(i)
             databases[i] = PrivateScope(instances[i], function()
                 local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-                LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+                LibP2PDB:NewTable(db, {
+                    name = "Users",
+                    keyType = "number",
+                    schema = {
+                        name = "string",
+                        age = "number"
+                    },
+                    onValidate = function(key, data, context)
+                        Assert.IsNumber(key)
+                        Assert.IsTable(data)
+                        Assert.IsTableOrNil(context)
+                        if context then
+                            Assert.IsNumber(context.peerID)
+                            Assert.IsNonEmptyString(context.peerName)
+                            Assert.IsNonEmptyString(context.channel)
+                        end
+                        return true
+                    end
+                })
                 LibP2PDB:InsertKey(db, "Users", i, { name = "Player" .. i, age = 20 + i })
                 return db
             end)
@@ -6900,7 +6979,25 @@ local NetworkTests = {
             instances[i] = NewPrivateInstance(i)
             databases[i] = PrivateScope(instances[i], function()
                 local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-                LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+                LibP2PDB:NewTable(db, {
+                    name = "Users",
+                    keyType = "number",
+                    schema = {
+                        name = "string",
+                        age = "number"
+                    },
+                    onValidate = function(key, data, context)
+                        Assert.IsNumber(key)
+                        Assert.IsTable(data)
+                        Assert.IsTableOrNil(context)
+                        if context then
+                            Assert.IsNumber(context.peerID)
+                            Assert.IsNonEmptyString(context.peerName)
+                            Assert.IsNonEmptyString(context.channel)
+                        end
+                        return true
+                    end,
+                })
                 LibP2PDB:InsertKey(db, "Users", i, { name = "Player" .. i, age = 20 + i })
                 return db
             end)
@@ -7042,7 +7139,30 @@ local NetworkTests = {
             instances[i] = NewPrivateInstance(i)
             databases[i] = PrivateScope(instances[i], function()
                 local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-                LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+                LibP2PDB:NewTable(db, {
+                    name = "Users",
+                    keyType = "number",
+                    schema = {
+                        name = "string",
+                        age = "number"
+                    },
+                    onValidate = function(key, data, context)
+                        Assert.IsNumber(key)
+                        Assert.IsTable(data)
+                        Assert.IsTableOrNil(context)
+                        if context then
+                            Assert.IsNumber(context.peerID)
+                            Assert.IsNonEmptyString(context.peerName)
+                            Assert.IsNonEmptyString(context.channel)
+                            if context.channel ~= "WHISPER" then -- in this test, only peer 1 broadcasts, so he should be the only one sending data through non-WHISPER channels
+                                Assert.AreEqual(context.peerID, instances[1].peerID)
+                                Assert.AreEqual(context.peerName, instances[1].playerName)
+                                instances[i].receivedBroadcast = true
+                            end
+                        end
+                        return true
+                    end,
+                })
                 LibP2PDB:InsertKey(db, "Users", i, { name = "Player" .. i, age = 20 + i })
                 return db
             end)
@@ -7064,6 +7184,11 @@ local NetworkTests = {
             TickPrivateInstances(instances)
         end)
 
+        -- Check that peer 1 did not receive its own broadcast
+        PrivateScope(instances[1], function()
+            Assert.IsNil(instances[1].receivedBroadcast)
+        end)
+
         -- Check that all other peers have received data, and nothing else
         for i = 2, numPeers do
             PrivateScope(instances[i], function()
@@ -7071,6 +7196,7 @@ local NetworkTests = {
                 Assert.AreEqual(#keys, 2)
                 Assert.AreEqual(LibP2PDB:GetKey(databases[i], "Users", 1), { name = "Player1", age = 21 })
                 Assert.AreEqual(LibP2PDB:GetKey(databases[i], "Users", i), { name = "Player" .. i, age = 20 + i })
+                Assert.IsTrue(instances[i].receivedBroadcast)
             end)
         end
     end,
