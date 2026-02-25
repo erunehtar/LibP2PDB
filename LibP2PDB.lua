@@ -111,8 +111,8 @@ local Color = {
 --- @enum LibP2PDB.CommMessageType Communication message types.
 local CommMessageType = {
     Empty = 1,
-    PeerDiscoveryRequest = 2,
-    PeerDiscoveryResponse = 3,
+    PeerDiscoveryRequest = 2, -- Removed in version 5
+    PeerDiscoveryResponse = 3, -- Removed in version 5
     DigestRequest = 4,
     DigestResponse = 5,
     RowsRequest = 6,
@@ -723,13 +723,7 @@ function Private.New(playerName, playerGUID)
         peerID = peerID,
         prefixes = setmetatable({}, { __mode = "v" }),
         databases = setmetatable({}, { __mode = "k" }),
-        frame = CreateFrame("Frame", "LibP2PDB" .. peerID),
     }, Private)
-    instance.frame:SetScript("OnUpdate", function(self)
-        for _, dbi in pairs(instance.databases) do
-            instance:OnUpdate(dbi)
-        end
-    end)
     return instance
 end
 
@@ -757,9 +751,6 @@ local priv = Private.New(assert(UnitName("player"), "unable to get player name")
 --- @field encoder LibP2PDB.Encoder? Optional custom encoder for encoding/decoding data for chat channels and print (default: LibDeflate if available).
 --- @field channels string[]? Optional array of custom channels to use for broadcasts, in addition to default channels (GUILD, RAID, PARTY, YELL).
 --- @field onChange LibP2PDB.DBOnChangeCallback? Optional callback function(tableName, key, data) invoked on any row change.
---- @field discoveryQuietPeriod number? Optional seconds of quiet time with no new peers before considering discovery complete (default: 1.5).
---- @field discoveryMaxTime number? Optional maximum seconds to wait for peer discovery before considering it complete (default: 3.0).
---- @field onDiscoveryComplete LibP2PDB.DBOnDiscoveryCompleteCallback? Optional callback function() invoked when peers discovery completes.
 --- @field peerTimeout number? Optional seconds of inactivity after which a peer is considered inactive (default: 100.0).
 
 --- @class LibP2PDB.Filter Filter interface for generating data digests.
@@ -788,7 +779,6 @@ local priv = Private.New(assert(UnitName("player"), "unable to get player name")
 --- @alias LibP2PDB.DBOnMigrateTableCallback fun(target: LibP2PDB.MigrationContext, source: LibP2PDB.MigrationContext): LibP2PDB.TableName? Callback function invoked when table migration is needed.
 --- @alias LibP2PDB.DBOnMigrateRowCallback fun(target: LibP2PDB.MigrationContext, source: LibP2PDB.MigrationContext): LibP2PDB.TableKey?, LibP2PDB.RowData? Callback function invoked when row migration is needed.
 --- @alias LibP2PDB.DBOnChangeCallback fun(tableName: LibP2PDB.TableName, key: LibP2PDB.TableKey, data: LibP2PDB.RowData?) Callback function invoked on any row change.
---- @alias LibP2PDB.DBOnDiscoveryCompleteCallback fun() Callback function invoked when peer discovery completes.
 
 --- @class LibP2PDB.MigrationContext Context information for database/table/row migrations.
 --- @field db LibP2PDB.DBHandle Database handle.
@@ -817,9 +807,6 @@ function LibP2PDB:NewDatabase(desc)
     assert(IsInterfaceOrNil(desc.encoder, "EncodeForChannel", "DecodeFromChannel", "EncodeForPrint", "DecodeFromPrint"), "desc.encoder must be an encoder interface if provided")
     assert(IsNonEmptyTableOrNil(desc.channels), "desc.channels must be a non-empty array of string if provided")
     assert(IsFunctionOrNil(desc.onChange), "desc.onChange must be a function if provided")
-    assert(IsNumberOrNil(desc.discoveryQuietPeriod, 0.0), "desc.discoveryQuietPeriod must be a positive number if provided")
-    assert(IsNumberOrNil(desc.discoveryMaxTime, 0.0), "desc.discoveryMaxTime must be a positive number if provided")
-    assert(IsFunctionOrNil(desc.onDiscoveryComplete), "desc.onDiscoveryComplete must be a function if provided")
     assert(IsNumberOrNil(desc.peerTimeout, 0.0), "desc.peerTimeout must be a positive number if provided")
 
     if desc.channels then
@@ -843,8 +830,6 @@ function LibP2PDB:NewDatabase(desc)
         compressor = desc.compressor,
         encoder = desc.encoder,
         channels = desc.channels,
-        discoveryQuietPeriod = desc.discoveryQuietPeriod or 1.5,
-        discoveryMaxTime = desc.discoveryMaxTime or 3.0,
         peerTimeout = desc.peerTimeout or 100.0,
         -- Networking
         peers = {},
@@ -858,7 +843,6 @@ function LibP2PDB:NewDatabase(desc)
         onMigrateTable = desc.onMigrateTable,
         onMigrateRow = desc.onMigrateRow,
         onChange = desc.onChange,
-        onDiscoveryComplete = desc.onDiscoveryComplete,
         -- Access control
         --writePolicy = nil,
     }
@@ -1519,36 +1503,6 @@ function LibP2PDB:BroadcastPresence(db)
     priv:Broadcast(dbi, obj, dbi.channels, CommPriority.Low)
 end
 
---- Discover peers on the database's communication prefix.
---- If onDiscoveryComplete callback is defined, it will be invoked when discovery completes.
---- @param db LibP2PDB.DBHandle Database handle.
---- @deprecated Use LibP2PDB:BroadcastPresence instead.
-function LibP2PDB:DiscoverPeers(db)
-    assert(IsEmptyTable(db), "db must be an empty table")
-
-    -- Validate db instance
-    local dbi = priv.databases[db]
-    assert(dbi, "db is not a recognized database handle")
-
-    -- Prune timed-out peers
-    priv:PruneTimedOutPeers(dbi)
-
-    -- Send the discover peers message
-    Spam("broadcasting peer discovery request")
-    local obj = { --- @type LibP2PDB.Packet
-        CommMessageType.PeerDiscoveryRequest,
-        priv.peerID,
-        dbi.clock,
-    }
-    priv:Broadcast(dbi, obj, dbi.channels, CommPriority.Low)
-
-    -- Record the time of the peer discovery request
-    if dbi.onDiscoveryComplete then
-        dbi.discoveryStartTime = GetTime()
-        dbi.lastDiscoveryResponseTime = dbi.discoveryStartTime
-    end
-end
-
 --- Initiate a gossip sync by sending a digest request to selected neighbor peers.
 --- @param db LibP2PDB.DBHandle Database handle.
 function LibP2PDB:SyncDatabase(db)
@@ -1843,7 +1797,7 @@ function LibP2PDB:ListKeys(db, tableName)
     return keys
 end
 
---- List all discovered peers for this database.
+--- List all known peers for this database.
 --- This list is not persisted and is reset on logout/reload.
 --- @param db LibP2PDB.DBHandle Database handle.
 --- @return table<LibP2PDB.PeerID, table> peers Table of peerID -> peer data
@@ -2013,8 +1967,6 @@ end
 --- @field version LibP2PDB.DBVersion Database version.
 --- @field clock LibP2PDB.Clock Lamport clock for versioning.
 --- @field channels string[]? List of custom channels for broadcasts.
---- @field discoveryQuietPeriod number Seconds of quiet time for discovery completion.
---- @field discoveryMaxTime number Maximum time for discovery completion.
 --- @field filter LibP2PDB.Filter Filter interface.
 --- @field serializer LibP2PDB.Serializer Serializer interface.
 --- @field compressor LibP2PDB.Compressor Compressor interface.
@@ -2029,9 +1981,6 @@ end
 --- @field onMigrateTable LibP2PDB.DBOnMigrateTableCallback? Callback for table migrations.
 --- @field onMigrateRow LibP2PDB.DBOnMigrateRowCallback? Callback for row migrations.
 --- @field onChange LibP2PDB.DBOnChangeCallback? Callback for row changes.
---- @field onDiscoveryComplete LibP2PDB.DBOnDiscoveryCompleteCallback? Callback for discovery completion.
---- @field discoveryStartTime number? Local timestamp when discovery started.
---- @field lastDiscoveryResponseTime number? Local timestamp when last discovery response was received.
 
 --- @class LibP2PDB.PeerInfo Peer information.
 --- @field name LibP2PDB.PeerName Name of the peer.
@@ -3099,9 +3048,9 @@ function Private:DispatchMessage(message)
     if message.type == CommMessageType.Empty then
         -- Nothing to do
     elseif message.type == CommMessageType.PeerDiscoveryRequest then
-        self:PeerDiscoveryRequestHandler(message)
+        -- Removed in version 5
     elseif message.type == CommMessageType.PeerDiscoveryResponse then
-        self:PeerDiscoveryResponseHandler(message)
+        -- Removed in version 5
     elseif message.type == CommMessageType.DigestRequest then
         self:DigestRequestHandler(message)
     elseif message.type == CommMessageType.DigestResponse then
@@ -3113,44 +3062,6 @@ function Private:DispatchMessage(message)
     else
         ReportError(message.dbi, "received unknown message type %d from '%s' on channel '%s'", message.type, message.sender, message.channel)
     end
-end
-
---- Handler for peer discovery request messages.
---- Reply to the sender with our peer ID and clock.
---- @param message LibP2PDB.Message
-function Private:PeerDiscoveryRequestHandler(message)
-    local dbi = message.dbi
-    local sender = message.sender
-    Spam("received peer discovery request from '%s'", sender)
-
-    -- Record the peer
-    self:UpdatePeer(message)
-
-    -- Send peer discovery response
-    Spam("sending peer discovery response to '%s'", sender)
-    local obj = { --- @type LibP2PDB.Packet
-        CommMessageType.PeerDiscoveryResponse,
-        self.peerID,
-        dbi.clock, --- @type LibP2PDB.Clock
-    }
-    self:Send(dbi, obj, "WHISPER", sender, CommPriority.Low)
-end
-
---- Handler for peer discovery response messages.
---- Record peer information used to find neighbors for gossip synchronization.
---- @param message LibP2PDB.Message
-function Private:PeerDiscoveryResponseHandler(message)
-    local dbi = message.dbi
-    local sender = message.sender
-    Spam("received peer discovery response from '%s'", sender)
-
-    -- Update last discovery time
-    local now = GetTime()
-    if dbi.onDiscoveryComplete then
-        dbi.lastDiscoveryResponseTime = now
-    end
-
-    self:UpdatePeer(message)
 end
 
 --- Handler for digest request messages.
@@ -3344,27 +3255,6 @@ function Private:RowsResponseHandler(message)
     -- Import the database state we received
     local databaseState = message.data --- @type LibP2PDB.DBState
     self:ImportDatabase(dbi, databaseState, message)
-end
-
---- OnUpdate handler called periodically to handle time-based events.
---- @param dbi LibP2PDB.DBInstance Database instance.
-function Private:OnUpdate(dbi)
-    if not dbi.discoveryStartTime then
-        return
-    end
-
-    -- Handle peer discovery timeout
-    local now = GetTime()
-    local sinceStart = now - dbi.discoveryStartTime
-    local sinceLast = now - dbi.lastDiscoveryResponseTime
-
-    -- Discovery quiet period or max time reached
-    if sinceLast >= dbi.discoveryQuietPeriod or sinceStart >= dbi.discoveryMaxTime then
-        dbi.discoveryStartTime = nil
-        if dbi.onDiscoveryComplete then
-            securecallfunction(dbi.onDiscoveryComplete)
-        end
-    end
 end
 
 --- Send rows response in chunks to avoid transmission timeouts.
@@ -3778,8 +3668,6 @@ local UnitTests = {
             Assert.AreEqual(dbi.version, 1)
             Assert.AreEqual(dbi.clock, 0)
             Assert.IsNil(dbi.channels)
-            Assert.AreEqual(dbi.discoveryQuietPeriod, 1.5)
-            Assert.AreEqual(dbi.discoveryMaxTime, 3.0)
             Assert.AreEqual(dbi.peerTimeout, 100.0)
             Assert.IsInterface(dbi.filter, { "New", "Insert", "Contains", "Export", "Import" })
             Assert.IsInterface(dbi.serializer, { "Serialize", "Deserialize" })
@@ -3794,9 +3682,6 @@ local UnitTests = {
             Assert.IsNil(dbi.onMigrateTable)
             Assert.IsNil(dbi.onMigrateRow)
             Assert.IsNil(dbi.onChange)
-            Assert.IsNil(dbi.onDiscoveryComplete)
-            Assert.IsNil(dbi.discoveryStartTime)
-            Assert.IsNil(dbi.lastDiscoveryResponseTime)
         end
         do -- check new database creation with full description
             Assert.IsNil(LibP2PDB:GetDatabase("LibP2PDBTests2"))
@@ -3843,9 +3728,6 @@ local UnitTests = {
                 },
                 channels = { "CUSTOM" },
                 onChange = function(table, key, row) end,
-                discoveryQuietPeriod = 5.0,
-                discoveryMaxTime = 30.0,
-                onDiscoveryComplete = function() end,
                 peerTimeout = 300.0,
             })
             Assert.IsEmptyTable(db)
@@ -3858,8 +3740,6 @@ local UnitTests = {
             Assert.AreEqual(dbi.version, 2)
             Assert.AreEqual(dbi.clock, 0)
             Assert.AreEqual(dbi.channels, { "CUSTOM" })
-            Assert.AreEqual(dbi.discoveryQuietPeriod, 5.0)
-            Assert.AreEqual(dbi.discoveryMaxTime, 30.0)
             Assert.AreEqual(dbi.peerTimeout, 300.0)
             Assert.IsInterface(dbi.filter, { "New", "Insert", "Contains", "Export", "Import" })
             Assert.IsInterface(dbi.serializer, { "Serialize", "Deserialize" })
@@ -3871,9 +3751,6 @@ local UnitTests = {
             Assert.IsEmptyTable(dbi.tables)
             Assert.IsFunction(dbi.onError)
             Assert.IsFunction(dbi.onChange)
-            Assert.IsFunction(dbi.onDiscoveryComplete)
-            Assert.IsNil(dbi.discoveryStartTime)
-            Assert.IsNil(dbi.lastDiscoveryResponseTime)
         end
     end,
 
@@ -3927,33 +3804,6 @@ local UnitTests = {
         Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = "invalid" }) end)
         Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = 123 }) end)
         Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = {} }) end)
-    end,
-
-    NewDatabase_DescDiscoveryQuietPeriodIsInvalid_Throws = function()
-        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", discoveryQuietPeriod = true }) end)
-        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", discoveryQuietPeriod = false }) end)
-        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", discoveryQuietPeriod = -1 }) end)
-        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", discoveryQuietPeriod = "" }) end)
-        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", discoveryQuietPeriod = "invalid" }) end)
-        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", discoveryQuietPeriod = {} }) end)
-    end,
-
-    NewDatabase_DescDiscoveryMaxTimeIsInvalid_Throws = function()
-        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", discoveryMaxTime = true }) end)
-        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", discoveryMaxTime = false }) end)
-        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", discoveryMaxTime = -1 }) end)
-        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", discoveryMaxTime = "" }) end)
-        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", discoveryMaxTime = "invalid" }) end)
-        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", discoveryMaxTime = {} }) end)
-    end,
-
-    NewDatabase_DescOnDiscoveryCompleteIsInvalid_Throws = function()
-        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onDiscoveryComplete = true }) end)
-        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onDiscoveryComplete = false }) end)
-        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onDiscoveryComplete = "" }) end)
-        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onDiscoveryComplete = "invalid" }) end)
-        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onDiscoveryComplete = 123 }) end)
-        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onDiscoveryComplete = {} }) end)
     end,
 
     NewDatabase_PrefixAlreadyExists_Throws = function()
@@ -6419,16 +6269,6 @@ local function TickPrivateInstances(instances)
             end
         end
 
-        -- Process OnUpdate for each instance
-        for _, instance in ipairs(instances) do
-            if instance.frame then
-                local onUpdateHandler = instance.frame:GetScript("OnUpdate")
-                if onUpdateHandler then
-                    onUpdateHandler(instance.frame)
-                end
-            end
-        end
-
         -- Check if there are more messages to process
         moreMessagesToProcess = false
         for _, channel in ipairs(orderedChannels) do
@@ -6522,59 +6362,6 @@ local NetworkTests = {
             Assert.Throws(function() LibP2PDB:BroadcastPresence({}) end)
         end)
     end,
-
-    --- @diagnostic disable: deprecated
-    DiscoverPeers = function()
-        local instances = {}
-        local databases = {}
-        for i = 1, numPeers do
-            instances[i] = NewPrivateInstance(i)
-            databases[i] = PrivateScope(instances[i], function()
-                return LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-            end)
-        end
-
-        -- This is expected to make peer 1 discover all other peers, while others discover only peer 1
-        VerbosityScope(3, function()
-            PrivateScope(instances[1], function() LibP2PDB:DiscoverPeers(databases[1]) end)
-            TickPrivateInstances(instances)
-        end)
-
-        -- Check that peer 1 knows about all other peers
-        for i = 2, numPeers do
-            local db = databases[1]
-            local dbi = instances[1].databases[db]
-            Assert.ContainsKey(dbi.peers, instances[i].peerID)
-            Assert.AreEqual(dbi.peers[instances[i].peerID].name, "Player" .. i)
-        end
-
-        -- Check that other peers know only about peer 1
-        for i = 2, numPeers do
-            local db = databases[i]
-            local dbi = instances[i].databases[db]
-            Assert.ContainsKey(dbi.peers, instances[1].peerID)
-            Assert.AreEqual(dbi.peers[instances[1].peerID].name, "Player1")
-            for j = 2, numPeers do
-                if i ~= j then
-                    Assert.IsNil(dbi.peers[instances[j].peerID])
-                end
-            end
-        end
-    end,
-
-    DiscoverPeers_DBIsInvalid_Throws = function()
-        local instance = NewPrivateInstance(1)
-        PrivateScope(instance, function()
-            Assert.Throws(function() LibP2PDB:DiscoverPeers(nil) end)
-            Assert.Throws(function() LibP2PDB:DiscoverPeers(true) end)
-            Assert.Throws(function() LibP2PDB:DiscoverPeers(false) end)
-            Assert.Throws(function() LibP2PDB:DiscoverPeers("") end)
-            Assert.Throws(function() LibP2PDB:DiscoverPeers("invalid") end)
-            Assert.Throws(function() LibP2PDB:DiscoverPeers(123) end)
-            Assert.Throws(function() LibP2PDB:DiscoverPeers({}) end)
-        end)
-    end,
-    --- @diagnostic enable: deprecated
 
     SyncDatabase = function()
         local instances = {}
