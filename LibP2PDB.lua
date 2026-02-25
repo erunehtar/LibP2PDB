@@ -27,6 +27,7 @@
 local MAJOR, MINOR = "LibP2PDB", 4
 assert(LibStub, MAJOR .. " requires LibStub")
 
+--- @class LibP2PDB Main library class.
 local LibP2PDB = LibStub:NewLibrary(MAJOR, MINOR)
 if not LibP2PDB then return end -- no upgrade needed
 
@@ -2583,10 +2584,12 @@ function Private:ImportRow(dbi, dbClock, tableName, ti, key, rowState, message)
     local incomingVersionPeer = rowState[3]
     if IsNonEmptyString(incomingVersionPeer) then
         -- Migration from old peerID format
-        if strmatch(incomingVersionPeer, "^%x%x%x%x%-%x%x%x%x%x%x%x%x$") then
+        if incomingVersionPeer == "=" then
+            incomingVersionPeer = 0 -- Special case for rows where the key is the same as the peer ID, to save space in serialization
+        elseif strmatch(incomingVersionPeer, "^[0-9A-F][0-9A-F][0-9A-F][0-9A-F]%-[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]$") then
             incomingVersionPeer = PlayerGUIDToPeerID("Player-" .. incomingVersionPeer)
         else
-            ReportError(dbi, "invalid peer ID format (migration) in row version state for key '%s' in table '%s'", key, tableName)
+            ReportError(dbi, "invalid peer ID format (migration) in row version state for key '%s' in table '%s', got '%s'", key, tableName, incomingVersionPeer)
             return
         end
     end
