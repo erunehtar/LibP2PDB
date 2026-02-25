@@ -111,7 +111,7 @@ local Color = {
 --- @enum LibP2PDB.CommMessageType Communication message types.
 local CommMessageType = {
     Empty = 1,
-    PeerDiscoveryRequest = 2, -- Removed in version 5
+    PeerDiscoveryRequest = 2,  -- Removed in version 5
     PeerDiscoveryResponse = 3, -- Removed in version 5
     DigestRequest = 4,
     DigestResponse = 5,
@@ -705,13 +705,19 @@ end
 -- Private State
 ------------------------------------------------------------------------------------------------------------------------
 
+--- @class LibP2PDB.Private Private instance base class.
+--- @field playerName string The player's name.
+--- @field playerGUID string The player's GUID.
+--- @field peerID LibP2PDB.PeerID The player's peer ID.
+--- @field prefixes table<string, LibP2PDB.DBHandle> Mapping of database prefixes to database handles.
+--- @field databases table<LibP2PDB.DBHandle, LibP2PDB.DBInstance> Mapping of database handles to database instances.
 local Private = {}
 Private.__index = Private
 
 --- Create a new private library state instance.
 --- @param playerName string Player name.
 --- @param playerGUID string Player GUID.
---- @return table instance New private library state instance.
+--- @return LibP2PDB.Private instance New private library state instance.
 function Private.New(playerName, playerGUID)
     assert(IsNonEmptyString(playerName), "player name must be a non-empty string")
     assert(IsNonEmptyString(playerGUID), "player GUID must be a non-empty string")
@@ -727,6 +733,7 @@ function Private.New(playerName, playerGUID)
     return instance
 end
 
+--- The private library state instance.
 local priv = Private.New(assert(UnitName("player"), "unable to get player name"), assert(UnitGUID("player"), "unable to get player GUID"))
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -1521,14 +1528,14 @@ function LibP2PDB:SyncDatabase(db)
         for neighborPeerId in pairs(neighbors) do
             local peerInfo = dbi.peers[neighborPeerId]
             if peerInfo then
-                Spam("sending digest request to '%s'", peerInfo.name)
+                Spam("sending digest request to %s (%X)", peerInfo.name, neighborPeerId)
                 local obj = { --- @type LibP2PDB.Packet
                     CommMessageType.DigestRequest,
                     priv.peerID,
                 }
                 priv:Send(dbi, obj, "WHISPER", peerInfo.name, CommPriority.Low)
             else
-                ReportError(dbi, "peer info for peer ID '%s' not found", neighborPeerId)
+                ReportError(dbi, "peer info for peer ID %X not found", neighborPeerId)
             end
         end
     else
@@ -1582,7 +1589,7 @@ end
 --- @param db LibP2PDB.DBHandle Database handle.
 --- @param tableName LibP2PDB.TableName? Name of the table to send from, or nil to send from all tables that contain the key.
 --- @param key LibP2PDB.TableKey Primary key value for the row (must match table's keyType).
---- @param target string Target player name to send the row to.
+--- @param target LibP2PDB.PeerName Target player name to send the row to.
 --- @return boolean success Returns true on success, false otherwise.
 function LibP2PDB:SendKey(db, tableName, key, target)
     assert(IsEmptyTable(db), "db must be an empty table")
@@ -1618,12 +1625,12 @@ function LibP2PDB:SendKey(db, tableName, key, target)
 
     -- Ensure there is at least one row to send
     if IsEmptyTable(tableStateMap) then
-        ReportError(dbi, "no valid rows to send to '%s'", target)
+        ReportError(dbi, "no rows to send to %s", target)
         return false
     end
 
     -- Send the row to the target player
-    Spam("sending key '%s' from table(s) '%s' to '%s'", key, strjoin(", ", unpack(tableNames)), target)
+    Spam("sending key '%s' from table(s) '%s' to %s", key, strjoin(", ", unpack(tableNames)), target)
     local obj = { --- @type LibP2PDB.Packet
         CommMessageType.RowsResponse,
         priv.peerID,
@@ -2763,7 +2770,7 @@ function Private:GetNeighbors(dbi)
     -- Compute our virtual index, zero-based
     local peerIndex = IndexOf(dbi.peersSorted, self.peerID)
     if not peerIndex then
-        ReportError(dbi, "local peer ID '%s' not found in peer list for prefix '%s'", self.peerID, dbi.prefix)
+        ReportError(dbi, "local peer ID %X not found in peer list for prefix '%s'", self.peerID, dbi.prefix)
         return {}
     end
 
@@ -2823,7 +2830,7 @@ function Private:Send(dbi, data, channel, target, priority)
     end
 
     if target then
-        Spam("sending %d bytes on prefix '%s' channel '%s' target '%s'", #encoded, dbi.prefix, channel, target)
+        Spam("sending %d bytes to %s on prefix '%s' channel '%s'", #encoded, target, dbi.prefix, channel)
     else
         Spam("sending %d bytes on prefix '%s' channel '%s'", #encoded, dbi.prefix, channel)
     end
@@ -2923,38 +2930,38 @@ function Private:OnCommReceived(prefix, encoded, channel, sender)
     -- Get the database instance for this prefix
     local db = self.prefixes[prefix]
     if not db then
-        Warn("received message for unknown prefix '%s' from channel '%s' sender '%s'", prefix, channel, sender)
+        Warn("received message from %s for unknown prefix '%s' channel '%s'", sender, prefix, channel)
         return
     end
 
     local dbi = self.databases[db]
     if not dbi then
-        Warn("received message for unregistered database prefix '%s' from channel '%s' sender '%s'", prefix, channel, sender)
+        Warn("received message from %s for unregistered database prefix '%s' channel '%s'", sender, prefix, channel)
         return
     end
 
     -- Deserialize message
     local compressed = dbi.encoder:DecodeFromChannel(encoded)
     if not compressed then
-        ReportError(dbi, "failed to decode message from prefix '%s' channel '%s' sender '%s'", prefix, channel, sender)
+        ReportError(dbi, "failed to decode message from %s prefix '%s' channel '%s'", sender, prefix, channel)
         return
     end
 
     local serialized = dbi.compressor:Decompress(compressed)
     if not serialized then
-        ReportError(dbi, "failed to decompress message from prefix '%s' channel '%s' sender '%s'", prefix, channel, sender)
+        ReportError(dbi, "failed to decompress message from %s prefix '%s' channel '%s'", sender, prefix, channel)
         return
     end
 
     local obj = dbi.serializer:Deserialize(serialized)
     if not obj then
-        ReportError(dbi, "failed to deserialize message from prefix '%s' channel '%s' sender '%s': %s", prefix, channel, sender, Dump(obj))
+        ReportError(dbi, "failed to deserialize message from %s prefix '%s' channel '%s': %s", sender, prefix, channel, Dump(obj))
         return
     end
 
     -- Validate message structure
     if not IsTable(obj) then
-        ReportError(dbi, "received invalid message structure from '%s' on channel '%s'", sender, channel)
+        ReportError(dbi, "received invalid message structure from %s on channel '%s'", sender, channel)
         return
     end
 
@@ -2971,7 +2978,7 @@ function Private:OnCommReceived(prefix, encoded, channel, sender)
     --- @cast obj LibP2PDB.Packet
 
     if not IsInteger(obj[1]) then
-        ReportError(dbi, "received message with missing or invalid type from '%s' on channel '%s'", sender, channel)
+        ReportError(dbi, "received message with missing or invalid type from %s on channel '%s'", sender, channel)
         return
     end
 
@@ -2980,12 +2987,12 @@ function Private:OnCommReceived(prefix, encoded, channel, sender)
         if strmatch(obj[2], "^%x%x%x%x%-%x%x%x%x%x%x%x%x$") then
             obj[2] = PlayerGUIDToPeerID("Player-" .. obj[2])
         else
-            ReportError(dbi, "received message with invalid peer ID format (migration) from '%s' on channel '%s'", sender, channel)
+            ReportError(dbi, "received message with invalid peer ID format (migration) from %s on channel '%s'", sender, channel)
             return
         end
     end
     if not IsInteger(obj[2], 1, 0xFFFFFFFFFFFF) then
-        ReportError(dbi, "received message with missing or invalid peer from '%s' on channel '%s'", sender, channel)
+        ReportError(dbi, "received message with missing or invalid peer from %s on channel '%s'", sender, channel)
         return
     end
 
@@ -3004,11 +3011,11 @@ function Private:OnCommReceived(prefix, encoded, channel, sender)
     if success and playerGUID then
         local name = select(6, GetPlayerInfoByGUID(playerGUID))
         if name ~= sender then
-            Error("received message with mismatched sender name '%s' for peer ID '%X' on channel '%s'", sender, message.peerID, channel)
+            Error("received message from %s with mismatched sender name %s peer ID %X on channel '%s'", sender, name, message.peerID, channel)
             return
         end
     else
-        ReportError(dbi, "received message with invalid peer ID '%X' that cannot be mapped to a player GUID from '%s' on channel '%s'", message.peerID, sender, channel)
+        ReportError(dbi, "received message from %s with invalid peer ID %X that cannot be mapped to a player GUID on channel '%s'", sender, message.peerID, channel)
         return
     end
 
@@ -3060,7 +3067,7 @@ function Private:DispatchMessage(message)
     elseif message.type == CommMessageType.RowsResponse then
         self:RowsResponseHandler(message)
     else
-        ReportError(message.dbi, "received unknown message type %d from '%s' on channel '%s'", message.type, message.sender, message.channel)
+        ReportError(message.dbi, "received unknown message type %d from %s on channel '%s'", message.type, message.sender, message.channel)
     end
 end
 
@@ -3071,7 +3078,7 @@ end
 function Private:DigestRequestHandler(message)
     local dbi = message.dbi
     local sender = message.sender
-    Spam("received digest request from '%s'", sender)
+    Spam("received digest request from %s", sender)
 
     -- Build digest for each table
     local databaseDigest = {} --- @type LibP2PDB.DBDigest
@@ -3098,12 +3105,12 @@ function Private:DigestRequestHandler(message)
 
     -- Return if there are no tables to include in the digest
     if IsEmptyTable(databaseDigest) then
-        Spam("no tables to include in digest response to '%s'", sender)
+        Spam("no tables to include in digest response to %s", sender)
         return
     end
 
     -- Send digest response
-    Spam("sending digest response to '%s'", sender)
+    Spam("sending digest response to %s", sender)
     local obj = { --- @type LibP2PDB.Packet
         CommMessageType.DigestResponse,
         self.peerID,
@@ -3119,7 +3126,7 @@ end
 function Private:DigestResponseHandler(message)
     local dbi = message.dbi
     local sender = message.sender
-    Spam("received digest response from '%s'", sender)
+    Spam("received digest response from %s", sender)
 
     -- Iterate each table in the digest
     local databaseDigest = message.data --- @type LibP2PDB.DBDigest
@@ -3179,19 +3186,19 @@ function Private:DigestResponseHandler(message)
                 databaseRequest[tableName] = tableRequest
             end
         else
-            ReportError(dbi, "table '%s' in digest response from '%s' is not defined in the database", tableName, sender)
+            ReportError(dbi, "table '%s' in digest response from %s is not defined in the database", tableName, sender)
         end
     end
 
     -- Send rows they are missing
     if IsNonEmptyTable(tableStateMap) then
-        Spam("sending %d missing rows response to '%s'", missingRowsCount, sender)
+        Spam("sending %d missing rows to %s", missingRowsCount, sender)
         self:SendChunkedRowsResponse(dbi, ROWS_PER_CHUNK, sender, tableStateMap)
     end
 
     -- Request rows that differs from their summary
     if IsNonEmptyTable(databaseRequest) then
-        Spam("sending %d outdated rows request to '%s'", outdatedRowsCount, sender)
+        Spam("requesting %d outdated rows from %s", outdatedRowsCount, sender)
         self:SendChunkedRowsRequest(dbi, ROWS_PER_CHUNK, sender, databaseRequest)
     end
 end
@@ -3204,7 +3211,7 @@ function Private:RowsRequestHandler(message)
     local dbi = message.dbi
     local sender = message.sender
     local peerID = message.peerID
-    Spam("received rows request from '%s'", sender)
+    Spam("received rows request from %s", sender)
 
     -- Export requested rows for each table
     local databaseRequest = message.data                           --- @type LibP2PDB.DBRequest
@@ -3228,18 +3235,18 @@ function Private:RowsRequestHandler(message)
                 tableStateMap[tableName] = rowStateMap
             end
         else
-            ReportError(dbi, "table '%s' in rows request from '%s' is not defined in the database", tableName, sender)
+            ReportError(dbi, "table '%s' in rows request from %s is not defined in the database", tableName, sender)
         end
     end
 
     -- Return if there are no rows to send
     if IsEmptyTable(tableStateMap) then
-        Spam("no rows to send to '%s'", sender)
+        Spam("no rows to send to %s", sender)
         return
     end
 
     -- Send rows response
-    Spam("sending %d rows response to '%s'", rowCount, sender)
+    Spam("sending %d rows to %s", rowCount, sender)
     self:SendChunkedRowsResponse(dbi, ROWS_PER_CHUNK, sender, tableStateMap)
 end
 
@@ -3250,7 +3257,7 @@ end
 function Private:RowsResponseHandler(message)
     local dbi = message.dbi
     local sender = message.sender
-    Spam("received rows response from '%s'", sender)
+    Spam("received rows from %s", sender)
 
     -- Import the database state we received
     local databaseState = message.data --- @type LibP2PDB.DBState
@@ -7333,6 +7340,7 @@ local function RunTests()
         local _IsAddonMessagePrefixRegistered = C_ChatInfo.IsAddonMessagePrefixRegistered
         ---@diagnostic disable-next-line: duplicate-set-field
         C_ChatInfo.IsAddonMessagePrefixRegistered = function(prefix)
+            --- @diagnostic disable-next-line: undefined-field
             return priv.registeredPrefixes and priv.registeredPrefixes[prefix] ~= nil
         end
 
