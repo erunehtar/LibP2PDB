@@ -1064,6 +1064,9 @@ end
 --- @field onValidate LibP2PDB.TableOnValidateCallback? Optional callback function(key, data, context) for custom row validation. Must return true if valid, false otherwise. Data is a copy and has not yet been applied when this is called.
 --- @field onChange LibP2PDB.TableOnChangeCallback? Optional callback function(key, data) on row data changes. Data is nil for deletions. Data is a copy, and has already been applied when this is called.
 
+--- @class LibP2PDB.Summary : LibBucketedHashSet
+--- @field keyIndex table<LibP2PDB.TableKey, integer> Mapping of primary key values to their index in the summary's hash set.
+
 --- Create a new table in the database with an optional schema.
 --- If no schema is provided, the table accepts any fields.
 --- @param db LibP2PDB.DBHandle Database handle.
@@ -1122,8 +1125,8 @@ function LibP2PDB:NewTable(db, desc)
     end
 
     -- Create the bucketed hash set for the summary
-    local summary = LibBucketedHashSet.New(MIN_BUCKET_COUNT)
-    summary.keyIndex = {} --- @type table<LibP2PDB.TableKey, integer>
+    local summary = LibBucketedHashSet.New(MIN_BUCKET_COUNT) --[[@as LibP2PDB.Summary]]
+    summary.keyIndex = {}
 
     -- Create the table instance
     --- @type LibP2PDB.TableInstance
@@ -2004,7 +2007,7 @@ end
 --- @field seed integer Seed value for the table's filter and bucket hash set.
 --- @field rowCount integer Total number of rows in the table (including tombstones).
 --- @field rows table<LibP2PDB.TableKey, LibP2PDB.TableRow> Registry of rows in the table.
---- @field summary any Summary of the table's keys, stored in a bucketed hash set.
+--- @field summary LibP2PDB.Summary Summary of the table's keys, stored in a bucketed hash set.
 
 --- @class LibP2PDB.TableRow Table row definition.
 --- @field data LibP2PDB.RowData? Data for the row, or nil if the row is a tombstone (deleted).
@@ -2239,7 +2242,7 @@ end
 --- @param requiredNumBucket integer Required number of buckets for the summary.
 function Private:ResizeTableSummary(ti, requiredNumBucket)
     -- Create new summary
-    local summary = LibBucketedHashSet.New(requiredNumBucket)
+    local summary = LibBucketedHashSet.New(requiredNumBucket) --[[@as LibP2PDB.Summary]]
 
     -- Rehash existing keys into new summary
     for key, row in pairs(ti.rows) do
