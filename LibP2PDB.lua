@@ -91,6 +91,7 @@ end
 
 local NIL_MARKER = strchar(0) --- @type string Marker for nil values in serialization.
 local LOG2 = log(2)           --- @type number Precomputed log(2) for efficiency.
+local UINT32_MODULO = 2 ^ 32  --- @type integer Modulo for keeping integers within 32-bit unsigned range.
 local MIN_BUCKET_COUNT = 32   --- @type integer Minimum number of buckets for summary filters.
 local KEYS_PER_BUCKET = 32    --- @type integer Default bucket size for summary filters.
 local ROWS_PER_CHUNK = 256    --- @type integer Number of rows per chunk for chunked transmission.
@@ -117,6 +118,8 @@ local CommMessageType = {
     DigestResponse = 5,
     RowsRequest = 6,
     RowsResponse = 7,
+    FingerprintRequest = 8,
+    FingerprintResponse = 9,
 }
 
 --- @enum LibP2PDB.CommPriority Communication priorities.
@@ -1525,15 +1528,17 @@ function LibP2PDB:SyncDatabase(db)
     -- Get neighbors
     local neighbors = priv:GetNeighbors(dbi)
 
-    -- Send digest requests to neighbors
+    -- Send fingerprint requests to neighbors as the first step of gossip sync.
+    -- Neighbors will reply with per-table fingerprints; we then send a DigestRequest
+    -- only for tables whose fingerprints differ, avoiding unnecessary full digests.
     if IsNonEmptyTable(neighbors) then
-        -- Send the digest request message to closest neighbors
+        -- Send the fingerprint request message to closest neighbors
         for neighborPeerId in pairs(neighbors) do
             local peerInfo = dbi.peers[neighborPeerId]
             if peerInfo then
-                Spam("sending digest request to %s (%X)", peerInfo.name, neighborPeerId)
+                Spam("sending fingerprint request to %s (%X)", peerInfo.name, neighborPeerId)
                 local obj = { --- @type LibP2PDB.Packet
-                    CommMessageType.DigestRequest,
+                    CommMessageType.FingerprintRequest,
                     priv.peerID,
                 }
                 priv:Send(dbi, obj, "WHISPER", peerInfo.name, CommPriority.Low)
@@ -2022,6 +2027,7 @@ end
 --- @field data LibP2PDB.RowData? Data for the row, or nil if the row is a tombstone.
 --- @field version LibP2PDB.RowVersion Version metadata for the row.
 
+--- @alias LibP2PDB.DBFingerprint table<LibP2PDB.TableName, integer> Database fingerprint mapping table names to their XOR-folded bucket hash.
 --- @alias LibP2PDB.DBDigest table<LibP2PDB.TableName, LibP2PDB.TableDigest> Database digest mapping table names to their table digests.
 
 --- @class LibP2PDB.TableDigest
@@ -3061,6 +3067,10 @@ function Private:DispatchMessage(message)
         -- Removed in version 5
     elseif message.type == CommMessageType.PeerDiscoveryResponse then
         -- Removed in version 5
+    elseif message.type == CommMessageType.FingerprintRequest then
+        self:FingerprintRequestHandler(message)
+    elseif message.type == CommMessageType.FingerprintResponse then
+        self:FingerprintResponseHandler(message)
     elseif message.type == CommMessageType.DigestRequest then
         self:DigestRequestHandler(message)
     elseif message.type == CommMessageType.DigestResponse then
@@ -3074,6 +3084,83 @@ function Private:DispatchMessage(message)
     end
 end
 
+--- Handler for fingerprint request messages.
+--- Reply to the sender with a per-table XOR fingerprint of each sync table's summary buckets.
+--- Data will be sent using the LibP2PDB.DBFingerprint format.
+--- @param message LibP2PDB.Message
+function Private:FingerprintRequestHandler(message)
+    local dbi = message.dbi
+    local sender = message.sender
+    Spam("received fingerprint request from %s", sender)
+
+    -- Build fingerprint for each sync table
+    local databaseFingerprint = {} --- @type LibP2PDB.DBFingerprint
+    for tableName, ti in pairs(dbi.tables) do
+        if ti.sync then
+            databaseFingerprint[tableName] = self:ComputeTableFingerprint(ti)
+        end
+    end
+
+    -- Return if there are no sync tables
+    if IsEmptyTable(databaseFingerprint) then
+        Spam("no tables to include in fingerprint response to %s", sender)
+        return
+    end
+
+    -- Send fingerprint response
+    Spam("sending fingerprint response to %s", sender)
+    local obj = { --- @type LibP2PDB.Packet
+        CommMessageType.FingerprintResponse,
+        self.peerID,
+        databaseFingerprint,
+    }
+    self:Send(dbi, obj, "WHISPER", sender, CommPriority.Low)
+end
+
+--- Handler for fingerprint response messages.
+--- Compare per-table fingerprints against our own; send a DigestRequest only for tables that differ.
+--- @param message LibP2PDB.Message
+function Private:FingerprintResponseHandler(message)
+    local dbi = message.dbi
+    local sender = message.sender
+    Spam("received fingerprint response from %s", sender)
+
+    local peerFingerprints = message.data --- @type LibP2PDB.DBFingerprint
+    if not IsNonEmptyTable(peerFingerprints) then
+        ReportError(dbi, "received invalid fingerprint response from %s on channel '%s'", sender, message.channel)
+        return
+    end
+
+    -- Compare our fingerprint to theirs for each sync table we have
+    local tableFilter = {} --- @type table<LibP2PDB.TableName, boolean>
+    local differingTableCount = 0
+    for tableName, ti in pairs(dbi.tables) do
+        if ti.sync then
+            local ourFingerprint = self:ComputeTableFingerprint(ti)
+            local peerFingerprint = peerFingerprints[tableName] or 0
+            if ourFingerprint ~= peerFingerprint then
+                tableFilter[tableName] = true
+                differingTableCount = differingTableCount + 1
+            end
+        end
+    end
+
+    -- If all tables match, nothing to sync
+    if differingTableCount == 0 then
+        Spam("no tables to include in digest request to %s", sender)
+        return
+    end
+
+    -- Send a digest request for only the tables that differ
+    Spam("sending digest request to %s for %d differing table(s)", sender, differingTableCount)
+    local obj = { --- @type LibP2PDB.Packet
+        CommMessageType.DigestRequest,
+        self.peerID,
+        tableFilter,
+    }
+    self:Send(dbi, obj, "WHISPER", sender, CommPriority.Low)
+end
+
 --- Handler for digest request messages.
 --- Reply to the sender with digests for each table.
 --- Data will be sent using the LibP2PDB.DBDigest format.
@@ -3083,10 +3170,15 @@ function Private:DigestRequestHandler(message)
     local sender = message.sender
     Spam("received digest request from %s", sender)
 
+    -- Optional table filter: if provided (from a FingerprintResponse request), only include
+    -- the listed tables. If nil or empty, include all sync tables (backward compatibility).
+    local tableFilter = IsNonEmptyTable(message.data) and message.data or nil --- @type table<LibP2PDB.TableName, boolean>?
+
     -- Build digest for each table
     local databaseDigest = {} --- @type LibP2PDB.DBDigest
     for tableName, ti in pairs(dbi.tables) do
-        if ti.sync then       -- Only include tables marked for synchronization
+        -- Only include tables marked for synchronization, and that are included in the optional table filter
+        if ti.sync and (not tableFilter or tableFilter[tableName]) then
             if ti.rowCount > 0 then
                 local filter = dbi.filter.New(ti.rowCount, ti.seed)
                 ti.seed = ti.seed + 1 -- increment seed for next use
@@ -3369,6 +3461,18 @@ function Private:SendChunkedRowsRequest(dbi, chunkSize, sender, databaseRequest)
         }
         self:Send(dbi, obj, "WHISPER", sender, CommPriority.Normal)
     end
+end
+
+--- Compute an XOR fingerprint of a table's summary buckets.
+--- Returns 0 for empty tables. Computed on-demand; never cached.
+--- @param ti LibP2PDB.TableInstance Table instance.
+--- @return integer fingerprint XOR of all summary bucket values.
+function Private:ComputeTableFingerprint(ti)
+    local fingerprint = ti.rowCount -- seed with row count so non-empty tables are never confused with empty ones (fingerprint 0)
+    for _, v in ipairs(ti.summary.buckets) do
+        fingerprint = bxor(fingerprint, v) % UINT32_MODULO
+    end
+    return fingerprint
 end
 
 --- Update information about a new or existing peer.
