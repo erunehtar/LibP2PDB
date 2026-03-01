@@ -785,7 +785,7 @@ local priv = Private.New(assert(UnitName("player"), "unable to get player name")
 
 --- @alias LibP2PDB.DBOnErrorCallback fun(errMsg: string, stack: string?) Callback function invoked on errors.
 --- @alias LibP2PDB.DBOnMigrateDBCallback fun(target: LibP2PDB.MigrationContext, source: LibP2PDB.MigrationContext) Callback function invoked when database migration is needed.
---- @alias LibP2PDB.DBOnMigrateTableCallback fun(target: LibP2PDB.MigrationContext, source: LibP2PDB.MigrationContext): LibP2PDB.TableName? Callback function invoked when table migration is needed.
+--- @alias LibP2PDB.DBOnMigrateTableCallback fun(target: LibP2PDB.MigrationContext, source: LibP2PDB.MigrationContext): LibP2PDB.TableName? Callback function invoked when table migration is needed. Return the target table name to migrate into (use source.tableName to keep the same name), or nil to drop/skip the table entirely.
 --- @alias LibP2PDB.DBOnMigrateRowCallback fun(target: LibP2PDB.MigrationContext, source: LibP2PDB.MigrationContext): LibP2PDB.TableKey?, LibP2PDB.RowData? Callback function invoked when row migration is needed.
 --- @alias LibP2PDB.DBOnChangeCallback fun(tableName: LibP2PDB.TableName, key: LibP2PDB.TableKey, newData: LibP2PDB.RowData?, oldData: LibP2PDB.RowData?) Callback function invoked on any row change.
 
@@ -2662,9 +2662,10 @@ function Private:MigrateTable(target, source)
             ReportError(target.dbi, "table migration failed for table '%s'", source.tableName)
             return
         end
-        if newTableName then
-            tableName = newTableName
+        if newTableName == nil then
+            return -- User explicitly chose to drop/skip this table
         end
+        tableName = newTableName
     end
 
     -- Validate table name
@@ -6174,6 +6175,57 @@ local UnitTests = {
                     tombstone = nil
                 },
             })
+        end
+    end,
+
+    Migration_DropTable = function()
+        local state = nil
+        do
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", version = 1 })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            LibP2PDB:NewTable(db, { name = "Logs", keyType = "number", schema = { message = "string" } })
+            LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 })
+            LibP2PDB:InsertKey(db, "Users", 2, { name = "Alice", age = 30 })
+            LibP2PDB:InsertKey(db, "Logs", 1, { message = "hello" })
+            state = LibP2PDB:ExportDatabase(db)
+        end
+        do
+            local db = LibP2PDB:NewDatabase({
+                prefix = "LibP2PDBImport",
+                version = 2,
+                onMigrateDB = function(target, source)
+                    if source.version == 1 then
+                        LibP2PDB:NewTable(source.db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+                        LibP2PDB:NewTable(source.db, { name = "Logs", keyType = "number", schema = { message = "string" } })
+                    end
+                end,
+                onMigrateTable = function(target, source)
+                    if source.tableName == "Logs" then
+                        return nil -- drop the Logs table
+                    end
+                    return source.tableName -- keep other tables unchanged
+                end,
+                onMigrateRow = function(target, source)
+                    return source.key, source.data
+                end,
+            })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            LibP2PDB:ImportDatabase(db, state)
+
+            local dbi = priv.databases[db]
+            Assert.IsNonEmptyTable(dbi)
+            Assert.AreEqual(dbi.clock, 3) -- Even if Logs table is dropped, we don't decrement the clock
+            Assert.IsNonEmptyTable(dbi.tables)
+            Assert.IsNil(dbi.tables["Logs"]) -- Logs was dropped by returning nil
+
+            local ti = dbi.tables["Users"]
+            Assert.IsNonEmptyTable(ti)
+            Assert.AreEqual(ti.rowCount, 2)
+
+            local rows = ti.rows
+            Assert.IsNonEmptyTable(rows)
+            Assert.AreEqual(rows[1].data, { name = "Bob", age = 25 })
+            Assert.AreEqual(rows[2].data, { name = "Alice", age = 30 })
         end
     end,
 
