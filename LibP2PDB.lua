@@ -66,7 +66,6 @@ local format, strsub, strfind, strjoin, strmatch, strbyte, strchar = format, str
 local tinsert, tremove, tconcat, tsort = table.insert, table.remove, table.concat, table.sort
 local unpack, select = unpack, select
 local setmetatable, getmetatable = setmetatable, getmetatable
-local securecallfunction = securecallfunction
 local fastrandom = fastrandom
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -788,7 +787,7 @@ local priv = Private.New(assert(UnitName("player"), "unable to get player name")
 --- @alias LibP2PDB.DBOnMigrateDBCallback fun(target: LibP2PDB.MigrationContext, source: LibP2PDB.MigrationContext) Callback function invoked when database migration is needed.
 --- @alias LibP2PDB.DBOnMigrateTableCallback fun(target: LibP2PDB.MigrationContext, source: LibP2PDB.MigrationContext): LibP2PDB.TableName? Callback function invoked when table migration is needed.
 --- @alias LibP2PDB.DBOnMigrateRowCallback fun(target: LibP2PDB.MigrationContext, source: LibP2PDB.MigrationContext): LibP2PDB.TableKey?, LibP2PDB.RowData? Callback function invoked when row migration is needed.
---- @alias LibP2PDB.DBOnChangeCallback fun(tableName: LibP2PDB.TableName, key: LibP2PDB.TableKey, data: LibP2PDB.RowData?) Callback function invoked on any row change.
+--- @alias LibP2PDB.DBOnChangeCallback fun(tableName: LibP2PDB.TableName, key: LibP2PDB.TableKey, newData: LibP2PDB.RowData?, oldData: LibP2PDB.RowData?) Callback function invoked on any row change.
 
 --- @class LibP2PDB.MigrationContext Context information for database/table/row migrations.
 --- @field db LibP2PDB.DBHandle Database handle.
@@ -1040,7 +1039,7 @@ end
 --- @alias LibP2PDB.TableSchema table<string|number, string|string[]> Table schema definition.
 --- @alias LibP2PDB.TableSchemaSorted [string|number, string|string[]] Table schema as a sorted array of field name and allowed types pairs.
 --- @alias LibP2PDB.TableOnValidateCallback fun(key: LibP2PDB.TableKey, data: LibP2PDB.RowData, context: LibP2PDB.TableOnValidateContext?):boolean Callback function for custom row validation.
---- @alias LibP2PDB.TableOnChangeCallback fun(key: LibP2PDB.TableKey, data: LibP2PDB.RowData?) Callback function invoked on row data changes.
+--- @alias LibP2PDB.TableOnChangeCallback fun(key: LibP2PDB.TableKey, newData: LibP2PDB.RowData?, oldData: LibP2PDB.RowData?) Callback function invoked on row data changes.
 --- @alias LibP2PDB.RowData table<LibP2PDB.RowDataKey, LibP2PDB.RowDataValue> Data for a row in a table.
 --- @alias LibP2PDB.RowDataKey string|number Key of a field in a row.
 --- @alias LibP2PDB.RowDataValue boolean|string|number|nil Value of a field in a row.
@@ -2092,6 +2091,9 @@ function Private:SetKey(dbi, tableName, ti, key, rowData)
             peerID = 0 -- Special case for rows where the key is the same as the peer ID, to save space in serialization
         end
 
+        -- Store the old row data for change callbacks before overwriting
+        local oldRowData = ShallowCopy(existingRow and existingRow.data or nil)
+
         -- Store the row
         ti.rows[key] = {
             data = rowData,
@@ -2109,7 +2111,7 @@ function Private:SetKey(dbi, tableName, ti, key, rowData)
         ti.summary.keyIndex[key] = ti.summary:Update(key, dbi.clock)
 
         -- Invoke row changed callbacks
-        self:InvokeChangeCallbacks(dbi, tableName, ti, key, rowData)
+        self:InvokeChangeCallbacks(dbi, tableName, ti, key, rowData, oldRowData)
     end
 
     return true
@@ -2180,6 +2182,9 @@ function Private:MergeKey(dbi, dbClock, tableName, ti, key, rowData, rowVersion,
             end
         end
 
+        -- Store the old row data for change callbacks before overwriting
+        local oldRowData = ShallowCopy(existingRow and existingRow.data or nil)
+
         -- Store the row
         ti.rows[key] = {
             data = rowData,
@@ -2197,7 +2202,7 @@ function Private:MergeKey(dbi, dbClock, tableName, ti, key, rowData, rowVersion,
         ti.summary.keyIndex[key] = ti.summary:Update(key, rowVersion.clock)
 
         -- Invoke row changed callbacks
-        self:InvokeChangeCallbacks(dbi, tableName, ti, key, rowData)
+        self:InvokeChangeCallbacks(dbi, tableName, ti, key, rowData, oldRowData)
     end
 
     return true
@@ -2264,21 +2269,22 @@ end
 --- @param tableName LibP2PDB.TableName Name of the table.
 --- @param ti LibP2PDB.TableInstance Table instance.
 --- @param key LibP2PDB.TableKey Primary key value for the row.
---- @param rowData LibP2PDB.RowData? New row data (or nil for tombstone).
-function Private:InvokeChangeCallbacks(dbi, tableName, ti, key, rowData)
+--- @param newRowData LibP2PDB.RowData? New row data (or nil for tombstone).
+--- @param oldRowData LibP2PDB.RowData? Previous row data before the change (or nil if no previous data).
+function Private:InvokeChangeCallbacks(dbi, tableName, ti, key, newRowData, oldRowData)
     -- Invoke database global change callback
     if dbi.onChange then
-        SafeCall(dbi, dbi.onChange, tableName, key, rowData)
+        SafeCall(dbi, dbi.onChange, tableName, key, ShallowCopy(newRowData), oldRowData)
     end
 
     -- Invoke database table change callback
     if ti.onChange then
-        SafeCall(dbi, ti.onChange, key, rowData)
+        SafeCall(dbi, ti.onChange, key, ShallowCopy(newRowData), oldRowData)
     end
 
     -- Invoke database table subscribers
     for callback in pairs(ti.subscribers) do
-        SafeCall(dbi, callback, key, rowData)
+        SafeCall(dbi, callback, key, ShallowCopy(newRowData), oldRowData)
     end
 end
 
