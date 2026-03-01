@@ -1707,23 +1707,8 @@ end
 
 --- Return the local peer's unique ID.
 --- @return LibP2PDB.PeerID peerID The local peer ID.
---- @deprecated Use LibP2PDB:GetLocalPeerID instead.
-function LibP2PDB:GetPeerId()
-    return self:GetLocalPeerID()
-end
-
---- Return the local peer's unique ID.
---- @return LibP2PDB.PeerID peerID The local peer ID.
 function LibP2PDB:GetLocalPeerID()
     return priv.peerID
-end
-
---- Return a remote peer's unique ID from its GUID.
---- @param guid string Full GUID of the remote peer.
---- @return LibP2PDB.PeerID? peerID The remote peer ID if valid, or nil if not a player GUID.
---- @deprecated Use LibP2PDB:PlayerGUIDToPeerID instead.
-function LibP2PDB:GetPeerIdFromGUID(guid)
-    return PlayerGUIDToPeerID(guid)
 end
 
 --- Convert a player GUID to a peer ID.
