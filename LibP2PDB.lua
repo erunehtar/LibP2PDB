@@ -786,7 +786,7 @@ local priv = Private.New(assert(UnitName("player"), "unable to get player name")
 --- @alias LibP2PDB.DBOnErrorCallback fun(errMsg: string, stack: string?) Callback function invoked on errors.
 --- @alias LibP2PDB.DBOnMigrateDBCallback fun(target: LibP2PDB.MigrationContext, source: LibP2PDB.MigrationContext) Callback function invoked when database migration is needed.
 --- @alias LibP2PDB.DBOnMigrateTableCallback fun(target: LibP2PDB.MigrationContext, source: LibP2PDB.MigrationContext): LibP2PDB.TableName? Callback function invoked when table migration is needed. Return the target table name to migrate into (use source.tableName to keep the same name), or nil to drop/skip the table entirely.
---- @alias LibP2PDB.DBOnMigrateRowCallback fun(target: LibP2PDB.MigrationContext, source: LibP2PDB.MigrationContext): LibP2PDB.TableKey?, LibP2PDB.RowData? Callback function invoked when row migration is needed.
+--- @alias LibP2PDB.DBOnMigrateRowCallback fun(target: LibP2PDB.MigrationContext, source: LibP2PDB.MigrationContext): LibP2PDB.TableKey?, LibP2PDB.RowData? Callback function invoked when row migration is needed. Return the target key and row data to migrate the row (use source.key and source.data to preserve as-is). Return nil as the first value to drop/skip the row entirely. Return a key with nil data to write a tombstone. Note: if key is nil, the row is always dropped regardless of the data value.
 --- @alias LibP2PDB.DBOnChangeCallback fun(tableName: LibP2PDB.TableName, key: LibP2PDB.TableKey, newData: LibP2PDB.RowData?, oldData: LibP2PDB.RowData?) Callback function invoked on any row change.
 
 --- @class LibP2PDB.MigrationContext Context information for database/table/row migrations.
@@ -2191,7 +2191,7 @@ function Private:MergeKey(dbi, dbClock, tableName, ti, key, rowData, rowVersion,
             version = {
                 clock = rowVersion.clock,
                 peerID = rowVersion.peerID,
-                tombstone = rowVersion.tombstone,
+                tombstone = rowData == nil and true or nil,
             },
         }
 
@@ -2717,12 +2717,11 @@ function Private:MigrateRow(target, source)
             ReportError(target.dbi, "row data migration failed for key '%s' in table '%s'", source.key, source.tableName)
             return
         end
-        if newKey then
-            targetKey = newKey
+        if newKey == nil then
+            return -- User explicitly chose to drop this row
         end
-        if newRowData then
-            targetRowData = newRowData
-        end
+        targetKey = newKey
+        targetRowData = newRowData -- nil means tombstone
     end
 
     -- Validate key
@@ -5991,34 +5990,30 @@ local UnitTests = {
                 prefix = "LibP2PDBImport",
                 version = 2,
                 onMigrateDB = function(target, source)
-                    LibP2PDB:NewTable(source.db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+                    if source.version == 1 then
+                        LibP2PDB:NewTable(source.db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+                    end
                 end,
                 onMigrateTable = function(target, source)
-                    if source.version == 1 then
-                        if source.tableName == "Users" then
-                            return "Accounts"
-                        end
-                    end
+                    return source.tableName
                 end,
                 onMigrateRow = function(target, source)
-                    if source.version == 1 then
-                        if source.tableName == "Users" then
-                            return "user" .. source.key, nil -- always return invalid data to skip all rows
-                        end
+                    if source.version == 2 then
+                        return source.key, source.data -- we never enter here, since source version is 1; all rows should be skipped
                     end
-                end
+                end,
             })
-            LibP2PDB:NewTable(db, { name = "Accounts", keyType = "string", schema = { username = "string", name = "string", age = "number" } })
-            Assert.ExpectErrors(function() LibP2PDB:ImportDatabase(db, state) end)
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            LibP2PDB:ImportDatabase(db, state) -- no errors expected; drops are silent
 
             local dbi = priv.databases[db]
             Assert.IsNonEmptyTable(dbi)
             Assert.AreEqual(dbi.clock, 0)
             Assert.IsNonEmptyTable(dbi.tables)
 
-            local ti = dbi.tables["Accounts"]
+            local ti = dbi.tables["Users"]
             Assert.IsNonEmptyTable(ti)
-            Assert.AreEqual(ti.rowCount, 0)
+            Assert.AreEqual(ti.rowCount, 0) -- All rows silently dropped
 
             local rows = ti.rows
             Assert.IsEmptyTable(rows)
@@ -6201,7 +6196,7 @@ local UnitTests = {
                 end,
                 onMigrateTable = function(target, source)
                     if source.tableName == "Logs" then
-                        return nil -- drop the Logs table
+                        return nil          -- drop the Logs table
                     end
                     return source.tableName -- keep other tables unchanged
                 end,
@@ -6214,7 +6209,7 @@ local UnitTests = {
 
             local dbi = priv.databases[db]
             Assert.IsNonEmptyTable(dbi)
-            Assert.AreEqual(dbi.clock, 3) -- Even if Logs table is dropped, we don't decrement the clock
+            Assert.AreEqual(dbi.clock, 3)    -- Even if Logs table is dropped, we don't decrement the clock
             Assert.IsNonEmptyTable(dbi.tables)
             Assert.IsNil(dbi.tables["Logs"]) -- Logs was dropped by returning nil
 
@@ -6226,6 +6221,109 @@ local UnitTests = {
             Assert.IsNonEmptyTable(rows)
             Assert.AreEqual(rows[1].data, { name = "Bob", age = 25 })
             Assert.AreEqual(rows[2].data, { name = "Alice", age = 30 })
+        end
+    end,
+
+    Migration_DropRow = function()
+        local state = nil
+        do
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", version = 1 })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 })
+            LibP2PDB:InsertKey(db, "Users", 2, { name = "Alice", age = 30 })
+            LibP2PDB:InsertKey(db, "Users", 3, { name = "Eve", age = 35 })
+            state = LibP2PDB:ExportDatabase(db)
+        end
+        do
+            local db = LibP2PDB:NewDatabase({
+                prefix = "LibP2PDBImport",
+                version = 2,
+                onMigrateDB = function(target, source)
+                    if source.version == 1 then
+                        LibP2PDB:NewTable(source.db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+                    end
+                end,
+                onMigrateTable = function(target, source)
+                    return source.tableName
+                end,
+                onMigrateRow = function(target, source)
+                    if source.key == 2 then
+                        return nil -- drop Alice
+                    end
+                    return source.key, source.data
+                end,
+            })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            LibP2PDB:ImportDatabase(db, state)
+
+            local dbi = priv.databases[db]
+            Assert.IsNonEmptyTable(dbi)
+            Assert.AreEqual(dbi.clock, 3)
+            Assert.IsNonEmptyTable(dbi.tables)
+
+            local ti = dbi.tables["Users"]
+            Assert.IsNonEmptyTable(ti)
+            Assert.AreEqual(ti.rowCount, 2) -- Only Bob and Eve; Alice was dropped
+
+            local rows = ti.rows
+            Assert.IsNonEmptyTable(rows)
+            Assert.AreEqual(rows[1].data, { name = "Bob", age = 25 })
+            Assert.IsNil(rows[2]) -- Alice was dropped, not a tombstone
+            Assert.AreEqual(rows[3].data, { name = "Eve", age = 35 })
+        end
+    end,
+
+    Migration_TombstoneRow = function()
+        -- Tests that returning key, nil from onMigrateRow writes a tombstone for that key,
+        -- which is distinct from dropping the row entirely (return nil key).
+        -- A tombstone row exists in the table (rowCount includes it) but has no data.
+        local state = nil
+        do
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", version = 1 })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 })
+            LibP2PDB:InsertKey(db, "Users", 2, { name = "Alice", age = 30 })
+            LibP2PDB:InsertKey(db, "Users", 3, { name = "Eve", age = 35 })
+            state = LibP2PDB:ExportDatabase(db)
+        end
+        do
+            local db = LibP2PDB:NewDatabase({
+                prefix = "LibP2PDBImport",
+                version = 2,
+                onMigrateDB = function(target, source)
+                    if source.version == 1 then
+                        LibP2PDB:NewTable(source.db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+                    end
+                end,
+                onMigrateTable = function(target, source)
+                    return source.tableName
+                end,
+                onMigrateRow = function(target, source)
+                    if source.key == 2 then
+                        return source.key, nil -- tombstone Alice (key present, no data)
+                    end
+                    return source.key, source.data
+                end,
+            })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+            LibP2PDB:ImportDatabase(db, state)
+
+            local dbi = priv.databases[db]
+            Assert.IsNonEmptyTable(dbi)
+            Assert.AreEqual(dbi.clock, 3)
+            Assert.IsNonEmptyTable(dbi.tables)
+
+            local ti = dbi.tables["Users"]
+            Assert.IsNonEmptyTable(ti)
+            Assert.AreEqual(ti.rowCount, 3) -- All 3 rows exist, including Alice's tombstone
+
+            local rows = ti.rows
+            Assert.IsNonEmptyTable(rows)
+            Assert.AreEqual(rows[1].data, { name = "Bob", age = 25 })
+            Assert.IsNonEmptyTable(rows[2])          -- Alice's row exists (unlike a drop)...
+            Assert.IsNil(rows[2].data)               -- ...but has no data (tombstone)
+            Assert.IsTrue(rows[2].version.tombstone) -- ...and is flagged as a tombstone
+            Assert.AreEqual(rows[3].data, { name = "Eve", age = 35 })
         end
     end,
 
