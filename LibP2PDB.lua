@@ -93,7 +93,7 @@ local LOG2 = log(2)           --- @type number Precomputed log(2) for efficiency
 local UINT32_MODULO = 2 ^ 32  --- @type integer Modulo for keeping integers within 32-bit unsigned range.
 local MIN_BUCKET_COUNT = 32   --- @type integer Minimum number of buckets for summary filters.
 local KEYS_PER_BUCKET = 32    --- @type integer Default bucket size for summary filters.
-local ROWS_PER_CHUNK = 256    --- @type integer Number of rows per chunk for chunked transmission.
+local ROWS_PER_CHUNK = 128    --- @type integer Number of rows per chunk for chunked transmission.
 
 --- @enum LibP2PDB.Color Color codes for console output.
 local Color = {
@@ -2599,9 +2599,9 @@ function Private:ImportRowData(dbi, schemaSorted, rowDataState)
     local importedRowData = {}
     if schemaSorted then
         -- Schema defined: reconstruct data from ordered array
-        --- @cast rowDataState [LibP2PDB.RowDataValue]
+        --- @cast rowDataState LibP2PDB.RowDataValue[]
         if #rowDataState ~= #schemaSorted then
-            ReportError(dbi, "row data state length does not match schema length")
+            ReportError(dbi, "row data state length does not match schema length, expected %d but got %d", #schemaSorted, #rowDataState)
             return nil
         end
         for i, fieldData in ipairs(schemaSorted) do
