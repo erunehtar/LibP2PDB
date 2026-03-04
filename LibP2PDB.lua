@@ -673,6 +673,8 @@ local function PlayerGUIDToPeerID(guid)
     -- Extract the serverID and playerUID
     local serverID, playerUID = strmatch(guid, "^Player%-(%x+)%-(%x+)$")
     assert(serverID and playerUID, "guid must be in the format 'Player-[serverID]-[playerUID]'")
+    assert(#serverID <= 4, "serverID must be at most 4 hexadecimal digits")
+    assert(#playerUID <= 8, "playerUID must be at most 8 hexadecimal digits")
 
     -- Convert from hexadecimal to integer
     local serverIDNum, playerUIDNum = tonumber(serverID, 16), tonumber(playerUID, 16)
@@ -1847,7 +1849,7 @@ end
 --- List all known peers for this database.
 --- This list is not persisted and is reset on logout/reload.
 --- @param db LibP2PDB.DBHandle Database handle.
---- @return table<LibP2PDB.PeerID, table> peers Table of peerID -> peer data
+--- @return table<LibP2PDB.PeerID, LibP2PDB.PeerInfo> peers Table of peerID -> peer data
 function LibP2PDB:ListPeers(db)
     assert(IsEmptyTable(db), "db must be an empty table")
 
@@ -6508,6 +6510,55 @@ local UnitTests = {
         end
     end,
 
+    GetLocalPeerID = function()
+        Assert.AreEqual(LibP2PDB:GetLocalPeerID(), priv.peerID)
+    end,
+
+    PlayerGUIDToPeerID = function()
+        Assert.AreEqual(LibP2PDB:PlayerGUIDToPeerID(priv.playerGUID), priv.peerID)
+        Assert.AreEqual(LibP2PDB:PlayerGUIDToPeerID("Player-0001-00000001"), 0x000100000001)
+        Assert.AreEqual(LibP2PDB:PlayerGUIDToPeerID("Player-FFFF-FFFFFFFF"), 0xFFFFFFFFFFFF)
+        Assert.AreEqual(LibP2PDB:PlayerGUIDToPeerID("Player-ABCD-12345678"), 0xABCD12345678)
+    end,
+
+    PlayerGUIDToPeerID_InvalidPlayerGUID_Throws = function()
+        Assert.Throws(function() LibP2PDB:PlayerGUIDToPeerID(nil) end)
+        Assert.Throws(function() LibP2PDB:PlayerGUIDToPeerID(true) end)
+        Assert.Throws(function() LibP2PDB:PlayerGUIDToPeerID(false) end)
+        Assert.Throws(function() LibP2PDB:PlayerGUIDToPeerID(123) end)
+        Assert.Throws(function() LibP2PDB:PlayerGUIDToPeerID("") end)
+        Assert.Throws(function() LibP2PDB:PlayerGUIDToPeerID("invalid") end)
+        Assert.Throws(function() LibP2PDB:PlayerGUIDToPeerID({}) end)
+
+        -- Test for invalid serverID
+        Assert.Throws(function() LibP2PDB:PlayerGUIDToPeerID("Player-0000-12345678") end)
+        Assert.Throws(function() LibP2PDB:PlayerGUIDToPeerID("Player-10000-12345678") end)
+        Assert.Throws(function() LibP2PDB:PlayerGUIDToPeerID("Player-GHIJ-12345678") end)
+
+        -- Test for invalid playerUID
+        Assert.Throws(function() LibP2PDB:PlayerGUIDToPeerID("Player-1234-00000000") end)
+        Assert.Throws(function() LibP2PDB:PlayerGUIDToPeerID("Player-1234-100000000") end)
+        Assert.Throws(function() LibP2PDB:PlayerGUIDToPeerID("Player-1234-GHIJKLMN") end)
+    end,
+
+    PeerIDToPlayerGUID = function()
+        Assert.AreEqual(LibP2PDB:PeerIDToPlayerGUID(priv.peerID), priv.playerGUID)
+        Assert.AreEqual(LibP2PDB:PeerIDToPlayerGUID(0x000100000001), "Player-0001-00000001")
+        Assert.AreEqual(LibP2PDB:PeerIDToPlayerGUID(0xFFFFFFFFFFFF), "Player-FFFF-FFFFFFFF")
+        Assert.AreEqual(LibP2PDB:PeerIDToPlayerGUID(0xABCD12345678), "Player-ABCD-12345678")
+    end,
+
+    PeerIDToPlayerGUID_InvalidPeerID_Throws = function()
+        Assert.Throws(function() LibP2PDB:PeerIDToPlayerGUID(nil) end)
+        Assert.Throws(function() LibP2PDB:PeerIDToPlayerGUID(true) end)
+        Assert.Throws(function() LibP2PDB:PeerIDToPlayerGUID(false) end)
+        Assert.Throws(function() LibP2PDB:PeerIDToPlayerGUID("") end)
+        Assert.Throws(function() LibP2PDB:PeerIDToPlayerGUID("invalid") end)
+        Assert.Throws(function() LibP2PDB:PeerIDToPlayerGUID({}) end)
+        Assert.Throws(function() LibP2PDB:PeerIDToPlayerGUID(-1) end)
+        Assert.Throws(function() LibP2PDB:PeerIDToPlayerGUID(0x1000000000000) end) -- above 48 bits
+    end,
+
     ListTables = function()
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
         LibP2PDB:NewTable(db, { name = "Users", keyType = "number" })
@@ -6525,6 +6576,32 @@ local UnitTests = {
         Assert.Throws(function() LibP2PDB:ListTables(123) end)
         Assert.Throws(function() LibP2PDB:ListTables("") end)
         Assert.Throws(function() LibP2PDB:ListTables({}) end)
+    end,
+
+    GetTableSchema = function()
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        local schema = { name = "string", age = "number", email = { "string", "nil" } }
+        LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = schema })
+        local retrievedSchema = LibP2PDB:GetTableSchema(db, "Users")
+        Assert.AreEqual(retrievedSchema, schema)
+    end,
+
+    GetTableSchema_DBIsInvalid_Throws = function()
+        Assert.Throws(function() LibP2PDB:GetTableSchema(nil, "Users") end)
+        Assert.Throws(function() LibP2PDB:GetTableSchema(true, "Users") end)
+        Assert.Throws(function() LibP2PDB:GetTableSchema(false, "Users") end)
+        Assert.Throws(function() LibP2PDB:GetTableSchema(123, "Users") end)
+        Assert.Throws(function() LibP2PDB:GetTableSchema("", "Users") end)
+        Assert.Throws(function() LibP2PDB:GetTableSchema({}, "Users") end)
+    end,
+
+    GetTableSchema_TableNameIsInvalid_Throws = function()
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        Assert.Throws(function() LibP2PDB:GetTableSchema(db, nil) end)
+        Assert.Throws(function() LibP2PDB:GetTableSchema(db, true) end)
+        Assert.Throws(function() LibP2PDB:GetTableSchema(db, false) end)
+        Assert.Throws(function() LibP2PDB:GetTableSchema(db, 123) end)
+        Assert.Throws(function() LibP2PDB:GetTableSchema(db, {}) end)
     end,
 
     ListKeys = function()
@@ -7523,6 +7600,42 @@ local NetworkTests = {
             Assert.Throws(function() LibP2PDB:BroadcastKey(db, "Users", false) end)
             Assert.Throws(function() LibP2PDB:BroadcastKey(db, "Users", {}) end)
         end)
+    end,
+
+    ListPeers = function()
+        local instances = {}
+        local databases = {}
+        for i = 1, numPeers do
+            instances[i] = NewPrivateInstance(i)
+            databases[i] = PrivateScope(instances[i], function()
+                return LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+            end)
+        end
+
+        -- Make all peers broadcast their presence
+        VerbosityScope(3, function()
+            for i = 1, numPeers do
+                PrivateScope(instances[i], function() LibP2PDB:BroadcastPresence(databases[i]) end)
+            end
+            TickPrivateInstances(instances)
+        end)
+
+        -- Check that each peer's ListPeers returns the full list of peers with correct info
+        for i = 1, numPeers do
+            PrivateScope(instances[i], function()
+                local peerList = LibP2PDB:ListPeers(databases[i])
+                Assert.IsTable(peerList)
+                local peerCount = 0
+                for peerID, peerInfo in pairs(peerList) do
+                    Assert.IsNumber(peerID)
+                    Assert.IsTable(peerInfo)
+                    Assert.IsNonEmptyString(peerInfo.name)
+                    Assert.IsNumber(peerInfo.lastSeen)
+                    peerCount = peerCount + 1
+                end 
+                Assert.AreEqual(peerCount, numPeers, "Peer list should contain all peers")
+            end)
+        end
     end,
 
     Propagation = function()
