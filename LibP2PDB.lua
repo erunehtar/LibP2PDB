@@ -4383,6 +4383,7 @@ local UnitTests = {
         local dbCount, tableCount, subCount, callbackCount = 0, 0, 0, 0
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = function() dbCount = dbCount + 1 end })
         LibP2PDB:NewTable(db, { name = "Users", keyType = "number", onChange = function() tableCount = tableCount + 1 end })
+        ---@diagnostic disable-next-line: deprecated
         LibP2PDB:Subscribe(db, "Users", function() subCount = subCount + 1 end)
         LibP2PDB:RegisterTableChange(db, "Users", owner, function() callbackCount = callbackCount + 1 end)
         Assert.AreEqual(dbCount, 0)
@@ -4578,6 +4579,7 @@ local UnitTests = {
         local dbCount, tableCount, subCount, callbackCount = 0, 0, 0, 0
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = function() dbCount = dbCount + 1 end })
         LibP2PDB:NewTable(db, { name = "Users", keyType = "number", onChange = function() tableCount = tableCount + 1 end })
+        ---@diagnostic disable-next-line: deprecated
         LibP2PDB:Subscribe(db, "Users", function() subCount = subCount + 1 end)
         LibP2PDB:RegisterTableChange(db, "Users", owner, function() callbackCount = callbackCount + 1 end)
         Assert.AreEqual(dbCount, 0)
@@ -4776,6 +4778,7 @@ local UnitTests = {
         local dbCount, tableCount, subCount, callbackCount = 0, 0, 0, 0
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = function() dbCount = dbCount + 1 end })
         LibP2PDB:NewTable(db, { name = "Users", keyType = "number", onChange = function() tableCount = tableCount + 1 end })
+        ---@diagnostic disable-next-line: deprecated
         LibP2PDB:Subscribe(db, "Users", function() subCount = subCount + 1 end)
         LibP2PDB:RegisterTableChange(db, "Users", owner, function() callbackCount = callbackCount + 1 end)
         Assert.AreEqual(dbCount, 0)
@@ -4971,6 +4974,7 @@ local UnitTests = {
         local dbCount, tableCount, subCount, callbackCount = 0, 0, 0, 0
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = function() dbCount = dbCount + 1 end })
         LibP2PDB:NewTable(db, { name = "Users", keyType = "number", onChange = function() tableCount = tableCount + 1 end })
+        ---@diagnostic disable-next-line: deprecated
         LibP2PDB:Subscribe(db, "Users", function() subCount = subCount + 1 end)
         LibP2PDB:RegisterTableChange(db, "Users", owner, function() callbackCount = callbackCount + 1 end)
         Assert.AreEqual(dbCount, 0)
@@ -5145,6 +5149,7 @@ local UnitTests = {
         local dbCount, tableCount, subCount, callbackCount = 0, 0, 0, 0
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = function() dbCount = dbCount + 1 end })
         LibP2PDB:NewTable(db, { name = "Users", keyType = "number", onChange = function() tableCount = tableCount + 1 end })
+        ---@diagnostic disable-next-line: deprecated
         LibP2PDB:Subscribe(db, "Users", function() subCount = subCount + 1 end)
         LibP2PDB:RegisterTableChange(db, "Users", owner, function() callbackCount = callbackCount + 1 end)
         Assert.AreEqual(dbCount, 0)
@@ -5320,6 +5325,7 @@ local UnitTests = {
         local dbCount, tableCount, subCount, callbackCount = 0, 0, 0, 0
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = function() dbCount = dbCount + 1 end })
         LibP2PDB:NewTable(db, { name = "Users", keyType = "number", onChange = function() tableCount = tableCount + 1 end })
+        ---@diagnostic disable-next-line: deprecated
         LibP2PDB:Subscribe(db, "Users", function() subCount = subCount + 1 end)
         LibP2PDB:RegisterTableChange(db, "Users", owner, function() callbackCount = callbackCount + 1 end)
         Assert.AreEqual(dbCount, 0)
@@ -5416,6 +5422,7 @@ local UnitTests = {
         Assert.IsTrue(version.tombstone)
     end,
 
+    ---@diagnostic disable: deprecated
     Subscribe = function()
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
         LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
@@ -5488,6 +5495,7 @@ local UnitTests = {
         Assert.Throws(function() LibP2PDB:Unsubscribe(db, "Users", 123) end)
         Assert.Throws(function() LibP2PDB:Unsubscribe(db, "Users", "invalid") end)
     end,
+    ---@diagnostic enable: deprecated
 
     RegisterTableChange = function()
         local owner = {}
