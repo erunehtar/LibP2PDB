@@ -7691,7 +7691,8 @@ local NetworkTests = {
         for i = 1, numPeers do
             PrivateScope(instances[i], function()
                 for j = 1, numPeers do
-                    local peerInfo = LibP2PDB:GetPeerInfo(databases[i], instances[j].peerID) --[[@as LibP2PDB.PeerInfo]]
+                    local peerInfo = LibP2PDB:GetPeerInfo(databases[i], instances[j].peerID)
+                    --- @cast peerInfo LibP2PDB.PeerInfo
                     Assert.IsTable(peerInfo)
                     Assert.IsNonEmptyString(peerInfo.name)
                     Assert.IsNumber(peerInfo.lastSeen)
