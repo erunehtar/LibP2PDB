@@ -1864,6 +1864,27 @@ function LibP2PDB:ListPeers(db)
     return peers
 end
 
+--- Get information about a specific peer.
+--- Validates that the db is valid and that the peerID is a valid 48-bit integer.
+--- @param db LibP2PDB.DBHandle Database handle.
+--- @param peerID LibP2PDB.PeerID The peer ID to get information about (must be a 48-bit integer).
+--- @return LibP2PDB.PeerInfo? peerInfo Table containing peer information, or nil if the peer is not known.
+function LibP2PDB:GetPeerInfo(db, peerID)
+    assert(IsEmptyTable(db), "db must be an empty table")
+    assert(IsInteger(peerID, 0, 0xFFFFFFFFFFFF), "peerID must be a 48-bit integer")
+
+    -- Validate db instance
+    local dbi = priv.databases[db]
+    assert(dbi, "db is not a recognized database handle")
+
+    -- Return a copy of the peer info if found
+    local peerInfo = dbi.peers[peerID]
+    if peerInfo then
+        return DeepCopy(peerInfo)
+    end
+    return nil
+end
+
 --- Serialize data using the database's serializer.
 --- @param db LibP2PDB.DBHandle Database handle.
 --- @param data any Data to serialize.
@@ -7636,6 +7657,63 @@ local NetworkTests = {
                 Assert.AreEqual(peerCount, numPeers, "Peer list should contain all peers")
             end)
         end
+    end,
+
+    GetPeerInfo = function()
+        local instances = {}
+        local databases = {}
+        for i = 1, numPeers do
+            instances[i] = NewPrivateInstance(i)
+            databases[i] = PrivateScope(instances[i], function()
+                return LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+            end)
+        end
+
+        -- Make all peers broadcast their presence
+        VerbosityScope(3, function()
+            for i = 1, numPeers do
+                PrivateScope(instances[i], function() LibP2PDB:BroadcastPresence(databases[i]) end)
+            end
+            TickPrivateInstances(instances)
+        end)
+
+        -- Check that each peer can get correct info for all other peers
+        for i = 1, numPeers do
+            PrivateScope(instances[i], function()
+                for j = 1, numPeers do
+                    local peerInfo = LibP2PDB:GetPeerInfo(databases[i], instances[j].peerID) --[[@as LibP2PDB.PeerInfo]]
+                    Assert.IsTable(peerInfo)
+                    Assert.IsNonEmptyString(peerInfo.name)
+                    Assert.IsNumber(peerInfo.lastSeen)
+                end
+            end)
+        end
+    end,
+
+    GetPeerInfo_DBIsInvalid_Throws = function()
+        local instance = NewPrivateInstance(1)
+        PrivateScope(instance, function()
+            Assert.Throws(function() LibP2PDB:GetPeerInfo(nil, 2) end)
+            Assert.Throws(function() LibP2PDB:GetPeerInfo(true, 2) end)
+            Assert.Throws(function() LibP2PDB:GetPeerInfo(false, 2) end)
+            Assert.Throws(function() LibP2PDB:GetPeerInfo("", 2) end)
+            Assert.Throws(function() LibP2PDB:GetPeerInfo("invalid", 2) end)
+            Assert.Throws(function() LibP2PDB:GetPeerInfo(123, 2) end)
+            Assert.Throws(function() LibP2PDB:GetPeerInfo({}, 2) end)
+        end)
+    end,
+
+    GetPeerInfo_PeerIDIsInvalid_Throws = function()
+        local instance = NewPrivateInstance(1)
+        PrivateScope(instance, function()
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+            Assert.Throws(function() LibP2PDB:GetPeerInfo(db, nil) end)
+            Assert.Throws(function() LibP2PDB:GetPeerInfo(db, true) end)
+            Assert.Throws(function() LibP2PDB:GetPeerInfo(db, false) end)
+            Assert.Throws(function() LibP2PDB:GetPeerInfo(db, "") end)
+            Assert.Throws(function() LibP2PDB:GetPeerInfo(db, "invalid") end)
+            Assert.Throws(function() LibP2PDB:GetPeerInfo(db, {}) end)
+        end)
     end,
 
     Propagation = function()
