@@ -2329,19 +2329,29 @@ end
 --- @param newRowData LibP2PDB.RowData? New row data (or nil for tombstone).
 --- @param oldRowData LibP2PDB.RowData? Previous row data before the change (or nil if no previous data).
 function Private:InvokeChangeCallbacks(dbi, tableName, ti, key, newRowData, oldRowData)
+    local newRowDataCopy
+    if dbi.onChange or ti.onChange or IsNonEmptyTable(ti.subscribers) or IsNonEmptyTable(ti.callbacks) then
+        newRowDataCopy = ShallowCopy(newRowData)
+    end
+
     -- Invoke database global change callback
     if dbi.onChange then
-        SafeCall(dbi, dbi.onChange, tableName, key, ShallowCopy(newRowData), oldRowData)
+        SafeCall(dbi, dbi.onChange, tableName, key, newRowDataCopy, oldRowData)
     end
 
     -- Invoke database table change callback
     if ti.onChange then
-        SafeCall(dbi, ti.onChange, key, ShallowCopy(newRowData), oldRowData)
+        SafeCall(dbi, ti.onChange, key, newRowDataCopy, oldRowData)
     end
 
     -- Invoke database table subscribers
     for callback in pairs(ti.subscribers) do
-        SafeCall(dbi, callback, key, ShallowCopy(newRowData), oldRowData)
+        SafeCall(dbi, callback, key, newRowDataCopy, oldRowData)
+    end
+
+    -- Invoke database table registered callbacks
+    for _, callback in pairs(ti.callbacks) do
+        SafeCall(dbi, callback, key, newRowDataCopy, oldRowData)
     end
 end
 
