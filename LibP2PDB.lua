@@ -1140,6 +1140,7 @@ function LibP2PDB:NewTable(db, desc)
         onValidate = desc.onValidate,
         onChange = desc.onChange,
         subscribers = setmetatable({}, { __mode = "k" }),
+        callbacks = setmetatable({}, { __mode = "k" }),
         seed = 0,
         rowCount = 0,
         rows = {},
@@ -1356,6 +1357,7 @@ end
 --- @param db LibP2PDB.DBHandle Database handle.
 --- @param tableName LibP2PDB.TableName Name of the table to subscribe to
 --- @param callback LibP2PDB.TableOnChangeCallback Function(key, data) to invoke on changes
+--- @deprecated This function is now deprecated and will be removed in a future version. It has been replaced by RegisterTableChange.
 function LibP2PDB:Subscribe(db, tableName, callback)
     assert(IsEmptyTable(db), "db must be an empty table")
     assert(IsNonEmptyString(tableName), "table name must be a non-empty string")
@@ -1377,6 +1379,7 @@ end
 --- @param db LibP2PDB.DBHandle Database handle.
 --- @param tableName LibP2PDB.TableName Name of the table to unsubscribe from
 --- @param callback LibP2PDB.TableOnChangeCallback Function(key, data) to remove from subscriptions
+--- @deprecated This function is now deprecated and will be removed in a future version. It has been replaced by UnregisterTableChange.
 function LibP2PDB:Unsubscribe(db, tableName, callback)
     assert(IsEmptyTable(db), "db must be an empty table")
     assert(IsNonEmptyString(tableName), "table name must be a non-empty string")
@@ -1387,11 +1390,56 @@ function LibP2PDB:Unsubscribe(db, tableName, callback)
     assert(dbi, "db is not a recognized database handle")
 
     -- Validate table
-    local t = dbi.tables[tableName]
-    assert(t, "table '" .. tableName .. "' is not defined in the database")
+    local ti = dbi.tables[tableName]
+    assert(ti, "table '" .. tableName .. "' is not defined in the database")
 
     -- Remove subscriber (safe even if not present)
-    t.subscribers[callback] = nil
+    ti.subscribers[callback] = nil
+end
+
+--- Register a callback for changes in a specific table for a specific owner.
+--- The callback is invoked with the key, new and old data (nil for deletions) whenever a row changes.
+--- @param db LibP2PDB.DBHandle Database handle.
+--- @param tableName LibP2PDB.TableName Name of the table to register for changes.
+--- @param owner table Owner of the callback. Used as the key for registration and unregistration.
+--- @param callback LibP2PDB.TableOnChangeCallback Function(key, newData, oldData) to invoke on changes.
+function LibP2PDB:RegisterTableChange(db, tableName, owner, callback)
+    assert(IsEmptyTable(db), "db must be an empty table")
+    assert(IsNonEmptyString(tableName), "table name must be a non-empty string")
+    assert(IsTable(owner), "owner must be a table")
+    assert(IsFunction(callback), "callback must be a function")
+
+    -- Validate db instance
+    local dbi = priv.databases[db]
+    assert(dbi, "db is not a recognized database handle")
+
+    -- Validate table
+    local ti = dbi.tables[tableName]
+    assert(ti, "table '" .. tableName .. "' is not defined in the database")
+
+    -- Register callback
+    ti.callbacks[owner] = callback
+end
+
+--- Unregister a callback for changes in a specific table for a specific owner.
+--- @param db LibP2PDB.DBHandle Database handle.
+--- @param tableName LibP2PDB.TableName Name of the table to unregister for changes.
+--- @param owner table Owner of the callback to remove. Must match the owner used for registration.
+function LibP2PDB:UnregisterTableChange(db, tableName, owner)
+    assert(IsEmptyTable(db), "db must be an empty table")
+    assert(IsNonEmptyString(tableName), "table name must be a non-empty string")
+    assert(IsTable(owner), "owner must be a table")
+
+    -- Validate db instance
+    local dbi = priv.databases[db]
+    assert(dbi, "db is not a recognized database handle")
+
+    -- Validate table
+    local ti = dbi.tables[tableName]
+    assert(ti, "table '" .. tableName .. "' is not defined in the database")
+
+    -- Unregister callback
+    ti.callbacks[owner] = nil
 end
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -1993,6 +2041,7 @@ end
 --- @field onValidate LibP2PDB.TableOnValidateCallback? Optional validation callback for rows.
 --- @field onChange LibP2PDB.TableOnChangeCallback? Optional change callback for rows.
 --- @field subscribers table<LibP2PDB.TableOnChangeCallback, boolean> Weak table of subscriber callbacks.
+--- @field callbacks table<table, LibP2PDB.TableOnChangeCallback> Weak table of registered change callbacks for the table.
 --- @field seed integer Seed value for the table's filter and bucket hash set.
 --- @field rowCount integer Total number of rows in the table (including tombstones).
 --- @field rows table<LibP2PDB.TableKey, LibP2PDB.TableRow> Registry of rows in the table.
@@ -4018,6 +4067,7 @@ local UnitTests = {
             Assert.IsNil(ti.onValidate)
             Assert.IsNil(ti.onChange)
             Assert.IsTable(ti.subscribers)
+            Assert.IsTable(ti.callbacks)
             Assert.AreEqual(ti.rowCount, 0)
             Assert.IsEmptyTable(ti.rows)
             Assert.IsTable(ti.summary)
@@ -4044,6 +4094,7 @@ local UnitTests = {
             Assert.IsFunction(ti.onValidate)
             Assert.IsFunction(ti.onChange)
             Assert.IsTable(ti.subscribers)
+            Assert.IsTable(ti.callbacks)
             Assert.AreEqual(ti.rowCount, 0)
             Assert.IsEmptyTable(ti.rows)
             Assert.IsTable(ti.summary)
@@ -4328,32 +4379,38 @@ local UnitTests = {
     end,
 
     InsertKey_InvokeChangeCallbacks = function()
-        local dbCount, tableCount, subCount = 0, 0, 0
+        local owner = {}
+        local dbCount, tableCount, subCount, callbackCount = 0, 0, 0, 0
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = function() dbCount = dbCount + 1 end })
         LibP2PDB:NewTable(db, { name = "Users", keyType = "number", onChange = function() tableCount = tableCount + 1 end })
         LibP2PDB:Subscribe(db, "Users", function() subCount = subCount + 1 end)
+        LibP2PDB:RegisterTableChange(db, "Users", owner, function() callbackCount = callbackCount + 1 end)
         Assert.AreEqual(dbCount, 0)
         Assert.AreEqual(tableCount, 0)
         Assert.AreEqual(subCount, 0)
+        Assert.AreEqual(callbackCount, 0)
 
         -- check inserting a new key invokes all callbacks
         Assert.IsTrue(LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }))
         Assert.AreEqual(dbCount, 1)
         Assert.AreEqual(tableCount, 1)
         Assert.AreEqual(subCount, 1)
+        Assert.AreEqual(callbackCount, 1)
 
         -- check inserting the same key again does not invoke any callbacks
         Assert.Throws(function() LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }) end)
         Assert.AreEqual(dbCount, 1)
         Assert.AreEqual(tableCount, 1)
         Assert.AreEqual(subCount, 1)
+        Assert.AreEqual(callbackCount, 1)
 
         -- check inserting over a deleted key invokes all callbacks
         Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users", 1))
         Assert.IsTrue(LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }))
-        Assert.AreEqual(dbCount, 3)    -- 1 for delete, 1 for insert
-        Assert.AreEqual(tableCount, 3) -- 1 for delete, 1 for insert
-        Assert.AreEqual(subCount, 3)   -- 1 for delete, 1 for insert
+        Assert.AreEqual(dbCount, 3)       -- 1 for delete, 1 for insert
+        Assert.AreEqual(tableCount, 3)    -- 1 for delete, 1 for insert
+        Assert.AreEqual(subCount, 3)      -- 1 for delete, 1 for insert
+        Assert.AreEqual(callbackCount, 3) -- 1 for delete, 1 for insert
     end,
 
     SetKey = function()
@@ -4517,32 +4574,38 @@ local UnitTests = {
     end,
 
     SetKey_InvokeChangeCallbacks = function()
-        local dbCount, tableCount, subCount = 0, 0, 0
+        local owner = {}
+        local dbCount, tableCount, subCount, callbackCount = 0, 0, 0, 0
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = function() dbCount = dbCount + 1 end })
         LibP2PDB:NewTable(db, { name = "Users", keyType = "number", onChange = function() tableCount = tableCount + 1 end })
         LibP2PDB:Subscribe(db, "Users", function() subCount = subCount + 1 end)
+        LibP2PDB:RegisterTableChange(db, "Users", owner, function() callbackCount = callbackCount + 1 end)
         Assert.AreEqual(dbCount, 0)
         Assert.AreEqual(tableCount, 0)
         Assert.AreEqual(subCount, 0)
+        Assert.AreEqual(callbackCount, 0)
 
         -- check inserting a new key invokes all callbacks
         Assert.IsTrue(LibP2PDB:SetKey(db, "Users", 1, { name = "Bob", age = 25 }))
         Assert.AreEqual(dbCount, 1)
         Assert.AreEqual(tableCount, 1)
         Assert.AreEqual(subCount, 1)
+        Assert.AreEqual(callbackCount, 1)
 
         -- check inserting the same key again with same data does not invoke any callbacks
         Assert.IsTrue(LibP2PDB:SetKey(db, "Users", 1, { name = "Bob", age = 25 }))
         Assert.AreEqual(dbCount, 1)
         Assert.AreEqual(tableCount, 1)
         Assert.AreEqual(subCount, 1)
+        Assert.AreEqual(callbackCount, 1)
 
         -- check inserting over a deleted key invokes all callbacks
         Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users", 1))
         Assert.IsTrue(LibP2PDB:SetKey(db, "Users", 1, { name = "Bob", age = 25 }))
-        Assert.AreEqual(dbCount, 3)    -- 1 for delete, 1 for insert
-        Assert.AreEqual(tableCount, 3) -- 1 for delete, 1 for insert
-        Assert.AreEqual(subCount, 3)   -- 1 for delete, 1 for insert
+        Assert.AreEqual(dbCount, 3)       -- 1 for delete, 1 for insert
+        Assert.AreEqual(tableCount, 3)    -- 1 for delete, 1 for insert
+        Assert.AreEqual(subCount, 3)      -- 1 for delete, 1 for insert
+        Assert.AreEqual(callbackCount, 3) -- 1 for delete, 1 for insert
     end,
 
     UpdateKey = function()
@@ -4709,32 +4772,38 @@ local UnitTests = {
     end,
 
     UpdateKey_InvokeChangeCallbacks = function()
-        local dbCount, tableCount, subCount = 0, 0, 0
+        local owner = {}
+        local dbCount, tableCount, subCount, callbackCount = 0, 0, 0, 0
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = function() dbCount = dbCount + 1 end })
         LibP2PDB:NewTable(db, { name = "Users", keyType = "number", onChange = function() tableCount = tableCount + 1 end })
         LibP2PDB:Subscribe(db, "Users", function() subCount = subCount + 1 end)
+        LibP2PDB:RegisterTableChange(db, "Users", owner, function() callbackCount = callbackCount + 1 end)
         Assert.AreEqual(dbCount, 0)
         Assert.AreEqual(tableCount, 0)
         Assert.AreEqual(subCount, 0)
+        Assert.AreEqual(callbackCount, 0)
 
         -- check inserting a new key invokes all callbacks
         Assert.IsTrue(LibP2PDB:UpdateKey(db, "Users", 1, function() return { name = "Bob", age = 25 } end))
         Assert.AreEqual(dbCount, 1)
         Assert.AreEqual(tableCount, 1)
         Assert.AreEqual(subCount, 1)
+        Assert.AreEqual(callbackCount, 1)
 
         -- check inserting the same key again with same data does not invoke any callbacks
         Assert.IsTrue(LibP2PDB:UpdateKey(db, "Users", 1, function() return { name = "Bob", age = 25 } end))
         Assert.AreEqual(dbCount, 1)
         Assert.AreEqual(tableCount, 1)
         Assert.AreEqual(subCount, 1)
+        Assert.AreEqual(callbackCount, 1)
 
         -- check inserting over a deleted key invokes all callbacks
         Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users", 1))
         Assert.IsTrue(LibP2PDB:UpdateKey(db, "Users", 1, function() return { name = "Bob", age = 25 } end))
-        Assert.AreEqual(dbCount, 3)    -- 1 for delete, 1 for insert
-        Assert.AreEqual(tableCount, 3) -- 1 for delete, 1 for insert
-        Assert.AreEqual(subCount, 3)   -- 1 for delete, 1 for insert
+        Assert.AreEqual(dbCount, 3)       -- 1 for delete, 1 for insert
+        Assert.AreEqual(tableCount, 3)    -- 1 for delete, 1 for insert
+        Assert.AreEqual(subCount, 3)      -- 1 for delete, 1 for insert
+        Assert.AreEqual(callbackCount, 3) -- 1 for delete, 1 for insert
     end,
 
     UpdateKey_UpdateFunctionData_IsNotModified = function()
@@ -4898,32 +4967,38 @@ local UnitTests = {
     end,
 
     DeleteKey_InvokeChangeCallbacks = function()
-        local dbCount, tableCount, subCount = 0, 0, 0
+        local owner = {}
+        local dbCount, tableCount, subCount, callbackCount = 0, 0, 0, 0
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = function() dbCount = dbCount + 1 end })
         LibP2PDB:NewTable(db, { name = "Users", keyType = "number", onChange = function() tableCount = tableCount + 1 end })
         LibP2PDB:Subscribe(db, "Users", function() subCount = subCount + 1 end)
+        LibP2PDB:RegisterTableChange(db, "Users", owner, function() callbackCount = callbackCount + 1 end)
         Assert.AreEqual(dbCount, 0)
         Assert.AreEqual(tableCount, 0)
         Assert.AreEqual(subCount, 0)
+        Assert.AreEqual(callbackCount, 0)
 
         -- check deleting a key invokes all callbacks
         Assert.IsTrue(LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }))
         Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users", 1))
-        Assert.AreEqual(dbCount, 2)    -- 1 for insert, 1 for delete
-        Assert.AreEqual(tableCount, 2) -- 1 for insert, 1 for delete
-        Assert.AreEqual(subCount, 2)   -- 1 for insert, 1 for delete
+        Assert.AreEqual(dbCount, 2)       -- 1 for insert, 1 for delete
+        Assert.AreEqual(tableCount, 2)    -- 1 for insert, 1 for delete
+        Assert.AreEqual(subCount, 2)      -- 1 for insert, 1 for delete
+        Assert.AreEqual(callbackCount, 2) -- 1 for insert, 1 for delete
 
         -- check deleting the same key again does not invoke any callbacks
         Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users", 1))
         Assert.AreEqual(dbCount, 2)
         Assert.AreEqual(tableCount, 2)
         Assert.AreEqual(subCount, 2)
+        Assert.AreEqual(callbackCount, 2)
 
         -- check deleting a non-existent key invokes all callbacks
         Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users", 2))
         Assert.AreEqual(dbCount, 3)
         Assert.AreEqual(tableCount, 3)
         Assert.AreEqual(subCount, 3)
+        Assert.AreEqual(callbackCount, 3)
     end,
 
     HasKey = function()
@@ -5066,33 +5141,39 @@ local UnitTests = {
     end,
 
     HasKey_DoesNotInvokeChangeCallbacks = function()
-        local dbCount, tableCount, subCount = 0, 0, 0
+        local owner = {}
+        local dbCount, tableCount, subCount, callbackCount = 0, 0, 0, 0
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = function() dbCount = dbCount + 1 end })
         LibP2PDB:NewTable(db, { name = "Users", keyType = "number", onChange = function() tableCount = tableCount + 1 end })
         LibP2PDB:Subscribe(db, "Users", function() subCount = subCount + 1 end)
+        LibP2PDB:RegisterTableChange(db, "Users", owner, function() callbackCount = callbackCount + 1 end)
         Assert.AreEqual(dbCount, 0)
         Assert.AreEqual(tableCount, 0)
         Assert.AreEqual(subCount, 0)
+        Assert.AreEqual(callbackCount, 0)
 
         Assert.IsTrue(LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }))
         Assert.IsTrue(LibP2PDB:HasKey(db, "Users", 1))
         Assert.AreEqual(dbCount, 1)
         Assert.AreEqual(tableCount, 1)
         Assert.AreEqual(subCount, 1)
+        Assert.AreEqual(callbackCount, 1)
 
         Assert.Throws(function() LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }) end)
         Assert.IsTrue(LibP2PDB:HasKey(db, "Users", 1))
         Assert.AreEqual(dbCount, 1)
         Assert.AreEqual(tableCount, 1)
         Assert.AreEqual(subCount, 1)
+        Assert.AreEqual(callbackCount, 1)
 
         Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users", 1))
         Assert.IsFalse(LibP2PDB:HasKey(db, "Users", 1))
         Assert.IsTrue(LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }))
         Assert.IsTrue(LibP2PDB:HasKey(db, "Users", 1))
-        Assert.AreEqual(dbCount, 3)    -- 1 for delete, 1 for insert
-        Assert.AreEqual(tableCount, 3) -- 1 for delete, 1 for insert
-        Assert.AreEqual(subCount, 3)   -- 1 for delete, 1 for insert
+        Assert.AreEqual(dbCount, 3)       -- 1 for delete, 1 for insert
+        Assert.AreEqual(tableCount, 3)    -- 1 for delete, 1 for insert
+        Assert.AreEqual(subCount, 3)      -- 1 for delete, 1 for insert
+        Assert.AreEqual(callbackCount, 3) -- 1 for delete, 1 for insert
     end,
 
     GetKey = function()
@@ -5235,33 +5316,39 @@ local UnitTests = {
     end,
 
     GetKey_DoesNotInvokeChangeCallbacks = function()
-        local dbCount, tableCount, subCount = 0, 0, 0
+        local owner = {}
+        local dbCount, tableCount, subCount, callbackCount = 0, 0, 0, 0
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = function() dbCount = dbCount + 1 end })
         LibP2PDB:NewTable(db, { name = "Users", keyType = "number", onChange = function() tableCount = tableCount + 1 end })
         LibP2PDB:Subscribe(db, "Users", function() subCount = subCount + 1 end)
+        LibP2PDB:RegisterTableChange(db, "Users", owner, function() callbackCount = callbackCount + 1 end)
         Assert.AreEqual(dbCount, 0)
         Assert.AreEqual(tableCount, 0)
         Assert.AreEqual(subCount, 0)
+        Assert.AreEqual(callbackCount, 0)
 
         Assert.IsTrue(LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }))
         Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
         Assert.AreEqual(dbCount, 1)
         Assert.AreEqual(tableCount, 1)
         Assert.AreEqual(subCount, 1)
+        Assert.AreEqual(callbackCount, 1)
 
         Assert.Throws(function() LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }) end)
         Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
         Assert.AreEqual(dbCount, 1)
         Assert.AreEqual(tableCount, 1)
         Assert.AreEqual(subCount, 1)
+        Assert.AreEqual(callbackCount, 1)
 
         Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users", 1))
         Assert.IsNil(LibP2PDB:GetKey(db, "Users", 1))
         Assert.IsTrue(LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }))
         Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
-        Assert.AreEqual(dbCount, 3)    -- 1 for delete, 1 for insert
-        Assert.AreEqual(tableCount, 3) -- 1 for delete, 1 for insert
-        Assert.AreEqual(subCount, 3)   -- 1 for delete, 1 for insert
+        Assert.AreEqual(dbCount, 3)       -- 1 for delete, 1 for insert
+        Assert.AreEqual(tableCount, 3)    -- 1 for delete, 1 for insert
+        Assert.AreEqual(subCount, 3)      -- 1 for delete, 1 for insert
+        Assert.AreEqual(callbackCount, 3) -- 1 for delete, 1 for insert
     end,
 
     Version = function()
@@ -5400,6 +5487,107 @@ local UnitTests = {
         Assert.Throws(function() LibP2PDB:Unsubscribe(db, "Users", nil) end)
         Assert.Throws(function() LibP2PDB:Unsubscribe(db, "Users", 123) end)
         Assert.Throws(function() LibP2PDB:Unsubscribe(db, "Users", "invalid") end)
+    end,
+
+    RegisterTableChange = function()
+        local owner = {}
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+        local callbackInvoked = 0
+        local callback = function(key, row)
+            callbackInvoked = callbackInvoked + 1
+            Assert.AreEqual(key, 1)
+            Assert.AreEqual(row, { name = "Bob", age = 25 })
+        end
+        LibP2PDB:RegisterTableChange(db, "Users", owner, callback)
+        LibP2PDB:RegisterTableChange(db, "Users", owner, callback)
+        LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 })
+        Assert.AreEqual(callbackInvoked, 1)
+    end,
+
+    RegisterTableChange_DBIsInvalid_Throws = function()
+        local owner = {}
+        Assert.Throws(function() LibP2PDB:RegisterTableChange(nil, "Users", owner, function() end) end)
+        Assert.Throws(function() LibP2PDB:RegisterTableChange(true, "Users", owner, function() end) end)
+        Assert.Throws(function() LibP2PDB:RegisterTableChange(false, "Users", owner, function() end) end)
+        Assert.Throws(function() LibP2PDB:RegisterTableChange(123, "Users", owner, function() end) end)
+        Assert.Throws(function() LibP2PDB:RegisterTableChange("", "Users", owner, function() end) end)
+        Assert.Throws(function() LibP2PDB:RegisterTableChange({}, "Users", owner, function() end) end)
+    end,
+
+    RegisterTableChange_TableNameIsInvalid_Throws = function()
+        local owner = {}
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        Assert.Throws(function() LibP2PDB:RegisterTableChange(db, nil, owner, function() end) end)
+        Assert.Throws(function() LibP2PDB:RegisterTableChange(db, true, owner, function() end) end)
+        Assert.Throws(function() LibP2PDB:RegisterTableChange(db, false, owner, function() end) end)
+        Assert.Throws(function() LibP2PDB:RegisterTableChange(db, 123, owner, function() end) end)
+        Assert.Throws(function() LibP2PDB:RegisterTableChange(db, {}, owner, function() end) end)
+    end,
+
+    RegisterTableChange_OwnerIsInvalid_Throws = function()
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        Assert.Throws(function() LibP2PDB:RegisterTableChange(db, "Users", nil, function() end) end)
+        Assert.Throws(function() LibP2PDB:RegisterTableChange(db, "Users", true, function() end) end)
+        Assert.Throws(function() LibP2PDB:RegisterTableChange(db, "Users", false, function() end) end)
+        Assert.Throws(function() LibP2PDB:RegisterTableChange(db, "Users", 123, function() end) end)
+        Assert.Throws(function() LibP2PDB:RegisterTableChange(db, "Users", "invalid", function() end) end)
+    end,
+
+    RegisterTableChange_CallbackIsInvalid_Throws = function()
+        local owner = {}
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
+        Assert.Throws(function() LibP2PDB:RegisterTableChange(db, "Users", owner, nil) end)
+        Assert.Throws(function() LibP2PDB:RegisterTableChange(db, "Users", owner, true) end)
+        Assert.Throws(function() LibP2PDB:RegisterTableChange(db, "Users", owner, false) end)
+        Assert.Throws(function() LibP2PDB:RegisterTableChange(db, "Users", owner, 123) end)
+        Assert.Throws(function() LibP2PDB:RegisterTableChange(db, "Users", owner, "invalid") end)
+    end,
+
+    UnregisterTableChange = function()
+        local owner = {}
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+        local callbackInvoked = 0
+        local callback = function(key, row)
+            callbackInvoked = callbackInvoked + 1
+        end
+        LibP2PDB:RegisterTableChange(db, "Users", owner, callback)
+        LibP2PDB:UnregisterTableChange(db, "Users", owner)
+        LibP2PDB:UnregisterTableChange(db, "Users", owner)
+        LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 })
+        Assert.AreEqual(callbackInvoked, 0)
+    end,
+
+    UnregisterTableChange_DBIsInvalid_Throws = function()
+        local owner = {}
+        Assert.Throws(function() LibP2PDB:UnregisterTableChange(nil, "Users", owner) end)
+        Assert.Throws(function() LibP2PDB:UnregisterTableChange(true, "Users", owner) end)
+        Assert.Throws(function() LibP2PDB:UnregisterTableChange(false, "Users", owner) end)
+        Assert.Throws(function() LibP2PDB:UnregisterTableChange(123, "Users", owner) end)
+        Assert.Throws(function() LibP2PDB:UnregisterTableChange("", "Users", owner) end)
+        Assert.Throws(function() LibP2PDB:UnregisterTableChange({}, "Users", owner) end)
+    end,
+
+    UnregisterTableChange_TableNameIsInvalid_Throws = function()
+        local owner = {}
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        Assert.Throws(function() LibP2PDB:UnregisterTableChange(db, nil, owner) end)
+        Assert.Throws(function() LibP2PDB:UnregisterTableChange(db, true, owner) end)
+        Assert.Throws(function() LibP2PDB:UnregisterTableChange(db, false, owner) end)
+        Assert.Throws(function() LibP2PDB:UnregisterTableChange(db, 123, owner) end)
+        Assert.Throws(function() LibP2PDB:UnregisterTableChange(db, {}, owner) end)
+    end,
+
+    UnregisterTableChange_OwnerIsInvalid_Throws = function()
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        LibP2PDB:NewTable(db, { name = "Users", keyType = "string" })
+        Assert.Throws(function() LibP2PDB:UnregisterTableChange(db, "Users", nil) end)
+        Assert.Throws(function() LibP2PDB:UnregisterTableChange(db, "Users", true) end)
+        Assert.Throws(function() LibP2PDB:UnregisterTableChange(db, "Users", false) end)
+        Assert.Throws(function() LibP2PDB:UnregisterTableChange(db, "Users", 123) end)
+        Assert.Throws(function() LibP2PDB:UnregisterTableChange(db, "Users", "invalid") end)
     end,
 
     ExportDatabase = function()
