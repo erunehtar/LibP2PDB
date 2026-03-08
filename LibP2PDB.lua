@@ -3536,16 +3536,16 @@ function Private:SendChunkedRowsRequest(dbi, chunkSize, sender, databaseRequest)
     end
 end
 
---- Compute an XOR fingerprint of a table's summary buckets.
---- Returns 0 for empty tables. Computed on-demand; never cached.
+--- Compute an FNV1a32 hash of the summary buckets for a table, to use as a fingerprint for quick comparison between peers.
 --- @param ti LibP2PDB.TableInstance Table instance.
 --- @return integer fingerprint XOR of all summary bucket values.
 function Private:ComputeTableFingerprint(ti)
-    local fingerprint = ti.rowCount -- seed with row count so non-empty tables are never confused with empty ones (fingerprint 0)
-    for _, v in ipairs(ti.summary.buckets) do
-        fingerprint = bxor(fingerprint, v) % UINT32_MODULO
+    local hash = 2166136261 + ti.rowCount * 13
+    for i = 1, ti.summary.numBuckets do
+        hash = bxor(hash, ti.summary.buckets[i])
+        hash = (hash * 16777619) % UINT32_MODULO
     end
-    return fingerprint
+    return hash
 end
 
 --- Update information about a new or existing peer.
