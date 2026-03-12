@@ -2110,7 +2110,7 @@ function Private:SetKey(dbi, tableName, ti, key, rowData)
         end
         assert(IsBoolean(result), "onValidate must return a boolean")
         if not result then
-            return false -- validation failed
+            return false -- validation failed, discard the changes
         end
     end
 
@@ -2129,42 +2129,38 @@ function Private:SetKey(dbi, tableName, ti, key, rowData)
 
     -- Apply changes if any
     if changes then
-        -- Versioning (Lamport clock)
+        -- Update database Lamport clock
         dbi.clock = dbi.clock + 1
 
-        -- Update row count (must be done before storing the row and updating summary)
-        if not existingRow then
+        -- Handle pre changes updates
+        if existingRow then
+            -- Remove the existing row version from the summary
+            ti.summary:Update(key, existingRow.version.clock)
+        else
+            -- New row, update row count
             ti.rowCount = ti.rowCount + 1
 
-            -- Resize summary if needed
+            -- Ensure summary can accommodate the new row
             local requiredNumBucket = max(MIN_BUCKET_COUNT, NextPowerOfTwo(ti.rowCount) / KEYS_PER_BUCKET)
             if requiredNumBucket > ti.summary.numBuckets then
                 self:ResizeTableSummary(ti, requiredNumBucket)
             end
         end
 
-        local peerID = priv.peerID
-        if peerID == key then
-            peerID = 0 -- Special case for rows where the key is the same as the peer ID, to save space in serialization
-        end
-
-        -- Store the old row data for change callbacks before overwriting
-        local oldRowData = ShallowCopy(existingRow and existingRow.data or nil)
+        -- Copy the existing row data for change callbacks before overwriting
+        local oldRowData = ShallowCopy(existingRow and existingRow.data or nil) or nil
 
         -- Store the row
         ti.rows[key] = {
             data = rowData,
             version = {
                 clock = dbi.clock,
-                peerID = peerID,
+                peerID = (priv.peerID ~= key) and priv.peerID or 0,
                 tombstone = (rowData == nil) and true or nil,
             },
         }
 
         -- Update summary
-        if existingRow then
-            ti.summary:Update(key, existingRow.version.clock)
-        end
         ti.summary.keyIndex[key] = ti.summary:Update(key, dbi.clock)
 
         -- Invoke row changed callbacks
@@ -2207,58 +2203,58 @@ function Private:MergeKey(dbi, dbClock, tableName, ti, key, rowData, rowVersion,
         end
         assert(IsBoolean(result), "onValidate must return a boolean")
         if not result then
-            return false -- validation failed
+            return false -- validation failed, discard the changes
         end
     end
 
-    -- Determine if the row will change
+    -- Merge database Lamport clock
+    dbi.clock = max(dbi.clock, dbClock)
+
+    -- Handle pre merge updates
+    if existingRow then
+        -- Remove the existing row version from the summary
+        ti.summary:Update(key, existingRow.version.clock)
+    else
+        -- New row, update row count
+        ti.rowCount = ti.rowCount + 1
+
+        -- Ensure summary can accommodate the new row
+        local requiredNumBucket = max(MIN_BUCKET_COUNT, NextPowerOfTwo(ti.rowCount) / KEYS_PER_BUCKET)
+        if requiredNumBucket > ti.summary.numBuckets then
+            self:ResizeTableSummary(ti, requiredNumBucket)
+        end
+    end
+
+    -- Determine if the row data will change
     local changes = false
     if rowData then
         if not existingRow or existingRow.version.tombstone or not ShallowEqual(existingRow.data, rowData) then
-            changes = true -- new row or data changes
+            changes = true -- new row, or tombstone removed, or data changes
         end
     else
         if not existingRow or not existingRow.version.tombstone then
-            changes = true -- new tombstone row or existing row is not a tombstone
+            changes = true -- new tombstone row, or row becomes a tombstone
         end
     end
 
-    -- Apply changes if any
+    -- Copy the existing row data for change callbacks before overwriting
+    local oldRowData = changes and ShallowCopy(existingRow and existingRow.data or nil) or nil
+
+    -- Store the row
+    ti.rows[key] = {
+        data = rowData,
+        version = {
+            clock = rowVersion.clock,
+            peerID = rowVersion.peerID,
+            tombstone = (rowData == nil) and true or nil,
+        },
+    }
+
+    -- Update the summary
+    ti.summary.keyIndex[key] = ti.summary:Update(key, rowVersion.clock)
+
+    -- Invoke row changed callbacks
     if changes then
-        -- Versioning (Lamport clock)
-        dbi.clock = max(dbi.clock, dbClock)
-
-        -- Update row count (must be done before storing the row and updating summary)
-        if not existingRow then
-            ti.rowCount = ti.rowCount + 1
-
-            -- Resize summary if needed
-            local requiredNumBucket = max(MIN_BUCKET_COUNT, NextPowerOfTwo(ti.rowCount) / KEYS_PER_BUCKET)
-            if requiredNumBucket > ti.summary.numBuckets then
-                self:ResizeTableSummary(ti, requiredNumBucket)
-            end
-        end
-
-        -- Store the old row data for change callbacks before overwriting
-        local oldRowData = ShallowCopy(existingRow and existingRow.data or nil)
-
-        -- Store the row
-        ti.rows[key] = {
-            data = rowData,
-            version = {
-                clock = rowVersion.clock,
-                peerID = rowVersion.peerID,
-                tombstone = rowData == nil and true or nil,
-            },
-        }
-
-        -- Update summary
-        if existingRow then
-            ti.summary:Update(key, existingRow.version.clock)
-        end
-        ti.summary.keyIndex[key] = ti.summary:Update(key, rowVersion.clock)
-
-        -- Invoke row changed callbacks
         self:InvokeChangeCallbacks(dbi, tableName, ti, key, rowData, oldRowData)
     end
 
@@ -4447,6 +4443,32 @@ local UnitTests = {
         Assert.AreEqual(callbackCount, 3) -- 1 for delete, 1 for insert
     end,
 
+    InsertKey_SummaryIsUpdated = function()
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+
+        local dbi = priv.databases[db]
+        local ti = dbi.tables["Users"]
+
+        do
+            local summary = LibBucketedHashSet.New(ti.summary.numBuckets)
+            for key, row in pairs(ti.rows) do
+                summary:Update(key, row.version.clock)
+            end
+            assert(summary == ti.summary, "Summary should be empty before any keys are inserted")
+        end
+
+        LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 })
+
+        do
+            local summary = LibBucketedHashSet.New(ti.summary.numBuckets)
+            for key, row in pairs(ti.rows) do
+                summary:Update(key, row.version.clock)
+            end
+            assert(summary == ti.summary, "Summary should be updated after keys are inserted")
+        end
+    end,
+
     SetKey = function()
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
         do -- test with string key type and no schema
@@ -4641,6 +4663,32 @@ local UnitTests = {
         Assert.AreEqual(tableCount, 3)    -- 1 for delete, 1 for insert
         Assert.AreEqual(subCount, 3)      -- 1 for delete, 1 for insert
         Assert.AreEqual(callbackCount, 3) -- 1 for delete, 1 for insert
+    end,
+
+    SetKey_SummaryIsUpdated = function()
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+
+        local dbi = priv.databases[db]
+        local ti = dbi.tables["Users"]
+
+        do
+            local summary = LibBucketedHashSet.New(ti.summary.numBuckets)
+            for key, row in pairs(ti.rows) do
+                summary:Update(key, row.version.clock)
+            end
+            assert(summary == ti.summary, "Summary should be empty before any keys are set")
+        end
+
+        LibP2PDB:SetKey(db, "Users", 1, { name = "Bob", age = 25 })
+
+        do
+            local summary = LibBucketedHashSet.New(ti.summary.numBuckets)
+            for key, row in pairs(ti.rows) do
+                summary:Update(key, row.version.clock)
+            end
+            assert(summary == ti.summary, "Summary should be updated after keys are set")
+        end
     end,
 
     UpdateKey = function()
@@ -4854,6 +4902,45 @@ local UnitTests = {
         Assert.AreEqual(fetchedRow, { name = "Bob", age = 25 })
     end,
 
+    UpdateKey_SummaryIsUpdated = function()
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        LibP2PDB:NewTable(db, {
+            name = "Users",
+            keyType = "number",
+            schema = {
+                name = "string",
+                age = {
+                    "number",
+                    "nil"
+                }
+            },
+            onValidate = function(key, data)
+                return not data or not data.age or data.age >= 0
+            end
+        })
+
+        local dbi = priv.databases[db]
+        local ti = dbi.tables["Users"]
+
+        do
+            local summary = LibBucketedHashSet.New(ti.summary.numBuckets)
+            for key, row in pairs(ti.rows) do
+                summary:Update(key, row.version.clock)
+            end
+            assert(summary == ti.summary, "Summary should be empty before any keys are updated")
+        end
+
+        LibP2PDB:UpdateKey(db, "Users", 1, function() return { name = "Bob", age = 25 } end)
+
+        do
+            local summary = LibBucketedHashSet.New(ti.summary.numBuckets)
+            for key, row in pairs(ti.rows) do
+                summary:Update(key, row.version.clock)
+            end
+            assert(summary == ti.summary, "Summary should be updated after keys are updated")
+        end
+    end,
+
     DeleteKey = function()
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
         do -- test with string key type and no schema
@@ -5036,6 +5123,46 @@ local UnitTests = {
         Assert.AreEqual(tableCount, 3)
         Assert.AreEqual(subCount, 3)
         Assert.AreEqual(callbackCount, 3)
+    end,
+
+    DeleteKey_SummaryIsUpdated = function()
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        LibP2PDB:NewTable(db, {
+            name = "Users",
+            keyType = "number",
+            schema = {
+                name = "string",
+                age = {
+                    "number",
+                    "nil"
+                }
+            },
+            onValidate = function(key, data)
+                return not data or not data.age or data.age >= 0
+            end
+        })
+
+        local dbi = priv.databases[db]
+        local ti = dbi.tables["Users"]
+
+        do
+            local summary = LibBucketedHashSet.New(ti.summary.numBuckets)
+            for key, row in pairs(ti.rows) do
+                summary:Update(key, row.version.clock)
+            end
+            assert(summary == ti.summary, "Summary should be empty before any keys are deleted")
+        end
+
+        LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 })
+        LibP2PDB:DeleteKey(db, "Users", 1)
+
+        do
+            local summary = LibBucketedHashSet.New(ti.summary.numBuckets)
+            for key, row in pairs(ti.rows) do
+                summary:Update(key, row.version.clock)
+            end
+            assert(summary == ti.summary, "Summary should be updated after keys are deleted")
+        end
     end,
 
     HasKey = function()
@@ -7631,6 +7758,85 @@ local NetworkTests = {
             Assert.Throws(function() LibP2PDB:BroadcastKey(db, "Users", false) end)
             Assert.Throws(function() LibP2PDB:BroadcastKey(db, "Users", {}) end)
         end)
+    end,
+
+    Version = function()
+        local instances = {}
+        local databases = {}
+        for i = 1, numPeers do
+            instances[i] = NewPrivateInstance(i)
+            databases[i] = PrivateScope(instances[i], function()
+                local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+                LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { time = "number" } })
+                LibP2PDB:InsertKey(db, "Users", i, { time = 0 })
+                return db
+            end)
+        end
+
+        -- Make all peers broadcast their presence
+        VerbosityScope(3, function()
+            for i = 1, numPeers do
+                PrivateScope(instances[i], function() LibP2PDB:BroadcastPresence(databases[i]) end)
+            end
+            TickPrivateInstances(instances)
+        end)
+
+        -- Make all peers sync their databases
+        VerbosityScope(3, function()
+            for r = 1, numRounds do
+                for i = 1, numPeers do
+                    PrivateScope(instances[i], function() LibP2PDB:SyncDatabase(databases[i]) end)
+                end
+                TickPrivateInstances(instances)
+            end
+        end)
+
+        -- Make one peer update data twice, so that it has higher version, but data equal to original value
+        VerbosityScope(3, function()
+            PrivateScope(instances[1], function()
+                for j = 1, numPeers do
+                    LibP2PDB:UpdateKey(databases[1], "Users", j, function(data) data.time = data.time + 1 return data end)
+                    LibP2PDB:UpdateKey(databases[1], "Users", j, function(data) data.time = data.time - 1 return data end)
+                end
+            end)
+            TickPrivateInstances(instances)
+        end)
+
+        -- Make all peers sync their databases
+        VerbosityScope(3, function()
+            for r = 1, numRounds do
+                for i = 1, numPeers do
+                    PrivateScope(instances[i], function() LibP2PDB:SyncDatabase(databases[i]) end)
+                end
+                TickPrivateInstances(instances)
+            end
+        end)
+
+        -- Check that all peers have the same database and key versions
+        local versions = {}
+        for i = 1, numPeers do
+            PrivateScope(instances[i], function()
+                local dbi = priv.databases[databases[i]]
+                local dbVersion = dbi.clock
+                Assert.IsNumber(dbVersion)
+                versions[i] = { dbVersion = dbVersion, keyVersions = {} }
+                for j = 1, numPeers do
+                    local ti = dbi.tables["Users"]
+                    Assert.IsTable(ti)
+                    local row = ti.rows[j]
+                    Assert.IsTable(row)
+                    local keyVersion = row.version.clock
+                    Assert.IsNumber(keyVersion)
+                    versions[i].keyVersions[j] = keyVersion
+                end
+            end)
+        end
+        for i = 2, numPeers do
+            Assert.AreEqual(versions[i].dbVersion, versions[1].dbVersion, "Database versions should be the same across all peers")
+            for j = 1, numPeers do
+                Assert.AreEqual(versions[i].keyVersions[j], versions[1].keyVersions[j], "Key versions should be the same across all peers")
+            end
+        end
     end,
 
     ListPeers = function()
