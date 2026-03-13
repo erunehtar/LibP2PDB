@@ -1285,7 +1285,8 @@ end
 
 --- Delete a key from a table.
 --- Validates the key type against the table definition.
---- Marks the row as a tombstone for gossip synchronization, whether the row existed or not.
+--- Marks the row as a tombstone for gossip synchronization.
+--- If the key does not exist or is already a tombstone, this is a no-op and returns true.
 --- @param db LibP2PDB.DBHandle Database handle.
 --- @param tableName LibP2PDB.TableName Name of the table to delete from.
 --- @param key LibP2PDB.TableKey Primary key value for the row (must match table's keyType).
@@ -1303,6 +1304,12 @@ function LibP2PDB:DeleteKey(db, tableName, key)
     local ti = dbi.tables[tableName]
     assert(ti, "table '" .. tableName .. "' is not defined in the database")
     assert(type(key) == ti.keyType, "expected key of type '" .. ti.keyType .. "' for table '" .. tableName .. "', but was '" .. type(key) .. "'")
+
+    -- No-op if the key does not exist or is already a tombstone
+    local existingRow = ti.rows[key]
+    if not existingRow or existingRow.version.tombstone then
+        return true
+    end
 
     -- Block deletion if table is immutable (tombstones are never valid in immutable tables)
     if ti.immutable then
@@ -5220,8 +5227,9 @@ local UnitTests = {
         Assert.AreEqual(ti.rowCount, 2)
         Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users", 2))
         Assert.AreEqual(ti.rowCount, 2)
+        -- Deleting a non-existent key is a no-op: no new row is created
         Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users", 3))
-        Assert.AreEqual(ti.rowCount, 3)
+        Assert.AreEqual(ti.rowCount, 2)
     end,
 
     DeleteKey_InvokeChangeCallbacks = function()
@@ -5252,12 +5260,12 @@ local UnitTests = {
         Assert.AreEqual(subCount, 2)
         Assert.AreEqual(callbackCount, 2)
 
-        -- check deleting a non-existent key invokes all callbacks
+        -- check deleting a non-existent key is a no-op: no callbacks fired
         Assert.IsTrue(LibP2PDB:DeleteKey(db, "Users", 2))
-        Assert.AreEqual(dbCount, 3)
-        Assert.AreEqual(tableCount, 3)
-        Assert.AreEqual(subCount, 3)
-        Assert.AreEqual(callbackCount, 3)
+        Assert.AreEqual(dbCount, 2)
+        Assert.AreEqual(tableCount, 2)
+        Assert.AreEqual(subCount, 2)
+        Assert.AreEqual(callbackCount, 2)
     end,
 
     DeleteKey_SummaryIsUpdated = function()
@@ -5310,8 +5318,8 @@ local UnitTests = {
         Assert.AreEqual(LibP2PDB:DeleteKey(db, "Users", 1), false)
         Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
         Assert.IsNil(rows[1].version.tombstone)
-        -- Deleting a non-existent key is also blocked and must not create a tombstone row
-        Assert.AreEqual(LibP2PDB:DeleteKey(db, "Users", 2), false)
+        -- Deleting a non-existent key is a no-op (nothing to protect), must not create a tombstone row
+        Assert.AreEqual(LibP2PDB:DeleteKey(db, "Users", 2), true)
         Assert.IsNil(rows[2])
     end,
 
@@ -5959,7 +5967,6 @@ local UnitTests = {
             LibP2PDB:InsertKey(dbExport, "Users", "user4", {})
             LibP2PDB:InsertKey(dbExport, "Users", "user5", { name = "Charlie", age = 28 })
             LibP2PDB:DeleteKey(dbExport, "Users", "user5")
-            LibP2PDB:DeleteKey(dbExport, "Users", "user6")
 
             local state = LibP2PDB:ExportDatabase(dbExport)
             Assert.IsNonEmptyTable(state)
@@ -5971,7 +5978,7 @@ local UnitTests = {
 
             local dbi = priv.databases[dbImport]
             Assert.IsNonEmptyTable(dbi)
-            Assert.AreEqual(dbi.clock, 6) -- 6 changes performed (1 rejected)
+            Assert.AreEqual(dbi.clock, 5) -- 5 changes performed (1 rejected)
             Assert.IsNonEmptyTable(dbi.tables)
 
             local ti = dbi.tables["Users"]
@@ -6021,14 +6028,7 @@ local UnitTests = {
                     tombstone = true
                 },
             })
-            Assert.AreEqual(rows["user6"], {
-                data = nil,
-                version = {
-                    clock = 6,
-                    peerID = priv.peerID,
-                    tombstone = true
-                },
-            })
+            Assert.IsNil(rows["user6"])
         end
         do -- test with number key type and schema
             local dbExport = LibP2PDB:NewDatabase({ prefix = "LibP2PDBExport2" })
@@ -6052,7 +6052,6 @@ local UnitTests = {
             LibP2PDB:InsertKey(dbExport, "Users", 3, { name = "Eve", age = -1 })
             LibP2PDB:InsertKey(dbExport, "Users", 4, { name = "Charlie", age = 28 })
             LibP2PDB:DeleteKey(dbExport, "Users", 4)
-            LibP2PDB:DeleteKey(dbExport, "Users", 5)
 
             local state = LibP2PDB:ExportDatabase(dbExport)
             Assert.IsNonEmptyTable(state)
@@ -6064,7 +6063,7 @@ local UnitTests = {
 
             local dbi = priv.databases[dbImport]
             Assert.IsNonEmptyTable(dbi)
-            Assert.AreEqual(dbi.clock, 5) -- 5 changes performed (1 rejected)
+            Assert.AreEqual(dbi.clock, 4) -- 4 changes performed (1 rejected)
             Assert.IsNonEmptyTable(dbi.tables)
 
             local ti = dbi.tables["Users"]
@@ -6102,14 +6101,7 @@ local UnitTests = {
                     tombstone = true
                 },
             })
-            Assert.AreEqual(rows[5], {
-                data = nil,
-                version = {
-                    clock = 5,
-                    peerID = priv.peerID,
-                    tombstone = true
-                },
-            })
+            Assert.IsNil(rows[5])
         end
     end,
 
