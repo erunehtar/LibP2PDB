@@ -1064,6 +1064,7 @@ end
 --- @field name LibP2PDB.TableName Name of the table to create.
 --- @field keyType LibP2PDB.TableKeyType Data type of the primary key.
 --- @field sync boolean? Optional flag indicating if the table should be synchronized with peers (default: true).
+--- @field immutable boolean? Optional flag indicating if the table is immutable (no changes allowed after creation, default: false).
 --- @field schema LibP2PDB.TableSchema? Optional table schema defining field names and their allowed data types.
 --- @field onValidate LibP2PDB.TableOnValidateCallback? Optional callback function(key, data, context) for custom row validation. Must return true if valid, false otherwise. Data is a copy and has not yet been applied when this is called.
 --- @field onChange LibP2PDB.TableOnChangeCallback? Optional callback function(key, data) on row data changes. Data is nil for deletions. Data is a copy, and has already been applied when this is called.
@@ -1082,6 +1083,7 @@ function LibP2PDB:NewTable(db, desc)
     assert(IsNonEmptyString(desc.keyType), "desc.keyType must be a non-empty string")
     assert(desc.keyType == "string" or desc.keyType == "number", "desc.keyType must be 'string' or 'number'")
     assert(IsBooleanOrNil(desc.sync), "desc.sync must be a boolean if provided")
+    assert(IsBooleanOrNil(desc.immutable), "desc.immutable must be a boolean if provided")
     assert(IsNonEmptyTableOrNil(desc.schema), "desc.schema must be a non-empty table if provided")
     for fieldKey, allowedTypes in pairs(desc.schema or {}) do
         assert(IsNonEmptyString(fieldKey) or IsNumber(fieldKey), "each field key in desc.schema must be a non-empty string or number")
@@ -1137,6 +1139,7 @@ function LibP2PDB:NewTable(db, desc)
     dbi.tables[desc.name] = {
         keyType = desc.keyType,
         sync = sync,
+        immutable = desc.immutable or false,
         schema = desc.schema,
         schemaSorted = schemaSorted,
         onValidate = desc.onValidate,
@@ -1216,6 +1219,12 @@ function LibP2PDB:SetKey(db, tableName, key, data)
     assert(ti, "table '" .. tableName .. "' is not defined in the database")
     assert(type(key) == ti.keyType, "expected key of type '" .. ti.keyType .. "' for table '" .. tableName .. "', but was '" .. type(key) .. "'")
 
+    -- Block modification if table is immutable
+    if ti.immutable and ti.rows[key] then
+        ReportError(dbi, "cannot set key '%s' in table '%s' because the table is immutable", tostring(key), tableName)
+        return false
+    end
+
     -- Prepare the row data
     local rowData = priv:PrepareRowData(tableName, ti, data)
 
@@ -1250,8 +1259,14 @@ function LibP2PDB:UpdateKey(db, tableName, key, updateFn)
     assert(ti, "table '" .. tableName .. "' is not defined in the database")
     assert(type(key) == ti.keyType, "expected key of type '" .. ti.keyType .. "' for table '" .. tableName .. "', but was '" .. type(key) .. "'")
 
-    -- Call the update function to get the updated row data
+    -- Block modification if table is immutable
     local existingRow = ti.rows[key]
+    if ti.immutable and existingRow then
+        ReportError(dbi, "cannot update key '%s' in table '%s' because the table is immutable", tostring(key), tableName)
+        return false
+    end
+
+    -- Call the update function to get the updated row data
     local success, updatedRow = SafeCall(dbi, updateFn, existingRow and ShallowCopy(existingRow.data) or nil)
     if not success then
         return false
@@ -1285,6 +1300,12 @@ function LibP2PDB:DeleteKey(db, tableName, key)
     local ti = dbi.tables[tableName]
     assert(ti, "table '" .. tableName .. "' is not defined in the database")
     assert(type(key) == ti.keyType, "expected key of type '" .. ti.keyType .. "' for table '" .. tableName .. "', but was '" .. type(key) .. "'")
+
+    -- Block modification if table is immutable
+    if ti.immutable and ti.rows[key] then
+        ReportError(dbi, "cannot delete key '%s' from table '%s' because the table is immutable", tostring(key), tableName)
+        return false
+    end
 
     -- Set the row
     return priv:SetKey(dbi, tableName, ti, key, nil)
@@ -2059,6 +2080,7 @@ end
 --- @class LibP2PDB.TableInstance Table instance.
 --- @field keyType LibP2PDB.TableKeyType Primary key type for the table.
 --- @field sync boolean Whether the table is included in gossip syncs.
+--- @field immutable boolean Whether rows in the table are immutable after creation.
 --- @field schema LibP2PDB.TableSchema? Optional schema definition for the table.
 --- @field schemaSorted LibP2PDB.TableSchemaSorted? Cached sorted schema for the table.
 --- @field onValidate LibP2PDB.TableOnValidateCallback? Optional validation callback for rows.
@@ -2129,6 +2151,11 @@ function Private:SetKey(dbi, tableName, ti, key, rowData)
 
     -- Apply changes if any
     if changes then
+        if ti.immutable and existingRow then
+            ReportError(dbi, "cannot modify key '%s' in immutable table '%s'", key, tableName)
+            return false
+        end
+
         -- Update database Lamport clock
         dbi.clock = dbi.clock + 1
 
@@ -2207,6 +2234,24 @@ function Private:MergeKey(dbi, dbClock, tableName, ti, key, rowData, rowVersion,
         end
     end
 
+    -- Determine if the row data will change
+    local changes = false
+    if rowData then
+        if not existingRow or existingRow.version.tombstone or not ShallowEqual(existingRow.data, rowData) then
+            changes = true -- new row, or tombstone removed, or data changes
+        end
+    else
+        if not existingRow or not existingRow.version.tombstone then
+            changes = true -- new tombstone row, or row becomes a tombstone
+        end
+    end
+
+    -- Block changes if the table is immutable and there is an existing row
+    if changes and ti.immutable and existingRow then
+        ReportError(dbi, "cannot modify key '%s' in immutable table '%s'", key, tableName)
+        return false
+    end
+
     -- Merge database Lamport clock
     dbi.clock = max(dbi.clock, dbClock)
 
@@ -2222,18 +2267,6 @@ function Private:MergeKey(dbi, dbClock, tableName, ti, key, rowData, rowVersion,
         local requiredNumBucket = max(MIN_BUCKET_COUNT, NextPowerOfTwo(ti.rowCount) / KEYS_PER_BUCKET)
         if requiredNumBucket > ti.summary.numBuckets then
             self:ResizeTableSummary(ti, requiredNumBucket)
-        end
-    end
-
-    -- Determine if the row data will change
-    local changes = false
-    if rowData then
-        if not existingRow or existingRow.version.tombstone or not ShallowEqual(existingRow.data, rowData) then
-            changes = true -- new row, or tombstone removed, or data changes
-        end
-    else
-        if not existingRow or not existingRow.version.tombstone then
-            changes = true -- new tombstone row, or row becomes a tombstone
         end
     end
 
@@ -4469,6 +4502,15 @@ local UnitTests = {
         end
     end,
 
+    InsertKey_ImmutableTable = function()
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        LibP2PDB:NewTable(db, { name = "Users", keyType = "number", immutable = true, schema = { name = "string", age = "number" } })
+        Assert.AreEqual(LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }), true)
+        Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
+        Assert.Throws(function() LibP2PDB:InsertKey(db, "Users", 1, { name = "Alice", age = 30 }) end)
+        Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
+    end,
+
     SetKey = function()
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
         do -- test with string key type and no schema
@@ -4689,6 +4731,15 @@ local UnitTests = {
             end
             assert(summary == ti.summary, "Summary should be updated after keys are set")
         end
+    end,
+
+    SetKey_ImmutableTable = function()
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        LibP2PDB:NewTable(db, { name = "Users", keyType = "number", immutable = true, schema = { name = "string", age = "number" } })
+        Assert.AreEqual(LibP2PDB:SetKey(db, "Users", 1, { name = "Bob", age = 25 }), true)
+        Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
+        Assert.AreEqual(LibP2PDB:SetKey(db, "Users", 1, { name = "Alice", age = 30 }), false)
+        Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
     end,
 
     UpdateKey = function()
@@ -4941,6 +4992,15 @@ local UnitTests = {
         end
     end,
 
+    UpdateKey_ImmutableTable = function()
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        LibP2PDB:NewTable(db, { name = "Users", keyType = "number", immutable = true, schema = { name = "string", age = "number" } })
+        Assert.AreEqual(LibP2PDB:UpdateKey(db, "Users", 1, function() return { name = "Bob", age = 25 } end), true)
+        Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
+        Assert.AreEqual(LibP2PDB:UpdateKey(db, "Users", 1, function() return { name = "Alice", age = 30 } end), false)
+        Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
+    end,
+
     DeleteKey = function()
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
         do -- test with string key type and no schema
@@ -5163,6 +5223,14 @@ local UnitTests = {
             end
             assert(summary == ti.summary, "Summary should be updated after keys are deleted")
         end
+    end,
+
+    DeleteKey_ImmutableTable = function()
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        LibP2PDB:NewTable(db, { name = "Users", keyType = "number", immutable = true, schema = { name = "string", age = "number" } })
+        Assert.AreEqual(LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }), true)
+        Assert.AreEqual(LibP2PDB:DeleteKey(db, "Users", 1), false)
+        Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
     end,
 
     HasKey = function()
@@ -7267,6 +7335,80 @@ local NetworkTests = {
         end)
     end,
 
+    SyncDatabase_ImmutableTable = function()
+        local instances = {}
+        local databases = {}
+        for i = 1, numPeers do
+            instances[i] = NewPrivateInstance(i)
+            databases[i] = PrivateScope(instances[i], function()
+                local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+                LibP2PDB:NewTable(db, { name = "Users", keyType = "number", immutable = true, schema = { name = "string", age = "number" } })
+                return db
+            end)
+        end
+
+        -- Make all peers broadcast their presence
+        VerbosityScope(3, function()
+            for i = 1, numPeers do
+                PrivateScope(instances[i], function() LibP2PDB:BroadcastPresence(databases[i]) end)
+            end
+            TickPrivateInstances(instances)
+        end)
+
+        -- Make peer 1 change a key locally
+        PrivateScope(instances[1], function()
+            LibP2PDB:InsertKey(databases[1], "Users", 1, { name = "Bob", age = 25 })
+        end)
+
+        -- Make all peers sync their databases
+        VerbosityScope(3, function()
+            for r = 1, numRounds do
+                for i = 1, numPeers do
+                    PrivateScope(instances[i], function() LibP2PDB:SyncDatabase(databases[i]) end)
+                end
+                TickPrivateInstances(instances)
+            end
+        end)
+
+        -- Make sure all peers have the change
+        for i = 1, numPeers do
+            PrivateScope(instances[i], function()
+                Assert.AreEqual(LibP2PDB:GetKey(databases[i], "Users", 1), { name = "Bob", age = 25 })
+            end)
+        end
+
+        -- Imagine peer 1 is a hacker, and succesfully changes their local data
+        PrivateScope(instances[1], function()
+            local dbi = instances[1].databases[databases[1]]
+            local rows = dbi.tables["Users"].rows
+            local row = rows[1]
+            row.data = { name = "Hacker", age = 99 }
+            row.version.clock = row.version.clock + 1
+            dbi.clock = dbi.clock + 1
+        end)
+
+        -- Make all peers sync their databases
+        VerbosityScope(3, function()
+            for r = 1, numRounds do
+                for i = 1, numPeers do
+                    PrivateScope(instances[i], function() LibP2PDB:SyncDatabase(databases[i]) end)
+                end
+                TickPrivateInstances(instances)
+            end
+        end)
+
+        -- Make sure all peers except the hacker peer have the same data, and hacker peer has different data
+        for i = 1, numPeers do
+            PrivateScope(instances[i], function()
+                if i == 1 then
+                    Assert.AreEqual(LibP2PDB:GetKey(databases[i], "Users", 1), { name = "Hacker", age = 99 })
+                else
+                    Assert.AreEqual(LibP2PDB:GetKey(databases[i], "Users", 1), { name = "Bob", age = 25 })
+                end
+            end)
+        end
+    end,
+
     RequestKey = function()
         local instances = {}
         local databases = {}
@@ -7448,6 +7590,80 @@ local NetworkTests = {
         end)
     end,
 
+    RequestKey_ImmutableTable = function()
+        local instances = {}
+        local databases = {}
+        for i = 1, numPeers do
+            instances[i] = NewPrivateInstance(i)
+            databases[i] = PrivateScope(instances[i], function()
+                local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+                LibP2PDB:NewTable(db, { name = "Users", keyType = "number", immutable = true, schema = { name = "string", age = "number" } })
+                return db
+            end)
+        end
+
+        -- Make all peers broadcast their presence
+        VerbosityScope(3, function()
+            for i = 1, numPeers do
+                PrivateScope(instances[i], function() LibP2PDB:BroadcastPresence(databases[i]) end)
+            end
+            TickPrivateInstances(instances)
+        end)
+
+        -- Make peer 1 change a key locally
+        PrivateScope(instances[1], function()
+            LibP2PDB:InsertKey(databases[1], "Users", 1, { name = "Bob", age = 25 })
+        end)
+
+        -- Make all peers sync their databases
+        VerbosityScope(3, function()
+            for r = 1, numRounds do
+                for i = 1, numPeers do
+                    PrivateScope(instances[i], function() LibP2PDB:SyncDatabase(databases[i]) end)
+                end
+                TickPrivateInstances(instances)
+            end
+        end)
+
+        -- Make sure all peers have the change
+        for i = 1, numPeers do
+            PrivateScope(instances[i], function()
+                Assert.AreEqual(LibP2PDB:GetKey(databases[i], "Users", 1), { name = "Bob", age = 25 })
+            end)
+        end
+
+        -- Imagine peer 1 is a hacker, and succesfully changes their local data
+        PrivateScope(instances[1], function()
+            local dbi = instances[1].databases[databases[1]]
+            local rows = dbi.tables["Users"].rows
+            local row = rows[1]
+            row.data = { name = "Hacker", age = 99 }
+            row.version.clock = row.version.clock + 1
+            dbi.clock = dbi.clock + 1
+        end)
+
+        -- Make all peers request the key from peer 1 again from player 1
+        VerbosityScope(3, function()
+            for r = 1, numRounds do
+                for i = 2, numPeers do
+                    PrivateScope(instances[i], function() LibP2PDB:RequestKey(databases[i], "Users", 1, "Player1") end)
+                end
+                TickPrivateInstances(instances)
+            end
+        end)
+
+        -- Make sure all peers except the hacker peer have the same data, and hacker peer has different data
+        for i = 1, numPeers do
+            PrivateScope(instances[i], function()
+                if i == 1 then
+                    Assert.AreEqual(LibP2PDB:GetKey(databases[i], "Users", 1), { name = "Hacker", age = 99 })
+                else
+                    Assert.AreEqual(LibP2PDB:GetKey(databases[i], "Users", 1), { name = "Bob", age = 25 })
+                end
+            end)
+        end
+    end,
+
     SendKey = function()
         local instances = {}
         local databases = {}
@@ -7608,6 +7824,82 @@ local NetworkTests = {
         end)
     end,
 
+    SendKey_ImmutableTable = function()
+        local instances = {}
+        local databases = {}
+        for i = 1, numPeers do
+            instances[i] = NewPrivateInstance(i)
+            databases[i] = PrivateScope(instances[i], function()
+                local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+                LibP2PDB:NewTable(db, { name = "Users", keyType = "number", immutable = true, schema = { name = "string", age = "number" } })
+                return db
+            end)
+        end
+
+        -- Make all peers broadcast their presence
+        VerbosityScope(3, function()
+            for i = 1, numPeers do
+                PrivateScope(instances[i], function() LibP2PDB:BroadcastPresence(databases[i]) end)
+            end
+            TickPrivateInstances(instances)
+        end)
+
+        -- Make peer 1 change a key locally
+        PrivateScope(instances[1], function()
+            LibP2PDB:InsertKey(databases[1], "Users", 1, { name = "Bob", age = 25 })
+        end)
+
+        -- Make peer 1 send a key to all other peers
+        VerbosityScope(3, function()
+            PrivateScope(instances[1], function()
+                for i = 2, numPeers do
+                    LibP2PDB:SendKey(databases[1], "Users", 1, "Player" .. i)
+                end
+            end)
+            TickPrivateInstances(instances)
+        end)
+
+        -- Check that all other peers have received data, and nothing else
+        for i = 2, numPeers do
+            PrivateScope(instances[i], function()
+                local keys = LibP2PDB:ListKeys(databases[i], "Users")
+                Assert.AreEqual(#keys, 1)
+                Assert.AreEqual(LibP2PDB:GetKey(databases[i], "Users", 1), { name = "Bob", age = 25 })
+            end)
+        end
+
+        -- Imagine peer 1 is a hacker, and succesfully changes their local data
+        PrivateScope(instances[1], function()
+            local dbi = instances[1].databases[databases[1]]
+            local rows = dbi.tables["Users"].rows
+            local row = rows[1]
+            row.data = { name = "Hacker", age = 99 }
+            row.version.clock = row.version.clock + 1
+            dbi.clock = dbi.clock + 1
+        end)
+
+        -- Make peer 1 send the key to all other peers again
+        VerbosityScope(3, function()
+            PrivateScope(instances[1], function()
+                for i = 2, numPeers do
+                    LibP2PDB:SendKey(databases[1], "Users", 1, "Player" .. i)
+                end
+            end)
+            TickPrivateInstances(instances)
+        end)
+
+        -- Make sure all peers except the hacker peer have the same data, and hacker peer has different data
+        for i = 1, numPeers do
+            PrivateScope(instances[i], function()
+                if i == 1 then
+                    Assert.AreEqual(LibP2PDB:GetKey(databases[i], "Users", 1), { name = "Hacker", age = 99 })
+                else
+                    Assert.AreEqual(LibP2PDB:GetKey(databases[i], "Users", 1), { name = "Bob", age = 25 })
+                end
+            end)
+        end
+    end,
+
     BroadcastKey = function()
         local instances = {}
         local databases = {}
@@ -7758,6 +8050,74 @@ local NetworkTests = {
             Assert.Throws(function() LibP2PDB:BroadcastKey(db, "Users", false) end)
             Assert.Throws(function() LibP2PDB:BroadcastKey(db, "Users", {}) end)
         end)
+    end,
+
+    BroadcastKey_ImmutableTable = function()
+        local instances = {}
+        local databases = {}
+        for i = 1, numPeers do
+            instances[i] = NewPrivateInstance(i)
+            databases[i] = PrivateScope(instances[i], function()
+                local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+                LibP2PDB:NewTable(db, { name = "Users", keyType = "number", immutable = true, schema = { name = "string", age = "number" } })
+                return db
+            end)
+        end
+
+        -- Make all peers broadcast their presence
+        VerbosityScope(3, function()
+            for i = 1, numPeers do
+                PrivateScope(instances[i], function() LibP2PDB:BroadcastPresence(databases[i]) end)
+            end
+            TickPrivateInstances(instances)
+        end)
+
+        -- Make peer 1 broadcast a key to all other peers
+        VerbosityScope(3, function()
+            PrivateScope(instances[1], function()
+                LibP2PDB:InsertKey(databases[1], "Users", 1, { name = "Bob", age = 25 })
+                LibP2PDB:BroadcastKey(databases[1], "Users", 1)
+            end)
+            TickPrivateInstances(instances)
+        end)
+
+        -- Check that all other peers have received data, and nothing else
+        for i = 2, numPeers do
+            PrivateScope(instances[i], function()
+                local keys = LibP2PDB:ListKeys(databases[i], "Users")
+                Assert.AreEqual(#keys, 1)
+                Assert.AreEqual(LibP2PDB:GetKey(databases[i], "Users", 1), { name = "Bob", age = 25 })
+            end)
+        end
+
+        -- Imagine peer 1 is a hacker, and succesfully changes their local data
+        PrivateScope(instances[1], function()
+            local dbi = instances[1].databases[databases[1]]
+            local rows = dbi.tables["Users"].rows
+            local row = rows[1]
+            row.data = { name = "Hacker", age = 99 }
+            row.version.clock = row.version.clock + 1
+            dbi.clock = dbi.clock + 1
+        end)
+
+        -- Make peer 1 broadcast the key to all other peers again
+        VerbosityScope(3, function()
+            PrivateScope(instances[1], function()
+                LibP2PDB:BroadcastKey(databases[1], "Users", 1)
+            end)
+            TickPrivateInstances(instances)
+        end)
+
+        -- Make sure all peers except the hacker peer have the same data, and hacker peer has different data
+        for i = 1, numPeers do
+            PrivateScope(instances[i], function()
+                if i == 1 then
+                    Assert.AreEqual(LibP2PDB:GetKey(databases[i], "Users", 1), { name = "Hacker", age = 99 })
+                else
+                    Assert.AreEqual(LibP2PDB:GetKey(databases[i], "Users", 1), { name = "Bob", age = 25 })
+                end
+            end)
+        end
     end,
 
     Version = function()
