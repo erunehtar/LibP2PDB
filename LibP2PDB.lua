@@ -1065,7 +1065,7 @@ end
 --- @field keyType LibP2PDB.TableKeyType Data type of the primary key.
 --- @field sync boolean? Optional flag indicating if the table should be synchronized with peers (default: true).
 --- @field immutable boolean? Optional flag indicating if the table is immutable (no changes allowed after creation, default: false).
---- @field exclusive boolean? Optional flag indicating if rows can only be modified by the peer that created them (default: false). Blocks local writes and incoming merges from a different peer than the row's current author. Tombstoned rows release authorship, allowing any peer to re-create the key.
+--- @field exclusive boolean? Optional flag indicating if rows can only be modified by the peer that created them (default: false). Blocks local writes and incoming network merges from a different peer than the row's current author. Tombstoned rows release authorship, allowing any peer to re-create the key.
 --- @field schema LibP2PDB.TableSchema? Optional table schema defining field names and their allowed data types.
 --- @field onValidate LibP2PDB.TableOnValidateCallback? Optional callback function(key, data, context) for custom row validation. Must return true if valid, false otherwise. Data is a copy and has not yet been applied when this is called.
 --- @field onChange LibP2PDB.TableOnChangeCallback? Optional callback function(key, data) on row data changes. Data is nil for deletions. Data is a copy, and has already been applied when this is called.
@@ -2236,8 +2236,11 @@ function Private:MergeKey(dbi, dbClock, tableName, ti, key, rowData, rowVersion,
         return true -- existing row is newer, skip
     end
 
-    -- Block merge if the table is exclusive and the incoming row's author differs from the existing row's author
-    if ti.exclusive and existingRow and not existingRow.version.tombstone then
+    -- Block merge if the table is exclusive and the incoming row's author differs from the existing row's author.
+    -- Only enforced for network merges (message ~= nil). Local imports and migrations are trusted and bypass this
+    -- check so that save-variable restoration cannot be blocked by a race where gossip populated a conflicting
+    -- peer-owned row before ImportDatabase ran.
+    if message and ti.exclusive and existingRow and not existingRow.version.tombstone then
         local existingPeerID = existingRow.version.peerID == 0 and key or existingRow.version.peerID
         local incomingPeerID = rowVersion.peerID == 0 and key or rowVersion.peerID
         if existingPeerID ~= incomingPeerID then
@@ -3047,17 +3050,17 @@ function Private:Broadcast(dbi, data, channels, priority)
 end
 
 --- @class LibP2PDB.Packet Sent communication packet.
---- @field [1] integer Message type, defined in CommMessageType.
---- @field [2] integer Peer ID of the sender.
+--- @field [1] LibP2PDB.CommMessageType Message type, defined in CommMessageType.
+--- @field [2] LibP2PDB.PeerID Peer ID of the sender.
 --- @field [3] any Message data.
 
 --- @class LibP2PDB.Message Received communication message.
 --- @field type LibP2PDB.CommMessageType Received message type.
 --- @field peerID LibP2PDB.PeerID Sender peer ID.
 --- @field data any Message data.
---- @field dbi LibP2PDB.DBInstance Database instance the message is associated with.
 --- @field channel string The channel the message was received on.
 --- @field sender LibP2PDB.PeerName The sender name of the message.
+--- @field dbi LibP2PDB.DBInstance Database instance the message is associated with.
 
 --- Handler for received communication messages.
 --- @param prefix string The communication prefix.
@@ -3144,9 +3147,9 @@ function Private:OnCommReceived(prefix, encoded, channel, sender)
         type = obj[1],
         peerID = obj[2],
         data = obj[3],
-        dbi = dbi,
         channel = channel,
         sender = sender,
+        dbi = dbi,
     }
 
     -- Verify the sender and peer ID are consistent (basic spoofing protection)
@@ -6304,6 +6307,95 @@ local UnitTests = {
         Assert.IsNil(rows[6])
     end,
 
+    ImportDatabase_ExclusiveTable_GossipRaceBeforeImport = function()
+        local otherPeerID = 0xDEADBEEFCAFE -- a peer that is not us
+
+        -- Simulate the saved state: we own key 1 with clock 5 (saved before logout)
+        --- @type LibP2PDB.DBState
+        local savedState = {
+            [1] = 1, -- DBVersion
+            [2] = 5, -- DBClock
+            [3] = {
+                ["Users"] = {
+                    [1] = {
+                        [1] = { 25, "Bob" }, -- age, name (schema order)
+                        [2] = 5,             -- Version clock (newer than gossip row)
+                        [3] = priv.peerID,   -- We are the author
+                    },
+                },
+            },
+        }
+
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        LibP2PDB:NewTable(db, { name = "Users", keyType = "number", exclusive = true, schema = { name = "string", age = "number" } })
+
+        local dbi = priv.databases[db]
+        local ti = dbi.tables["Users"]
+
+        -- Simulate gossip arriving BEFORE import: peer B owns key 1 with an older clock
+        priv:MergeKey(dbi, 2, "Users", ti, 1,
+            { name = "Impostor", age = 99 },
+            { clock = 2, peerID = otherPeerID },
+            { peerID = otherPeerID, sender = "SomePeer", channel = "GUILD" } -- message != nil = network
+        )
+        Assert.AreEqual(ti.rows[1].version.peerID, otherPeerID)
+
+        -- Now import our saved state (our clock 5 is newer, should win despite exclusive)
+        local success = LibP2PDB:ImportDatabase(db, savedState)
+        Assert.IsTrue(success)
+
+        -- Our saved version must have won
+        local row = ti.rows[1]
+        Assert.IsNonEmptyTable(row)
+        Assert.AreEqual(row.data.name, "Bob")
+        Assert.AreEqual(row.data.age, 25)
+        Assert.AreEqual(row.version.clock, 5)
+        Assert.AreEqual(row.version.peerID, priv.peerID)
+    end,
+
+    ImportDatabase_ExclusiveTable_GossipNewerThanSaved = function()
+        local otherPeerID = 0xDEADBEEFCAFE
+
+        --- @type LibP2PDB.DBState
+        local savedState = {
+            [1] = 1,
+            [2] = 2,
+            [3] = {
+                ["Users"] = {
+                    [1] = {
+                        [1] = { 25, "Bob" },
+                        [2] = 2, -- clock 2, older than gossip row below
+                        [3] = priv.peerID,
+                    },
+                },
+            },
+        }
+
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        LibP2PDB:NewTable(db, { name = "Users", keyType = "number", exclusive = true, schema = { name = "string", age = "number" } })
+
+        local dbi = priv.databases[db]
+        local ti = dbi.tables["Users"]
+
+        -- Gossip brings in a newer row from another peer (clock 5 > saved clock 2)
+        priv:MergeKey(dbi, 5, "Users", ti, 1,
+            { name = "Newcomer", age = 42 },
+            { clock = 5, peerID = otherPeerID },
+            { peerID = otherPeerID, sender = "SomePeer", channel = "GUILD" }
+        )
+        Assert.AreEqual(ti.rows[1].version.peerID, otherPeerID)
+
+        -- Import should succeed (our saved version is older and gets skipped by CompareVersion)
+        local success = LibP2PDB:ImportDatabase(db, savedState)
+        Assert.IsTrue(success)
+
+        -- The gossip version must remain (it was newer)
+        local row = ti.rows[1]
+        Assert.IsNonEmptyTable(row)
+        Assert.AreEqual(row.data.name, "Newcomer")
+        Assert.AreEqual(row.version.peerID, otherPeerID)
+    end,
+
     Migration = function()
         local state = nil
         do
@@ -8560,8 +8652,14 @@ local NetworkTests = {
         VerbosityScope(3, function()
             PrivateScope(instances[1], function()
                 for j = 1, numPeers do
-                    LibP2PDB:UpdateKey(databases[1], "Users", j, function(data) data.time = data.time + 1 return data end)
-                    LibP2PDB:UpdateKey(databases[1], "Users", j, function(data) data.time = data.time - 1 return data end)
+                    LibP2PDB:UpdateKey(databases[1], "Users", j, function(data)
+                        data.time = data.time + 1
+                        return data
+                    end)
+                    LibP2PDB:UpdateKey(databases[1], "Users", j, function(data)
+                        data.time = data.time - 1
+                        return data
+                    end)
                 end
             end)
             TickPrivateInstances(instances)
@@ -8634,7 +8732,7 @@ local NetworkTests = {
                     Assert.IsNonEmptyString(peerInfo.name)
                     Assert.IsNumber(peerInfo.lastSeen)
                     peerCount = peerCount + 1
-                end 
+                end
                 Assert.AreEqual(peerCount, numPeers, "Peer list should contain all peers")
             end)
         end
