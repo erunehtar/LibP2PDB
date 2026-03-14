@@ -3558,50 +3558,43 @@ end
 --- @param sender LibP2PDB.PeerName Target peer name.
 --- @param tableStateMap LibP2PDB.TableStateMap Complete table state map to send in chunks.
 function Private:SendChunkedRowsResponse(dbi, chunkSize, sender, tableStateMap)
-    local chunkTableStateMap = {} --- @type LibP2PDB.TableStateMap
+    local chunkRowStateMap = {} --- @type LibP2PDB.RowStateMap
     local chunkRowCount = 0
+    local currentTableName = nil --- @type LibP2PDB.TableName?
 
-    -- Iterate through all tables and rows
+    local function flushChunk()
+        if IsNonEmptyTable(chunkRowStateMap) then
+            local chunkTableStateMap = { [currentTableName] = chunkRowStateMap } --- @type LibP2PDB.TableStateMap
+            local obj = { --- @type LibP2PDB.Packet
+                CommMessageType.RowsResponse,
+                self.peerID,
+                { dbi.version, dbi.clock, chunkTableStateMap }, --- @type LibP2PDB.DBState
+            }
+            self:Send(dbi, obj, "WHISPER", sender, CommPriority.Normal)
+            chunkRowStateMap = {}
+            chunkRowCount = 0
+        end
+    end
+
+    -- Iterate through all tables and rows; each chunk contains rows from a single table only
     for tableName, rowStateMap in pairs(tableStateMap) do
-        local chunkRowStateMap = {} --- @type LibP2PDB.RowStateMap
+        -- Flush any pending rows from the previous table before starting a new one
+        flushChunk()
+        currentTableName = tableName
 
         for key, rowState in pairs(rowStateMap) do
-            -- Add row to current chunk
             chunkRowStateMap[key] = rowState
             chunkRowCount = chunkRowCount + 1
 
-            -- Send chunk when it reaches the limit
+            -- Send chunk when it reaches the row limit
             if chunkRowCount >= chunkSize then
-                chunkTableStateMap[tableName] = chunkRowStateMap
-                local obj = { --- @type LibP2PDB.Packet
-                    CommMessageType.RowsResponse,
-                    self.peerID,
-                    { dbi.version, dbi.clock, chunkTableStateMap }, --- @type LibP2PDB.DBState
-                }
-                self:Send(dbi, obj, "WHISPER", sender, CommPriority.Normal)
-
-                -- Reset for next chunk
-                chunkTableStateMap = {}
-                chunkRowStateMap = {}
-                chunkRowCount = 0
+                flushChunk()
             end
-        end
-
-        -- Add remaining rows from this table to chunk
-        if IsNonEmptyTable(chunkRowStateMap) then
-            chunkTableStateMap[tableName] = chunkRowStateMap
         end
     end
 
     -- Send final partial chunk if any rows remain
-    if IsNonEmptyTable(chunkTableStateMap) then
-        local obj = { --- @type LibP2PDB.Packet
-            CommMessageType.RowsResponse,
-            self.peerID,
-            { dbi.version, dbi.clock, chunkTableStateMap }, --- @type LibP2PDB.DBState
-        }
-        self:Send(dbi, obj, "WHISPER", sender, CommPriority.Normal)
-    end
+    flushChunk()
 end
 
 --- Send rows request in chunks to avoid transmission timeouts.
@@ -3610,50 +3603,43 @@ end
 --- @param sender LibP2PDB.PeerName Target peer name.
 --- @param databaseRequest LibP2PDB.DBRequest Complete database request to send in chunks.
 function Private:SendChunkedRowsRequest(dbi, chunkSize, sender, databaseRequest)
-    local chunkDatabaseRequest = {} --- @type LibP2PDB.DBRequest
+    local chunkTableRequest = {} --- @type LibP2PDB.TableRequest
     local chunkRowCount = 0
+    local currentTableName = nil --- @type LibP2PDB.TableName?
 
-    -- Iterate through all tables and keys
+    local function flushChunk()
+        if IsNonEmptyTable(chunkTableRequest) then
+            local chunkDatabaseRequest = { [currentTableName] = chunkTableRequest } --- @type LibP2PDB.DBRequest
+            local obj = { --- @type LibP2PDB.Packet
+                CommMessageType.RowsRequest,
+                self.peerID,
+                chunkDatabaseRequest,
+            }
+            self:Send(dbi, obj, "WHISPER", sender, CommPriority.Normal)
+            chunkTableRequest = {}
+            chunkRowCount = 0
+        end
+    end
+
+    -- Iterate through all tables and keys; each chunk contains keys from a single table only
     for tableName, tableRequest in pairs(databaseRequest) do
-        local chunkTableRequest = {} --- @type LibP2PDB.TableRequest
+        -- Flush any pending keys from the previous table before starting a new one
+        flushChunk()
+        currentTableName = tableName
 
         for key, clock in pairs(tableRequest) do
-            -- Add key to current chunk
             chunkTableRequest[key] = clock
             chunkRowCount = chunkRowCount + 1
 
-            -- Send chunk when it reaches the limit
+            -- Send chunk when it reaches the row limit
             if chunkRowCount >= chunkSize then
-                chunkDatabaseRequest[tableName] = chunkTableRequest
-                local obj = { --- @type LibP2PDB.Packet
-                    CommMessageType.RowsRequest,
-                    self.peerID,
-                    chunkDatabaseRequest, --- @type LibP2PDB.DBRequest
-                }
-                self:Send(dbi, obj, "WHISPER", sender, CommPriority.Normal)
-
-                -- Reset for next chunk
-                chunkDatabaseRequest = {}
-                chunkTableRequest = {}
-                chunkRowCount = 0
+                flushChunk()
             end
-        end
-
-        -- Add remaining keys from this table to chunk
-        if IsNonEmptyTable(chunkTableRequest) then
-            chunkDatabaseRequest[tableName] = chunkTableRequest
         end
     end
 
     -- Send final partial chunk if any keys remain
-    if IsNonEmptyTable(chunkDatabaseRequest) then
-        local obj = { --- @type LibP2PDB.Packet
-            CommMessageType.RowsRequest,
-            self.peerID,
-            chunkDatabaseRequest, --- @type LibP2PDB.DBRequest
-        }
-        self:Send(dbi, obj, "WHISPER", sender, CommPriority.Normal)
-    end
+    flushChunk()
 end
 
 --- Compute an FNV1a32 hash of the summary buckets for a table, to use as a fingerprint for quick comparison between peers.
