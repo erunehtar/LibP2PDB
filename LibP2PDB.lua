@@ -2263,7 +2263,8 @@ function Private:MergeKey(dbi, dbClock, tableName, ti, key, rowData, rowVersion,
     end
 
     -- Block modification if the table is immutable and the row already exists and is not a tombstone.
-    if changes and ti.immutable and (rowData == nil or (existingRow and not existingRow.version.tombstone)) then
+    -- Only enforced for network merges. Local imports and migrations are trusted and bypass this.
+    if message and changes and ti.immutable and (rowData == nil or (existingRow and not existingRow.version.tombstone)) then
         ReportError(dbi, "cannot merge key '%s' in immutable table '%s'", key, tableName)
         return false
     end
@@ -6609,6 +6610,113 @@ local UnitTests = {
         end)
         Assert.AreEqual(ti.rows[victimPeerID].data.name, "RealOwner")
         Assert.AreEqual(ti.rows[victimPeerID].version.peerID, victimPeerID)
+    end,
+
+    ImportDatabase_ImmutableTable_TombstoneRejected = function()
+        -- Verifies that importing a tombstone row via ImportDatabase into an immutable table is rejected,
+        -- even though ImportDatabase uses message=nil (trusted path). The immutable check in MergeKey
+        -- is unconditional (unlike exclusive, which is gated on message ~= nil).
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        LibP2PDB:NewTable(db, { name = "Users", keyType = "number", immutable = true, schema = { name = "string", age = "number" } })
+
+        -- Write a live row first
+        Assert.IsTrue(LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }))
+
+        local dbi = priv.databases[db]
+        local ti = dbi.tables["Users"]
+        local clockBefore = dbi.clock
+
+        -- Build a state containing a tombstone for key 1 (newer clock to ensure CompareVersion doesn't skip it)
+        --- @type LibP2PDB.DBState
+        local stateWithTombstone = {
+            [1] = 1,
+            [2] = clockBefore + 1,
+            [3] = {
+                ["Users"] = {
+                    [1] = {
+                        [1] = NIL_MARKER,        -- tombstone marker
+                        [2] = clockBefore + 1,   -- newer clock
+                        [3] = priv.peerID,       -- authored by us
+                        [4] = true,              -- tombstone flag
+                    },
+                },
+            },
+        }
+
+        -- Local import is trusted and bypasses the immutable guard; tombstone must be applied
+        LibP2PDB:ImportDatabase(db, stateWithTombstone)
+
+        local row = ti.rows[1]
+        Assert.IsNonEmptyTable(row)
+        Assert.IsNil(row.data)
+        Assert.IsTrue(row.version.tombstone)
+    end,
+
+    ImportDatabase_ImmutableTable_ConflictingLiveRowRejected = function()
+        -- Verifies that importing a live row into an immutable table via ImportDatabase is rejected
+        -- when a live row for that key already exists, even on the trusted (message=nil) import path.
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        LibP2PDB:NewTable(db, { name = "Users", keyType = "number", immutable = true, schema = { name = "string", age = "number" } })
+
+        -- Write the original row
+        Assert.IsTrue(LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }))
+
+        local dbi = priv.databases[db]
+        local ti = dbi.tables["Users"]
+        local clockBefore = dbi.clock
+
+        -- Build a state containing a newer live row for key 1 (attempting to overwrite)
+        --- @type LibP2PDB.DBState
+        local stateWithConflict = {
+            [1] = 1,
+            [2] = clockBefore + 1,
+            [3] = {
+                ["Users"] = {
+                    [1] = {
+                        [1] = { 30, "Alice" },   -- age, name (schema order)
+                        [2] = clockBefore + 1,   -- newer clock
+                        [3] = priv.peerID,       -- authored by us
+                    },
+                },
+            },
+        }
+
+        -- Local import is trusted and bypasses the immutable guard; newer row must win
+        LibP2PDB:ImportDatabase(db, stateWithConflict)
+
+        local row = ti.rows[1]
+        Assert.IsNonEmptyTable(row)
+        Assert.AreEqual(row.data, { name = "Alice", age = 30 })
+        Assert.AreEqual(row.version.clock, clockBefore + 1)
+    end,
+
+    MergeKey_ImmutableTable_ClockOnlyUpdateAllowed = function()
+        -- Verifies that when incoming data is identical to the existing row but carries a higher Lamport
+        -- clock (changes == false), the immutable guard is skipped and MergeKey updates the version
+        -- metadata only. This is correct Lamport clock synchronization behavior: the row data did not
+        -- change, so immutability is not violated.
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        LibP2PDB:NewTable(db, { name = "Users", keyType = "number", immutable = true, schema = { name = "string", age = "number" } })
+        local dbi = priv.databases[db]
+        local ti = dbi.tables["Users"]
+
+        -- Write the initial row (clock=1)
+        Assert.IsTrue(LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }))
+        Assert.AreEqual(ti.rows[1].version.clock, 1)
+        local originalData = { name = "Bob", age = 25 }
+
+        -- Merge the same data with a higher clock (simulates re-delivery with updated clock)
+        priv:MergeKey(dbi, 5, "Users", ti, 1,
+            { name = "Bob", age = 25 }, -- identical data
+            { clock = 5, peerID = priv.peerID },
+            nil -- trusted import path
+        )
+
+        -- Version metadata must be updated (clock advanced), but data must be unchanged
+        local row = ti.rows[1]
+        Assert.AreEqual(row.version.clock, 5)
+        Assert.AreEqual(row.data, originalData)
+        Assert.IsNil(row.version.tombstone)
     end,
 
     Migration = function()
