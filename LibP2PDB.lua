@@ -94,6 +94,7 @@ local UINT32_MODULO = 2 ^ 32  --- @type integer Modulo for keeping integers with
 local MIN_BUCKET_COUNT = 32   --- @type integer Minimum number of buckets for summary filters.
 local KEYS_PER_BUCKET = 32    --- @type integer Default bucket size for summary filters.
 local ROWS_PER_CHUNK = 128    --- @type integer Number of rows per chunk for chunked transmission.
+local MSG_CACHE_EXPIRY = 1.0  --- @type number Message cache expiry in seconds for suppressing duplicate cross-channel broadcasts.
 
 --- @enum LibP2PDB.Color Color codes for console output.
 local Color = {
@@ -845,7 +846,7 @@ function LibP2PDB:NewDatabase(desc)
         -- Networking
         peers = {},
         peersSorted = {},
-        buckets = {},
+        msgCache = {},
         -- Data
         tables = {},
         -- Callbacks
@@ -2075,7 +2076,7 @@ end
 --- @field peers table<LibP2PDB.PeerID, LibP2PDB.PeerInfo> Known peers for this session.
 --- @field peersSorted LibP2PDB.PeerID[] Sorted array of peer IDs for efficient neighbors lookup.
 --- @field peerTimeout number Timeout in seconds for considering a peer inactive.
---- @field buckets table Communication event buckets for burst control.
+--- @field msgCache table<string, table> Content-keyed message table mapping encoded wire strings to timer handles to suppress duplicate cross-channel broadcasts.
 --- @field tables table<LibP2PDB.TableName, LibP2PDB.TableInstance> Defined tables in the database.
 --- @field onError LibP2PDB.DBOnErrorCallback? Callback for error events.
 --- @field onMigrateDB LibP2PDB.DBOnMigrateDBCallback? Callback for database migrations.
@@ -2137,18 +2138,19 @@ end
 function Private:SetKey(dbi, tableName, ti, key, rowData)
     local existingRow = ti.rows[key]
 
-    -- Block modification if the table is exclusive and the row belongs to another peer
+    -- Block modification if the table is exclusive and the row belongs to another peer.
+    -- Exception: if the local peer is the key (peerID-keyed table), always allow reclaiming the row.
     if ti.exclusive and existingRow and not existingRow.version.tombstone then
         local existingPeerID = existingRow.version.peerID == 0 and key or existingRow.version.peerID
-        if existingPeerID ~= priv.peerID then
-            ReportError(dbi, "cannot modify key '%s' in table '%s' because it belongs to another peer", key, tableName)
+        if existingPeerID ~= priv.peerID and key ~= priv.peerID then
+            ReportError(dbi, "cannot set key '%s' in exclusive table '%s'", key, tableName)
             return false
         end
     end
 
-    -- Block modification if the table is immutable and the row already exists and is not a tombstone
+    -- Block modification if the table is immutable and the row already exists and is not a tombstone.
     if ti.immutable and existingRow and not existingRow.version.tombstone then
-        ReportError(dbi, "cannot modify key '%s' in immutable table '%s'", key, tableName)
+        ReportError(dbi, "cannot set key '%s' in immutable table '%s'", key, tableName)
         return false
     end
 
@@ -2236,15 +2238,14 @@ function Private:MergeKey(dbi, dbClock, tableName, ti, key, rowData, rowVersion,
         return true -- existing row is newer, skip
     end
 
-    -- Block merge if the table is exclusive and the incoming row's author differs from the existing row's author.
-    -- Only enforced for network merges (message ~= nil). Local imports and migrations are trusted and bypass this
-    -- check so that save-variable restoration cannot be blocked by a race where gossip populated a conflicting
-    -- peer-owned row before ImportDatabase ran.
+    -- Block modification if the table is exclusive and the row belongs to another peer.
+    -- Only enforced for network merges. Local imports and migrations are trusted and bypass this.
+    -- Exception: if the incoming peer is the key (peerID-keyed table), always allow reclaiming the row.
     if message and ti.exclusive and existingRow and not existingRow.version.tombstone then
         local existingPeerID = existingRow.version.peerID == 0 and key or existingRow.version.peerID
         local incomingPeerID = rowVersion.peerID == 0 and key or rowVersion.peerID
-        if existingPeerID ~= incomingPeerID then
-            ReportError(dbi, "cannot merge key '%s' in table '%s' because it belongs to another peer", key, tableName)
+        if existingPeerID ~= incomingPeerID and incomingPeerID ~= key then
+            ReportError(dbi, "cannot merge key '%s' in exclusive table '%s'", key, tableName)
             return false
         end
     end
@@ -2261,9 +2262,9 @@ function Private:MergeKey(dbi, dbClock, tableName, ti, key, rowData, rowVersion,
         end
     end
 
-    -- Block changes if the table is immutable: reject tombstones entirely, and reject overwrites of live rows
+    -- Block modification if the table is immutable and the row already exists and is not a tombstone.
     if changes and ti.immutable and (rowData == nil or (existingRow and not existingRow.version.tombstone)) then
-        ReportError(dbi, "cannot modify key '%s' in immutable table '%s'", key, tableName)
+        ReportError(dbi, "cannot merge key '%s' in immutable table '%s'", key, tableName)
         return false
     end
 
@@ -3049,6 +3050,49 @@ function Private:Broadcast(dbi, data, channels, priority)
     -- end
 end
 
+--- Verify that the sender name matches the claimed peer ID.
+--- Returns true if verified, false if a definitive mismatch was detected (spoofed peer ID),
+--- or nil if the check was inconclusive due to a WoW client-cache miss for an unknown peer.
+--- A nil result means the message should be deferred and re-verified after a short delay.
+--- @param message LibP2PDB.Message The received message to verify.
+--- @return boolean? result true if verified, false if spoofing detected, nil if cache miss for unknown peer.
+function Private:VerifySenderPeerID(message)
+    local dbi = message.dbi
+    local sender = message.sender
+    local peerID = message.peerID
+
+    -- Convert the claimed peerID back to a player GUID
+    local success, playerGUID = SafeCall(dbi, PeerIDToPlayerGUID, peerID)
+    if not success or not playerGUID then
+        ReportError(dbi, "received message from %s with invalid peer ID %X that cannot be mapped to a player GUID on channel '%s'", sender, peerID, message.channel)
+        return false
+    end
+
+    -- Try to resolve the player name from the WoW client cache
+    local name = select(6, GetPlayerInfoByGUID(playerGUID))
+    if name and name ~= "" then
+        -- Cache hit: definitive match or mismatch
+        if name ~= sender then
+            Error("received message from %s with mismatched sender name %s peer ID %X on channel '%s'", sender, name, peerID, message.channel)
+            return false
+        end
+        return true
+    end
+
+    -- Cache miss: fall back to our own verified peer registry
+    local knownPeer = dbi.peers[peerID]
+    if knownPeer then
+        if knownPeer.name ~= sender then
+            Error("received message from %s claiming peer ID %X already known as %s on channel '%s'", sender, peerID, knownPeer.name, message.channel)
+            return false
+        end
+        return true
+    end
+
+    -- Cache miss, unknown peer: cannot verify yet — caller should defer
+    return nil
+end
+
 --- @class LibP2PDB.Packet Sent communication packet.
 --- @field [1] LibP2PDB.CommMessageType Message type, defined in CommMessageType.
 --- @field [2] LibP2PDB.PeerID Peer ID of the sender.
@@ -3083,6 +3127,11 @@ function Private:OnCommReceived(prefix, encoded, channel, sender)
     local dbi = self.databases[db]
     if not dbi then
         Warn("received message from %s for unregistered database prefix '%s' channel '%s'", sender, prefix, channel)
+        return
+    end
+
+    -- If this message is already being processed or was recently processed, skip it to prevent duplicate processing.
+    if dbi.msgCache[encoded] then
         return
     end
 
@@ -3152,46 +3201,39 @@ function Private:OnCommReceived(prefix, encoded, channel, sender)
         dbi = dbi,
     }
 
-    -- Verify the sender and peer ID are consistent (basic spoofing protection)
-    local success, playerGUID = SafeCall(dbi, PeerIDToPlayerGUID, message.peerID)
-    if success and playerGUID then
-        local name = select(6, GetPlayerInfoByGUID(playerGUID))
-        if name ~= sender then
-            Error("received message from %s with mismatched sender name %s peer ID %X on channel '%s'", sender, name, message.peerID, channel)
-            return
-        end
-    else
-        ReportError(dbi, "received message from %s with invalid peer ID %X that cannot be mapped to a player GUID on channel '%s'", sender, message.peerID, channel)
+    -- Verify that the sender name matches the claimed peer ID.
+    local verifyResult = self:VerifySenderPeerID(message)
+    if verifyResult == true then
+        -- Verified, process immediately
+        self:ProcessMessage(message, encoded)
+    elseif verifyResult == false then
+        -- Definitive mismatch, reject immediately
         return
+    elseif verifyResult == nil then
+        -- Cache miss, defer re-verification after 1s.
+        dbi.msgCache[encoded] = C_Timer.NewTimer(1, function()
+            -- Hard re-verification gate: only true (not nil) allows dispatch.
+            -- This catches deferred cache-miss cases and defends in depth against spoofing.
+            -- If the WoW client cache is still empty after 1s, the message is dropped.
+            if self:VerifySenderPeerID(message) ~= true then
+                Warn("dropping message from %s peer ID %X on channel '%s': could not verify sender after delay", sender, message.peerID, channel)
+                dbi.msgCache[encoded] = nil
+                return
+            end
+            self:ProcessMessage(message, encoded)
+        end)
     end
+end
 
-    -- Get or create bucket
-    local bucket = dbi.buckets[message.type]
-    if not bucket then
-        bucket = {}
-        dbi.buckets[message.type] = bucket
-    end
-
-    -- If we already have a timer running for this peer, ignore it
-    if bucket[message.peerID] then
-        return
-    end
-
-    -- Create a timer to process this message after 400 milliseconds
-    bucket[message.peerID] = C_Timer.NewTimer(0.4, function()
-        -- Update peer information
-        self:UpdatePeer(message)
-
-        -- Process the message
-        self:DispatchMessage(message)
-
-        -- Clean up
-        bucket[message.peerID] = nil
-
-        -- Clean up bucket if empty
-        if not next(bucket) then
-            dbi.buckets[message.type] = nil
-        end
+--- Process a peer-verified message.
+--- @param message LibP2PDB.Message The peer-verified message to process.
+--- @param encoded string The encoded wire string used as the message cache key.
+function Private:ProcessMessage(message, encoded)
+    local dbi = message.dbi
+    self:UpdatePeer(message)
+    self:DispatchMessage(message)
+    dbi.msgCache[encoded] = C_Timer.NewTimer(MSG_CACHE_EXPIRY, function()
+        dbi.msgCache[encoded] = nil
     end)
 end
 
@@ -3926,7 +3968,7 @@ local UnitTests = {
             Assert.IsInterface(dbi.encoder, { "EncodeForChannel", "DecodeFromChannel", "EncodeForPrint", "DecodeFromPrint" })
             Assert.IsNonEmptyTable(dbi.peers)
             Assert.IsNonEmptyTable(dbi.peersSorted)
-            Assert.IsEmptyTable(dbi.buckets)
+            Assert.IsEmptyTable(dbi.msgCache)
             Assert.IsEmptyTable(dbi.tables)
             Assert.IsNil(dbi.onError)
             Assert.IsNil(dbi.onMigrateDB)
@@ -3998,7 +4040,7 @@ local UnitTests = {
             Assert.IsInterface(dbi.encoder, { "EncodeForChannel", "DecodeFromChannel", "EncodeForPrint", "DecodeFromPrint" })
             Assert.IsNonEmptyTable(dbi.peers)
             Assert.IsNonEmptyTable(dbi.peersSorted)
-            Assert.IsEmptyTable(dbi.buckets)
+            Assert.IsEmptyTable(dbi.msgCache)
             Assert.IsEmptyTable(dbi.tables)
             Assert.IsFunction(dbi.onError)
             Assert.IsFunction(dbi.onChange)
@@ -4540,8 +4582,10 @@ local UnitTests = {
     InsertKey_ImmutableTable = function()
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
         LibP2PDB:NewTable(db, { name = "Users", keyType = "number", immutable = true, schema = { name = "string", age = "number" } })
+        -- Inserting a new key works as expected
         Assert.AreEqual(LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }), true)
         Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
+        -- Inserting the same key again throws an error and does not update the existing key
         Assert.Throws(function() LibP2PDB:InsertKey(db, "Users", 1, { name = "Alice", age = 30 }) end)
         Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
     end,
@@ -4549,15 +4593,16 @@ local UnitTests = {
     InsertKey_ExclusiveTable = function()
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
         LibP2PDB:NewTable(db, { name = "Users", keyType = "number", exclusive = true, schema = { name = "string", age = "number" } })
-        -- Inserting a new key succeeds (local peer becomes the author)
+        -- Inserting a new key works as expected
         Assert.AreEqual(LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }), true)
         Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
-        -- Re-inserting an existing live key always throws, regardless of exclusive
+        -- Inserting the same key again throws an error and does not update the existing key
         Assert.Throws(function() LibP2PDB:InsertKey(db, "Users", 1, { name = "Alice", age = 30 }) end)
         Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
-        -- After deletion, any peer may re-insert (tombstone releases authorship)
+        -- Deleting the key allows it to be inserted again
         Assert.AreEqual(LibP2PDB:DeleteKey(db, "Users", 1), true)
         Assert.IsNil(LibP2PDB:GetKey(db, "Users", 1))
+        -- Inserting the same key again works as expected
         Assert.AreEqual(LibP2PDB:InsertKey(db, "Users", 1, { name = "Alice", age = 30 }), true)
         Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Alice", age = 30 })
     end,
@@ -4787,9 +4832,13 @@ local UnitTests = {
     SetKey_ImmutableTable = function()
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
         LibP2PDB:NewTable(db, { name = "Users", keyType = "number", immutable = true, schema = { name = "string", age = "number" } })
+        -- Setting a new key succeeds (local peer becomes the author)
         Assert.AreEqual(LibP2PDB:SetKey(db, "Users", 1, { name = "Bob", age = 25 }), true)
         Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
-        Assert.AreEqual(LibP2PDB:SetKey(db, "Users", 1, { name = "Alice", age = 30 }), false)
+        -- Overwriting the same key is rejected since the table is immutable
+        Assert.ExpectErrors(function()
+            Assert.AreEqual(LibP2PDB:SetKey(db, "Users", 1, { name = "Alice", age = 30 }), false)
+        end)
         Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
     end,
 
@@ -4804,10 +4853,50 @@ local UnitTests = {
         Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Alice", age = 30 })
         -- Simulate the row being authored by a different peer
         local dbi = priv.databases[db]
-        dbi.tables["Users"].rows[1].version.peerID = 0x1234567890AB
+        dbi.tables["Users"].rows[1].version.peerID = 0x123456789ABC
         -- Overwriting another peer's row is rejected
-        Assert.AreEqual(LibP2PDB:SetKey(db, "Users", 1, { name = "Eve", age = 99 }), false)
+        Assert.ExpectErrors(function()
+            Assert.AreEqual(LibP2PDB:SetKey(db, "Users", 1, { name = "Eve", age = 99 }), false)
+        end)
         Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Alice", age = 30 })
+    end,
+
+    SetKey_ExclusiveTable_OwnerReclaims = function()
+        -- Verifies that when key == local peerID, SetKey succeeds even when a forger previously
+        -- wrote that key under a different author (forgery recovery for peerID-keyed tables).
+        local forgerPeerID = 0x123456789ABC
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        LibP2PDB:NewTable(db, { name = "Players", keyType = "number", exclusive = true, schema = { name = "string", age = "number" } })
+        local dbi = priv.databases[db]
+        local ti = dbi.tables["Players"]
+
+        -- Forger plants a row at key = our peerID via trusted import (nil message bypasses exclusive on first insert)
+        priv:MergeKey(dbi, 1, "Players", ti, priv.peerID,
+            { name = "Impostor", age = 99 },
+            { clock = 1, peerID = forgerPeerID },
+            nil
+        )
+        Assert.AreEqual(ti.rows[priv.peerID].version.peerID, forgerPeerID)
+        Assert.AreEqual(ti.rows[priv.peerID].data.name, "Impostor")
+
+        -- Real owner reclaims their own key: key == priv.peerID exception allows the write
+        Assert.AreEqual(LibP2PDB:SetKey(db, "Players", priv.peerID, { name = "RealOwner", age = 30 }), true)
+        Assert.AreEqual(ti.rows[priv.peerID].data.name, "RealOwner")
+
+        -- SetKey stores peerID = 0 when key == priv.peerID (compact encoding); the exclusive check
+        -- expands it back via (peerID == 0 and key or peerID), so 0 means "local peer owns this row".
+        Assert.AreEqual(ti.rows[priv.peerID].version.peerID, 0)
+
+        -- Verify non-peerID keys are still blocked by exclusive as normal (no regression)
+        priv:MergeKey(dbi, 2, "Players", ti, 42,
+            { name = "Bob", age = 25 },
+            { clock = 2, peerID = forgerPeerID },
+            nil
+        )
+        Assert.ExpectErrors(function()
+            Assert.AreEqual(LibP2PDB:SetKey(db, "Players", 42, { name = "Hijack", age = 1 }), false)
+        end)
+        Assert.AreEqual(ti.rows[42].data.name, "Bob")
     end,
 
     UpdateKey = function()
@@ -5063,9 +5152,13 @@ local UnitTests = {
     UpdateKey_ImmutableTable = function()
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
         LibP2PDB:NewTable(db, { name = "Users", keyType = "number", immutable = true, schema = { name = "string", age = "number" } })
+        -- Updating into a new key succeeds (local peer becomes the author)
         Assert.AreEqual(LibP2PDB:UpdateKey(db, "Users", 1, function() return { name = "Bob", age = 25 } end), true)
         Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
-        Assert.AreEqual(LibP2PDB:UpdateKey(db, "Users", 1, function() return { name = "Alice", age = 30 } end), false)
+        -- Updating the same key is rejected since the table is immutable
+        Assert.ExpectErrors(function()
+            Assert.AreEqual(LibP2PDB:UpdateKey(db, "Users", 1, function() return { name = "Alice", age = 30 } end), false)
+        end)
         Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
     end,
 
@@ -5080,10 +5173,50 @@ local UnitTests = {
         Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Alice", age = 30 })
         -- Simulate the row being authored by a different peer
         local dbi = priv.databases[db]
-        dbi.tables["Users"].rows[1].version.peerID = 0x1234567890AB
+        dbi.tables["Users"].rows[1].version.peerID = 0x123456789ABC
         -- Updating another peer's row is rejected
-        Assert.AreEqual(LibP2PDB:UpdateKey(db, "Users", 1, function() return { name = "Eve", age = 99 } end), false)
+        Assert.ExpectErrors(function()
+            Assert.AreEqual(LibP2PDB:UpdateKey(db, "Users", 1, function() return { name = "Eve", age = 99 } end), false)
+        end)
         Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Alice", age = 30 })
+    end,
+
+    UpdateKey_ExclusiveTable_OwnerReclaims = function()
+        -- Verifies that when key == local peerID, UpdateKey succeeds even when a forger previously
+        -- wrote that key under a different author (forgery recovery for peerID-keyed tables).
+        local forgerPeerID = 0x123456789ABC
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        LibP2PDB:NewTable(db, { name = "Players", keyType = "number", exclusive = true, schema = { name = "string", age = "number" } })
+        local dbi = priv.databases[db]
+        local ti = dbi.tables["Players"]
+
+        -- Forger plants a row at key = our peerID via trusted import (nil message bypasses exclusive on first insert)
+        priv:MergeKey(dbi, 1, "Players", ti, priv.peerID,
+            { name = "Impostor", age = 99 },
+            { clock = 1, peerID = forgerPeerID },
+            nil
+        )
+        Assert.AreEqual(ti.rows[priv.peerID].version.peerID, forgerPeerID)
+        Assert.AreEqual(ti.rows[priv.peerID].data.name, "Impostor")
+
+        -- Real owner reclaims their own key: key == priv.peerID exception allows the write
+        Assert.AreEqual(LibP2PDB:UpdateKey(db, "Players", priv.peerID, function() return { name = "RealOwner", age = 30 } end), true)
+        Assert.AreEqual(ti.rows[priv.peerID].data.name, "RealOwner")
+
+        -- UpdateKey stores peerID = 0 when key == priv.peerID (compact encoding); the exclusive check
+        -- expands it back via (peerID == 0 and key or peerID), so 0 means "local peer owns this row".
+        Assert.AreEqual(ti.rows[priv.peerID].version.peerID, 0)
+
+        -- Verify non-peerID keys are still blocked by exclusive as normal (no regression)
+        priv:MergeKey(dbi, 2, "Players", ti, 42,
+            { name = "Bob", age = 25 },
+            { clock = 2, peerID = forgerPeerID },
+            nil
+        )
+        Assert.ExpectErrors(function()
+            Assert.AreEqual(LibP2PDB:UpdateKey(db, "Players", 42, function() return { name = "Hijack", age = 1 } end), false)
+        end)
+        Assert.AreEqual(ti.rows[42].data.name, "Bob")
     end,
 
     DeleteKey = function()
@@ -5318,7 +5451,9 @@ local UnitTests = {
         local rows = dbi.tables["Users"].rows
         -- Deleting an existing live row is blocked and leaves the row intact
         Assert.AreEqual(LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }), true)
-        Assert.AreEqual(LibP2PDB:DeleteKey(db, "Users", 1), false)
+        Assert.ExpectErrors(function()
+            Assert.AreEqual(LibP2PDB:DeleteKey(db, "Users", 1), false)
+        end)
         Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
         Assert.IsNil(rows[1].version.tombstone)
         -- Deleting a non-existent key is a no-op (nothing to protect), must not create a tombstone row
@@ -5334,10 +5469,46 @@ local UnitTests = {
         Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
         -- Simulate the row being authored by a different peer
         local dbi = priv.databases[db]
-        dbi.tables["Users"].rows[1].version.peerID = 0x1234567890AB
+        dbi.tables["Users"].rows[1].version.peerID = 0x123456789ABC
         -- Deleting another peer's row is rejected
-        Assert.AreEqual(LibP2PDB:DeleteKey(db, "Users", 1), false)
+        Assert.ExpectErrors(function()
+            Assert.AreEqual(LibP2PDB:DeleteKey(db, "Users", 1), false)
+        end)
         Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
+    end,
+
+    DeleteKey_ExclusiveTable_OwnerReclaims = function()
+        -- Verifies that when key == local peerID, DeleteKey succeeds even when a forger previously
+        -- wrote that key under a different author (forgery recovery for peerID-keyed tables).
+        local forgerPeerID = 0x123456789ABC
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        LibP2PDB:NewTable(db, { name = "Players", keyType = "number", exclusive = true, schema = { name = "string", age = "number" } })
+        local dbi = priv.databases[db]
+        local ti = dbi.tables["Players"]
+
+        -- Forger plants a row at key = our peerID via trusted import (nil message bypasses exclusive on first insert)
+        priv:MergeKey(dbi, 1, "Players", ti, priv.peerID,
+            { name = "Impostor", age = 99 },
+            { clock = 1, peerID = forgerPeerID },
+            nil
+        )
+        Assert.AreEqual(ti.rows[priv.peerID].version.peerID, forgerPeerID)
+        Assert.AreEqual(ti.rows[priv.peerID].data.name, "Impostor")
+
+        -- Real owner reclaims their own key: key == priv.peerID exception allows the delete
+        Assert.AreEqual(LibP2PDB:DeleteKey(db, "Players", priv.peerID), true)
+        Assert.AreEqual(ti.rows[priv.peerID].version.tombstone, true)
+
+        -- Verify non-peerID keys are still blocked by exclusive as normal (no regression)
+        priv:MergeKey(dbi, 2, "Players", ti, 42,
+            { name = "Bob", age = 25 },
+            { clock = 2, peerID = forgerPeerID },
+            nil
+        )
+        Assert.ExpectErrors(function()
+            Assert.AreEqual(LibP2PDB:DeleteKey(db, "Players", 42), false)
+        end)
+        Assert.AreEqual(ti.rows[42].data.name, "Bob")
     end,
 
     HasKey = function()
@@ -6308,7 +6479,7 @@ local UnitTests = {
     end,
 
     ImportDatabase_ExclusiveTable_GossipRaceBeforeImport = function()
-        local otherPeerID = 0xDEADBEEFCAFE -- a peer that is not us
+        local otherPeerID = 0x123456789ABC -- a peer that is not us
 
         -- Simulate the saved state: we own key 1 with clock 5 (saved before logout)
         --- @type LibP2PDB.DBState
@@ -6354,7 +6525,7 @@ local UnitTests = {
     end,
 
     ImportDatabase_ExclusiveTable_GossipNewerThanSaved = function()
-        local otherPeerID = 0xDEADBEEFCAFE
+        local otherPeerID = 0x123456789ABC
 
         --- @type LibP2PDB.DBState
         local savedState = {
@@ -6394,6 +6565,50 @@ local UnitTests = {
         Assert.IsNonEmptyTable(row)
         Assert.AreEqual(row.data.name, "Newcomer")
         Assert.AreEqual(row.version.peerID, otherPeerID)
+    end,
+
+    MergeKey_ExclusiveTable_SelfAuthoredRowOverridesForger = function()
+        -- Verifies that a relayed row where rowVersion.peerID == key (self-authored, peerID-keyed table)
+        -- can overwrite a forged row written under a different author.
+        -- This ensures real owners can reclaim their key even when the row reaches peers via relay.
+        local victimPeerID = 0x000100000042
+        local forgerPeerID = 0x123456789ABC
+        local relayPeerID = 0xAAAABBBBCCCC -- third peer who relays the real owner's row
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        LibP2PDB:NewTable(db, { name = "Players", keyType = "number", exclusive = true, schema = { name = "string", age = "number" } })
+        local dbi = priv.databases[db]
+        local ti = dbi.tables["Players"]
+
+        -- Step 1: Forger writes key = victimPeerID, authored as themselves (clock=1).
+        -- First insert is always allowed (exclusive only guards existing rows).
+        priv:MergeKey(dbi, 1, "Players", ti, victimPeerID,
+            { name = "Impostor", age = 99 },
+            { clock = 1, peerID = forgerPeerID },
+            { peerID = forgerPeerID, sender = "Forger", channel = "GUILD" }
+        )
+        Assert.AreEqual(ti.rows[victimPeerID].version.peerID, forgerPeerID)
+        Assert.AreEqual(ti.rows[victimPeerID].data.name, "Impostor")
+
+        -- Step 2: Real owner's row propagates via relay (context.peerID = relayPeerID, not victimPeerID).
+        -- rowVersion.peerID = victimPeerID = key, so the self-authored exception fires and the merge succeeds.
+        priv:MergeKey(dbi, 2, "Players", ti, victimPeerID,
+            { name = "RealOwner", age = 30 },
+            { clock = 2, peerID = victimPeerID },
+            { peerID = relayPeerID, sender = "RelayPeer", channel = "GUILD" }
+        )
+        Assert.AreEqual(ti.rows[victimPeerID].data.name, "RealOwner")
+        Assert.AreEqual(ti.rows[victimPeerID].version.peerID, victimPeerID)
+
+        -- Step 3: Forger cannot overwrite the real owner's established row (exclusive blocks it).
+        Assert.ExpectErrors(function()
+            priv:MergeKey(dbi, 3, "Players", ti, victimPeerID,
+                { name = "HijackAttempt", age = 1 },
+                { clock = 3, peerID = forgerPeerID },
+                { peerID = forgerPeerID, sender = "Forger", channel = "GUILD" }
+            )
+        end)
+        Assert.AreEqual(ti.rows[victimPeerID].data.name, "RealOwner")
+        Assert.AreEqual(ti.rows[victimPeerID].version.peerID, victimPeerID)
     end,
 
     Migration = function()
@@ -7559,7 +7774,8 @@ local NetworkTests = {
 
         -- Imagine peer 1 is a hacker, and succesfully changes their local data
         PrivateScope(instances[1], function()
-            local dbi = instances[1].databases[databases[1]]
+            local db = databases[1]
+            local dbi = instances[1].databases[db]
             local rows = dbi.tables["Users"].rows
             local row = rows[1]
             row.data = { name = "Hacker", age = 99 }
@@ -7590,7 +7806,8 @@ local NetworkTests = {
 
         -- Imagine peer 1 injects a tombstone into their local state (bypassing the public API)
         PrivateScope(instances[1], function()
-            local dbi = instances[1].databases[databases[1]]
+            local db = databases[1]
+            local dbi = instances[1].databases[db]
             local rows = dbi.tables["Users"].rows
             rows[1].data = nil
             rows[1].version.tombstone = true
@@ -7612,7 +7829,8 @@ local NetworkTests = {
         for i = 2, numPeers do
             PrivateScope(instances[i], function()
                 Assert.AreEqual(LibP2PDB:GetKey(databases[i], "Users", 1), { name = "Bob", age = 25 })
-                local dbi = instances[i].databases[databases[i]]
+                local db = databases[i]
+                local dbi = instances[i].databases[db]
                 Assert.IsNil(dbi.tables["Users"].rows[1].version.tombstone)
             end)
         end
@@ -7662,7 +7880,8 @@ local NetworkTests = {
 
         -- Peer 2 is a hacker: changes the row data and claims to be the new author
         PrivateScope(instances[2], function()
-            local dbi = instances[2].databases[databases[2]]
+            local db = databases[2]
+            local dbi = instances[2].databases[db]
             local row = dbi.tables["Users"].rows[1]
             row.data = { name = "Hacker", age = 99 }
             row.version.clock = row.version.clock + 1
@@ -7917,7 +8136,8 @@ local NetworkTests = {
 
         -- Imagine peer 1 is a hacker, and succesfully changes their local data
         PrivateScope(instances[1], function()
-            local dbi = instances[1].databases[databases[1]]
+            local db = databases[1]
+            local dbi = instances[1].databases[db]
             local rows = dbi.tables["Users"].rows
             local row = rows[1]
             row.data = { name = "Hacker", age = 99 }
@@ -7926,7 +8146,7 @@ local NetworkTests = {
         end)
 
         -- Make all peers request the key from peer 1 again from player 1
-        VerbosityScope(3, function()
+        Assert.ExpectErrors(function()
             for r = 1, numRounds do
                 for i = 2, numPeers do
                     PrivateScope(instances[i], function() LibP2PDB:RequestKey(databases[i], "Users", 1, "Player1") end)
@@ -7991,7 +8211,8 @@ local NetworkTests = {
 
         -- Peer 2 is a hacker: changes the row data and claims to be the new author
         PrivateScope(instances[2], function()
-            local dbi = instances[2].databases[databases[2]]
+            local db = databases[2]
+            local dbi = instances[2].databases[db]
             local row = dbi.tables["Users"].rows[1]
             row.data = { name = "Hacker", age = 99 }
             row.version.clock = row.version.clock + 1
@@ -8000,7 +8221,7 @@ local NetworkTests = {
         end)
 
         -- Make all other peers request the key from peer 2 (the hacker)
-        VerbosityScope(3, function()
+        Assert.ExpectErrors(function()
             for r = 1, numRounds do
                 for i = 1, numPeers do
                     if i ~= 2 then
@@ -8229,7 +8450,8 @@ local NetworkTests = {
 
         -- Imagine peer 1 is a hacker, and succesfully changes their local data
         PrivateScope(instances[1], function()
-            local dbi = instances[1].databases[databases[1]]
+            local db = databases[1]
+            local dbi = instances[1].databases[db]
             local rows = dbi.tables["Users"].rows
             local row = rows[1]
             row.data = { name = "Hacker", age = 99 }
@@ -8238,7 +8460,7 @@ local NetworkTests = {
         end)
 
         -- Make peer 1 send the key to all other peers again
-        VerbosityScope(3, function()
+        Assert.ExpectErrors(function()
             PrivateScope(instances[1], function()
                 for i = 2, numPeers do
                     LibP2PDB:SendKey(databases[1], "Users", 1, "Player" .. i)
@@ -8299,7 +8521,8 @@ local NetworkTests = {
 
         -- Peer 2 is a hacker: changes the row data and claims to be the new author
         PrivateScope(instances[2], function()
-            local dbi = instances[2].databases[databases[2]]
+            local db = databases[2]
+            local dbi = instances[2].databases[db]
             local row = dbi.tables["Users"].rows[1]
             row.data = { name = "Hacker", age = 99 }
             row.version.clock = row.version.clock + 1
@@ -8308,7 +8531,7 @@ local NetworkTests = {
         end)
 
         -- Make peer 2 (hacker) send the hacked key to all other peers
-        VerbosityScope(3, function()
+        Assert.ExpectErrors(function()
             PrivateScope(instances[2], function()
                 for i = 1, numPeers do
                     if i ~= 2 then
@@ -8523,7 +8746,8 @@ local NetworkTests = {
 
         -- Imagine peer 1 is a hacker, and succesfully changes their local data
         PrivateScope(instances[1], function()
-            local dbi = instances[1].databases[databases[1]]
+            local db = databases[1]
+            local dbi = instances[1].databases[db]
             local rows = dbi.tables["Users"].rows
             local row = rows[1]
             row.data = { name = "Hacker", age = 99 }
@@ -8532,7 +8756,7 @@ local NetworkTests = {
         end)
 
         -- Make peer 1 broadcast the key to all other peers again
-        VerbosityScope(3, function()
+        Assert.ExpectErrors(function()
             PrivateScope(instances[1], function()
                 LibP2PDB:BroadcastKey(databases[1], "Users", 1)
             end)
@@ -8589,7 +8813,8 @@ local NetworkTests = {
 
         -- Peer 2 is a hacker: changes the row data and claims to be the new author
         PrivateScope(instances[2], function()
-            local dbi = instances[2].databases[databases[2]]
+            local db = databases[2]
+            local dbi = instances[2].databases[db]
             local row = dbi.tables["Users"].rows[1]
             row.data = { name = "Hacker", age = 99 }
             row.version.clock = row.version.clock + 1
@@ -8598,7 +8823,7 @@ local NetworkTests = {
         end)
 
         -- Make peer 2 (hacker) broadcast the hacked key to all peers
-        VerbosityScope(3, function()
+        Assert.ExpectErrors(function()
             PrivateScope(instances[2], function()
                 LibP2PDB:BroadcastKey(databases[2], "Users", 1)
             end)
@@ -8679,7 +8904,8 @@ local NetworkTests = {
         local versions = {}
         for i = 1, numPeers do
             PrivateScope(instances[i], function()
-                local dbi = priv.databases[databases[i]]
+                local db = databases[i]
+                local dbi = priv.databases[db]
                 local dbVersion = dbi.clock
                 Assert.IsNumber(dbVersion)
                 versions[i] = { dbVersion = dbVersion, keyVersions = {} }
