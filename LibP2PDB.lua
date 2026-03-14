@@ -88,13 +88,15 @@ end
 -- Constants
 ------------------------------------------------------------------------------------------------------------------------
 
-local NIL_MARKER = strchar(0) --- @type string Marker for nil values in serialization.
-local LOG2 = log(2)           --- @type number Precomputed log(2) for efficiency.
-local UINT32_MODULO = 2 ^ 32  --- @type integer Modulo for keeping integers within 32-bit unsigned range.
-local MIN_BUCKET_COUNT = 32   --- @type integer Minimum number of buckets for summary filters.
-local KEYS_PER_BUCKET = 32    --- @type integer Default bucket size for summary filters.
-local ROWS_PER_CHUNK = 128    --- @type integer Number of rows per chunk for chunked transmission.
-local MSG_CACHE_EXPIRY = 1.0  --- @type number Message cache expiry in seconds for suppressing duplicate cross-channel broadcasts.
+local NIL_MARKER = strchar(0)               --- @type string Marker for nil values in serialization.
+local LOG2 = log(2)                         --- @type number Precomputed log(2) for efficiency.
+local UINT32_MODULO = 2 ^ 32                --- @type integer Modulo for keeping integers within 32-bit unsigned range.
+local MIN_BUCKET_COUNT = 32                 --- @type integer Minimum number of buckets for summary filters.
+local KEYS_PER_BUCKET = 32                  --- @type integer Default bucket size for summary filters.
+local ROWS_PER_CHUNK = 128                  --- @type integer Number of rows per chunk for chunked transmission.
+local MSG_CACHE_EXPIRY = 1.0                --- @type number Message cache expiry in seconds for suppressing duplicate cross-channel broadcasts.
+local ASYNC_NETWORK_IMPORT_MAX_TIME = 0.001 --- @type number Max seconds per async network import slice (~6% of a 60fps frame budget).
+local ASYNC_LOCAL_IMPORT_MAX_TIME = 1 / 60  --- @type number Max seconds per async local import slice (one full 60fps frame budget).
 
 --- @enum LibP2PDB.Color Color codes for console output.
 local Color = {
@@ -1542,7 +1544,7 @@ end
 --- @param db LibP2PDB.DBHandle Database handle.
 --- @param state LibP2PDB.DBState The database state to import.
 --- @param onComplete LibP2PDB.ImportCompleteCallback Callback function(success, duration) invoked when import completes.
---- @param maxTime number? Optional maximum time in seconds to spend per processing slice (defaults to 0.01 seconds).
+--- @param maxTime number? Optional maximum time in seconds to spend per processing slice (defaults to 1/60 of a second).
 function LibP2PDB:ImportDatabaseAsync(db, state, onComplete, maxTime)
     assert(IsEmptyTable(db), "db must be an empty table")
     assert(IsNonEmptyTable(state), "state must be a non-empty table")
@@ -1553,21 +1555,8 @@ function LibP2PDB:ImportDatabaseAsync(db, state, onComplete, maxTime)
     local dbi = priv.databases[db]
     assert(dbi, "db is not a recognized database handle")
 
-    -- Define the import workload
-    local workload = function(thread)
-        local startTime = GetTimePreciseSec()
-        local success = priv:ImportDatabase(dbi, state, nil, thread, maxTime or 0.01)
-        SafeCall(dbi, onComplete, success, GetTimePreciseSec() - startTime)
-    end
-
-    -- Create and run the coroutine workload
-    local thread = coroutine.create(workload)
-    C_Timer.NewTicker(0, function(ticker)
-        local success = coroutine.resume(thread, thread)
-        if not success then
-            ticker:Cancel() -- Coroutine finished or errored
-        end
-    end)
+    -- Delegate to the private async implementation
+    priv:ImportDatabaseAsync(dbi, state, nil, onComplete, maxTime or ASYNC_LOCAL_IMPORT_MAX_TIME)
 end
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -2377,6 +2366,7 @@ end
 function Private:ResizeTableSummary(ti, requiredNumBucket)
     -- Create new summary
     local summary = LibBucketedHashSet.New(requiredNumBucket) --[[@as LibP2PDB.Summary]]
+    summary.keyIndex = {}
 
     -- Rehash existing keys into new summary
     for key, row in pairs(ti.rows) do
@@ -2772,6 +2762,29 @@ function Private:ImportRowData(dbi, schemaSorted, rowDataState)
 
     -- Return row data
     return importedRowData
+end
+
+--- Asynchronously import a database state, yielding periodically to avoid blocking the main thread.
+--- @param dbi LibP2PDB.DBInstance Database instance.
+--- @param state LibP2PDB.DBState The database state to import.
+--- @param message LibP2PDB.Message? Optional message context from OnCommReceived (network event).
+--- @param onComplete LibP2PDB.ImportCompleteCallback? Optional callback function(success, duration) invoked when import completes.
+--- @param maxTime number Maximum time in seconds to spend per processing slice.
+function Private:ImportDatabaseAsync(dbi, state, message, onComplete, maxTime)
+    local workload = function(thread)
+        local startTime = GetTimePreciseSec()
+        local success = self:ImportDatabase(dbi, state, message, thread, maxTime)
+        if onComplete then
+            SafeCall(dbi, onComplete, success, GetTimePreciseSec() - startTime)
+        end
+    end
+    local thread = coroutine.create(workload)
+    C_Timer.NewTicker(0, function(ticker)
+        local success = coroutine.resume(thread, thread)
+        if not success then
+            ticker:Cancel()
+        end
+    end)
 end
 
 --- Migrate a single table's data using the migration callback.
@@ -3534,9 +3547,9 @@ function Private:RowsResponseHandler(message)
     local sender = message.sender
     Spam("received rows from %s", sender)
 
-    -- Import the database state we received
+    -- Import the database state we received asynchronously to avoid blocking the main thread
     local databaseState = message.data --- @type LibP2PDB.DBState
-    self:ImportDatabase(dbi, databaseState, message)
+    self:ImportDatabaseAsync(dbi, databaseState, message, nil, ASYNC_NETWORK_IMPORT_MAX_TIME)
 end
 
 --- Send rows response in chunks to avoid transmission timeouts.
@@ -3923,8 +3936,8 @@ local function GeneratePlayerGUID(i)
     -- YYYYYYYY is player ID (8 hex digits)
     local seed = sin(i * 123.456) * 10000
     local absSeed = seed < 0 and -seed or seed
-    local realmId = floor(absSeed * 65535) % 65536                    -- 0x0000 to 0xFFFF
-    local playerId = (i * 31337 + floor(absSeed * 1000)) % 4294967296 -- 0x00000000 to 0xFFFFFFFF
+    local realmId = (floor(absSeed * 65535) % 65535) + 1                    -- 0x0001 to 0xFFFF (never 0)
+    local playerId = ((i * 31337 + floor(absSeed * 1000)) % 4294967295) + 1 -- 0x00000001 to 0xFFFFFFFF (never 0)
     return format("Player-%04X-%08X", realmId, playerId)
 end
 
@@ -6634,10 +6647,10 @@ local UnitTests = {
             [3] = {
                 ["Users"] = {
                     [1] = {
-                        [1] = NIL_MARKER,        -- tombstone marker
-                        [2] = clockBefore + 1,   -- newer clock
-                        [3] = priv.peerID,       -- authored by us
-                        [4] = true,              -- tombstone flag
+                        [1] = NIL_MARKER,      -- tombstone marker
+                        [2] = clockBefore + 1, -- newer clock
+                        [3] = priv.peerID,     -- authored by us
+                        [4] = true,            -- tombstone flag
                     },
                 },
             },
@@ -6673,9 +6686,9 @@ local UnitTests = {
             [3] = {
                 ["Users"] = {
                     [1] = {
-                        [1] = { 30, "Alice" },   -- age, name (schema order)
-                        [2] = clockBefore + 1,   -- newer clock
-                        [3] = priv.peerID,       -- authored by us
+                        [1] = { 30, "Alice" }, -- age, name (schema order)
+                        [2] = clockBefore + 1, -- newer clock
+                        [3] = priv.peerID,     -- authored by us
                     },
                 },
             },
@@ -6709,7 +6722,7 @@ local UnitTests = {
         priv:MergeKey(dbi, 5, "Users", ti, 1,
             { name = "Bob", age = 25 }, -- identical data
             { clock = 5, peerID = priv.peerID },
-            nil -- trusted import path
+            nil                         -- trusted import path
         )
 
         -- Version metadata must be updated (clock advanced), but data must be unchanged
@@ -9351,6 +9364,103 @@ local PerformanceTests = {
     end,
 }
 
+local NetworkPerformanceTests = {
+    NetworkImportDatabase = function()
+        local numRows = 10 * sampleCount
+
+        -- Build sender database and export its full state
+        local senderInstance = NewPrivateInstance(1)
+        local senderDB = nil
+        local fullState = nil
+        PrivateScope(senderInstance, function()
+            senderDB = GenerateDatabase(numRows)
+            fullState = LibP2PDB:ExportDatabase(senderDB)
+        end)
+
+        -- Build empty receiver database with the same schema
+        local receiverInstance = NewPrivateInstance(2)
+        local receiverDBI = nil
+        PrivateScope(receiverInstance, function()
+            local receiverDB = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+            LibP2PDB:NewTable(receiverDB, {
+                name = "Players",
+                keyType = "number",
+                schema = {
+                    name = "string",
+                    realm = { "string", "nil" },
+                    classID = "number",
+                    guild = { "string", "nil" },
+                    version = "string",
+                    level = "number",
+                    xpTotal = "number",
+                    money = "number",
+                    timePlayed = "number",
+                },
+            })
+            receiverDBI = priv.databases[receiverDB]
+        end)
+
+        -- Split exported rows into ROWS_PER_CHUNK-sized chunks (same as SendChunkedRowsResponse)
+        assert(fullState, "sender exported an empty database")
+        local dbVersion = fullState[1]
+        local dbClock = fullState[2]
+        local allRows = assert(fullState[3], "sender exported no table data")["Players"]
+        local chunks = {}
+        local currentChunk = {}
+        local currentCount = 0
+        for key, rowState in pairs(allRows) do
+            currentChunk[key] = rowState
+            currentCount = currentCount + 1
+            if currentCount >= ROWS_PER_CHUNK then
+                tinsert(chunks, currentChunk)
+                currentChunk = {}
+                currentCount = 0
+            end
+        end
+        if currentCount > 0 then
+            tinsert(chunks, currentChunk)
+        end
+
+        -- Profile each chunk import via RowsResponseHandler (same code path as the real network importer)
+        ProfileReset("NetworkImportDatabase")
+        local fakeMessage = {
+            dbi = receiverDBI,
+            sender = senderInstance.playerName,
+            peerID = senderInstance.peerID,
+            channel = "WHISPER",
+        }
+
+        -- Override C_Timer.NewTicker to drive coroutines synchronously, so profiling captures the full merge cost
+        -- even after Phase 2 switches RowsResponseHandler to async import via coroutines.
+        local _NewTicker = C_Timer.NewTicker
+        ---@diagnostic disable-next-line: duplicate-set-field
+        C_Timer.NewTicker = function(delay, callback)
+            local cancelled = false
+            local ticker = { Cancel = function(self) cancelled = true end }
+            while not cancelled do
+                callback(ticker)
+            end
+            return ticker
+        end
+
+        PrivateScope(receiverInstance, function()
+            VerbosityScope(3, function()
+                for _, chunkRows in ipairs(chunks) do
+                    fakeMessage.data = { dbVersion, dbClock, { Players = chunkRows } }
+                    ProfileBegin("NetworkImportDatabase")
+                    priv:RowsResponseHandler(fakeMessage)
+                    ProfileEnd("NetworkImportDatabase")
+                end
+            end)
+        end)
+
+        C_Timer.NewTicker = _NewTicker
+
+        Print("NetworkImportDatabase: %d rows in %d chunks of %d rows/chunk", numRows, #chunks, ROWS_PER_CHUNK)
+        PrintProfileMarker("NetworkImportDatabase", "RowsResponseHandler per chunk")
+    end,
+}
+
 local GREEN_CHECKMARK = "|TInterface\\RaidFrame\\ReadyCheck-Ready:16|t"
 
 local function RunTests()
@@ -9383,6 +9493,18 @@ local function RunTests()
             ---@diagnostic disable-next-line: missing-parameter
             callback()
             return nil
+        end
+
+        -- Override C_Timer.NewTicker to drive coroutines synchronously
+        local _NewTicker = C_Timer.NewTicker
+        ---@diagnostic disable-next-line: duplicate-set-field
+        C_Timer.NewTicker = function(delay, callback)
+            local cancelled = false
+            local ticker = { Cancel = function(self) cancelled = true end }
+            while not cancelled do
+                callback(ticker)
+            end
+            return ticker
         end
 
         -- Override C_ChatInfo.IsAddonMessagePrefixRegistered to check our fake registered prefixes
@@ -9419,6 +9541,7 @@ local function RunTests()
         -- Restore overridden functions
         AceComm = _AceComm
         C_ChatInfo.IsAddonMessagePrefixRegistered = _IsAddonMessagePrefixRegistered
+        C_Timer.NewTicker = _NewTicker
         C_Timer.NewTimer = _NewTimer
         GetPlayerInfoByGUID = _GetPlayerInfoByGUID
         count = count + 1
@@ -9434,6 +9557,10 @@ local function RunPerformanceTests()
     local startTime = debugprofilestop()
     for _, testFn in pairs(PerformanceTests) do
         PrivateScope(NewPrivateInstance(1), testFn)
+        count = count + 1
+    end
+    for _, testFn in pairs(NetworkPerformanceTests) do
+        testFn()
         count = count + 1
     end
     local endTime = debugprofilestop()
