@@ -1909,6 +1909,34 @@ function LibP2PDB:ListKeys(db, tableName)
     return keys
 end
 
+--- List all rows of a specific table in the database as a key -> data map.
+--- Only includes rows that are not marked as tombstones (deleted).
+--- Validates that the db and tableName are valid and that the table exists in the database.
+--- @param db LibP2PDB.DBHandle Database handle.
+--- @param tableName LibP2PDB.TableName Name of the table to list rows from
+--- @return table<LibP2PDB.TableKey, LibP2PDB.RowData> rows Table of key -> row data for all non-deleted rows in the specified table
+function LibP2PDB:ListRows(db, tableName)
+    assert(IsEmptyTable(db), "db must be an empty table")
+    assert(IsNonEmptyString(tableName), "tableName must be a non-empty string")
+
+    -- Validate db instance
+    local dbi = priv.databases[db]
+    assert(dbi, "db is not a recognized database handle")
+
+    -- Validate table
+    local ti = dbi.tables[tableName]
+    assert(ti, "table '" .. tableName .. "' is not defined in the database")
+
+    -- Collect rows
+    local rows = {}
+    for key, row in pairs(ti.rows) do
+        if row and not row.version.tombstone then
+            rows[key] = ShallowCopy(row.data)
+        end
+    end
+    return rows
+end
+
 --- List all known peers for this database.
 --- This list is not persisted and is reset on logout/reload.
 --- @param db LibP2PDB.DBHandle Database handle.
@@ -7417,6 +7445,47 @@ local UnitTests = {
         Assert.Throws(function() LibP2PDB:ListKeys(db, nil) end)
         Assert.Throws(function() LibP2PDB:ListKeys(db, 123) end)
         Assert.Throws(function() LibP2PDB:ListKeys(db, {}) end)
+    end,
+
+    ListRows = function()
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+        LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 })
+        LibP2PDB:InsertKey(db, "Users", 2, { name = "Alice", age = 30 })
+        LibP2PDB:InsertKey(db, "Users", 3, { name = "Eve", age = 35 })
+        LibP2PDB:DeleteKey(db, "Users", 2)
+        local rows = LibP2PDB:ListRows(db, "Users")
+        Assert.IsTable(rows)
+        local rowCount = 0
+        for key, row in pairs(rows) do
+            Assert.IsTable(row)
+            if key == 1 then
+                Assert.AreEqual(row, { name = "Bob", age = 25 })
+            elseif key == 3 then
+                Assert.AreEqual(row, { name = "Eve", age = 35 })
+            end
+            rowCount = rowCount + 1
+            row.name = "hello"
+            row.age = 123
+            row.field = "world"
+        end
+        Assert.AreEqual(rowCount, 2)
+        Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
+        Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 3), { name = "Eve", age = 35 })
+    end,
+
+    ListRows_DBIsInvalid_Throws = function()
+        Assert.Throws(function() LibP2PDB:ListRows(nil, "Users") end)
+        Assert.Throws(function() LibP2PDB:ListRows(123, "Users") end)
+        Assert.Throws(function() LibP2PDB:ListRows("", "Users") end)
+        Assert.Throws(function() LibP2PDB:ListRows({}, "Users") end)
+    end,
+
+    ListRows_TableNameIsInvalid_Throws = function()
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        Assert.Throws(function() LibP2PDB:ListRows(db, nil) end)
+        Assert.Throws(function() LibP2PDB:ListRows(db, 123) end)
+        Assert.Throws(function() LibP2PDB:ListRows(db, {}) end)
     end,
 
     SerializeDeserialize = function()
