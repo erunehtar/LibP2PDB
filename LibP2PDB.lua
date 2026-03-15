@@ -93,7 +93,7 @@ local LOG2 = log(2)                         --- @type number Precomputed log(2) 
 local UINT32_MODULO = 2 ^ 32                --- @type integer Modulo for keeping integers within 32-bit unsigned range.
 local MIN_BUCKET_COUNT = 32                 --- @type integer Minimum number of buckets for summary filters.
 local KEYS_PER_BUCKET = 32                  --- @type integer Default bucket size for summary filters.
-local ROWS_PER_CHUNK = 128                  --- @type integer Number of rows per chunk for chunked transmission.
+local ROWS_PER_CHUNK = 128                  --- @type integer Default number of rows per chunk for chunked transmission.
 local MSG_CACHE_EXPIRY = 1.0                --- @type number Message cache expiry in seconds for suppressing duplicate cross-channel broadcasts.
 local ASYNC_NETWORK_IMPORT_MAX_TIME = 0.001 --- @type number Max seconds per async network import slice (~6% of a 60fps frame budget).
 local ASYNC_LOCAL_IMPORT_MAX_TIME = 1 / 60  --- @type number Max seconds per async local import slice (one full 60fps frame budget).
@@ -1069,6 +1069,7 @@ end
 --- @field sync boolean? Optional flag indicating if the table should be synchronized with peers (default: true).
 --- @field immutable boolean? Optional flag indicating if the table is immutable (no changes allowed after creation, default: false).
 --- @field exclusive boolean? Optional flag indicating if rows can only be modified by the peer that created them (default: false). Blocks local writes and incoming network merges from a different peer than the row's current author. Tombstoned rows release authorship, allowing any peer to re-create the key.
+--- @field rowsPerChunk integer? Optional number of rows per network chunk for this table (default: 128).
 --- @field schema LibP2PDB.TableSchema? Optional table schema defining field names and their allowed data types.
 --- @field onValidate LibP2PDB.TableOnValidateCallback? Optional callback function(key, data, context) for custom row validation. Must return true if valid, false otherwise. Data is a copy and has not yet been applied when this is called.
 --- @field onChange LibP2PDB.TableOnChangeCallback? Optional callback function(key, data) on row data changes. Data is nil for deletions. Data is a copy, and has already been applied when this is called.
@@ -1105,6 +1106,7 @@ function LibP2PDB:NewTable(db, desc)
             error("each field value in desc.schema must be a non-empty string or non-empty table of strings")
         end
     end
+    assert(IsIntegerOrNil(desc.rowsPerChunk, 1), "desc.rowsPerChunk must be a positive integer if provided")
     assert(IsFunctionOrNil(desc.onValidate), "desc.onValidate must be a function if provided")
     assert(IsFunctionOrNil(desc.onChange), "desc.onChange must be a function if provided")
 
@@ -1146,6 +1148,7 @@ function LibP2PDB:NewTable(db, desc)
         sync = sync,
         immutable = desc.immutable or false,
         exclusive = desc.exclusive or false,
+        rowsPerChunk = desc.rowsPerChunk or ROWS_PER_CHUNK,
         schema = desc.schema,
         schemaSorted = schemaSorted,
         onValidate = desc.onValidate,
@@ -1841,6 +1844,45 @@ function LibP2PDB:GetTableSchema(db, tableName)
     return DeepCopy(ti.schema)
 end
 
+--- Estimate the optimal number of rows per chunk for a given table based on actual compressed size.
+--- Exports the full table, serializes and compresses it using the same pipeline as the network send
+--- path, then returns the row count that would produce ~4KB of compressed output per chunk —
+--- the point where LibDeflate reaches near-optimal compression ratio.
+--- Returns nil if the table has no rows or compression fails.
+--- @param db LibP2PDB.DBHandle Database handle.
+--- @param tableName LibP2PDB.TableName Name of the table to estimate for.
+--- @return integer? optimalRowsPerChunk Estimated optimal rows per chunk, or nil if the table is empty.
+function LibP2PDB:EstimateOptimalRowsPerChunk(db, tableName)
+    assert(IsEmptyTable(db), "db must be an empty table")
+    assert(IsNonEmptyString(tableName), "tableName must be a non-empty string")
+
+    local dbi = priv.databases[db]
+    assert(dbi, "db is not a recognized database handle")
+
+    local ti = dbi.tables[tableName]
+    assert(ti, "table '" .. tableName .. "' is not defined in the database")
+
+    if ti.rowCount == 0 then
+        return nil -- table has no rows
+    end
+
+    -- Export the full table
+    local rowStateMap = priv:ExportTable(ti)
+    if not rowStateMap then
+        return nil
+    end
+
+    -- Serialize and compress using the same pipeline as Private:Send
+    local state = { dbi.version, dbi.clock, { [tableName] = rowStateMap } } --- @type LibP2PDB.DBState
+    local serialized = dbi.serializer:Serialize(state)
+    if not serialized then return nil end
+    local compressed = dbi.compressor:Compress(serialized)
+    if not compressed then return nil end
+
+    -- optimal = rows that fit in 4KB = rowCount * 4096 / compressedSize
+    return ceil(ti.rowCount * 4096 / #compressed)
+end
+
 --- List all keys of a specific table in the database.
 --- @param db LibP2PDB.DBHandle Database handle.
 --- @param tableName LibP2PDB.TableName Name of the table to list keys from
@@ -2082,6 +2124,7 @@ end
 --- @field sync boolean Whether the table is included in gossip syncs.
 --- @field immutable boolean Whether rows in the table are immutable after creation.
 --- @field exclusive boolean Whether rows in the table can only be modified by the peer that created them.
+--- @field rowsPerChunk integer Number of rows per network chunk when synchronizing this table with peers.
 --- @field schema LibP2PDB.TableSchema? Optional schema definition for the table.
 --- @field schemaSorted LibP2PDB.TableSchemaSorted? Cached sorted schema for the table.
 --- @field onValidate LibP2PDB.TableOnValidateCallback? Optional validation callback for rows.
@@ -3001,6 +3044,8 @@ function Private:Send(dbi, data, channel, target, priority)
 
     --- @cast priority "ALERT"|"BULK"|"NORMAL"
     AceComm.SendCommMessage(self, dbi.prefix, encoded, channel, target, priority)
+
+    return #compressed
 end
 
 --- Broadcast a message to all peers on multiple channels.
@@ -3481,13 +3526,13 @@ function Private:DigestResponseHandler(message)
     -- Send rows they are missing
     if IsNonEmptyTable(tableStateMap) then
         Spam("sending %d missing rows to %s", missingRowsCount, sender)
-        self:SendChunkedRowsResponse(dbi, ROWS_PER_CHUNK, sender, tableStateMap)
+        self:SendChunkedRowsResponse(dbi, sender, tableStateMap)
     end
 
     -- Request rows that differs from their summary
     if IsNonEmptyTable(databaseRequest) then
         Spam("requesting %d outdated rows from %s", outdatedRowsCount, sender)
-        self:SendChunkedRowsRequest(dbi, ROWS_PER_CHUNK, sender, databaseRequest)
+        self:SendChunkedRowsRequest(dbi, sender, databaseRequest)
     end
 end
 
@@ -3535,7 +3580,7 @@ function Private:RowsRequestHandler(message)
 
     -- Send rows response
     Spam("sending %d rows to %s", rowCount, sender)
-    self:SendChunkedRowsResponse(dbi, ROWS_PER_CHUNK, sender, tableStateMap)
+    self:SendChunkedRowsResponse(dbi, sender, tableStateMap)
 end
 
 --- Handler for rows response messages.
@@ -3554,18 +3599,18 @@ end
 
 --- Send rows response in chunks to avoid transmission timeouts.
 --- @param dbi LibP2PDB.DBInstance Database instance.
---- @param chunkSize integer Number of rows per chunk.
 --- @param sender LibP2PDB.PeerName Target peer name.
 --- @param tableStateMap LibP2PDB.TableStateMap Complete table state map to send in chunks.
-function Private:SendChunkedRowsResponse(dbi, chunkSize, sender, tableStateMap)
-    local chunkRowStateMap = {} --- @type LibP2PDB.RowStateMap
+function Private:SendChunkedRowsResponse(dbi, sender, tableStateMap)
+    local chunkRowStateMap = {}                --- @type LibP2PDB.RowStateMap
     local chunkRowCount = 0
-    local currentTableName = nil --- @type LibP2PDB.TableName?
+    local currentTableName = nil               --- @type LibP2PDB.TableName?
+    local currentRowsPerChunk = ROWS_PER_CHUNK --- @type integer
 
     local function flushChunk()
         if IsNonEmptyTable(chunkRowStateMap) then
             local chunkTableStateMap = { [currentTableName] = chunkRowStateMap } --- @type LibP2PDB.TableStateMap
-            local obj = { --- @type LibP2PDB.Packet
+            local obj = {                                                        --- @type LibP2PDB.Packet
                 CommMessageType.RowsResponse,
                 self.peerID,
                 { dbi.version, dbi.clock, chunkTableStateMap }, --- @type LibP2PDB.DBState
@@ -3581,13 +3626,15 @@ function Private:SendChunkedRowsResponse(dbi, chunkSize, sender, tableStateMap)
         -- Flush any pending rows from the previous table before starting a new one
         flushChunk()
         currentTableName = tableName
+        local ti = dbi.tables[tableName]
+        currentRowsPerChunk = ti and ti.rowsPerChunk or ROWS_PER_CHUNK
 
         for key, rowState in pairs(rowStateMap) do
             chunkRowStateMap[key] = rowState
             chunkRowCount = chunkRowCount + 1
 
             -- Send chunk when it reaches the row limit
-            if chunkRowCount >= chunkSize then
+            if chunkRowCount >= currentRowsPerChunk then
                 flushChunk()
             end
         end
@@ -3599,18 +3646,18 @@ end
 
 --- Send rows request in chunks to avoid transmission timeouts.
 --- @param dbi LibP2PDB.DBInstance Database instance.
---- @param chunkSize integer Number of rows per chunk.
 --- @param sender LibP2PDB.PeerName Target peer name.
 --- @param databaseRequest LibP2PDB.DBRequest Complete database request to send in chunks.
-function Private:SendChunkedRowsRequest(dbi, chunkSize, sender, databaseRequest)
-    local chunkTableRequest = {} --- @type LibP2PDB.TableRequest
+function Private:SendChunkedRowsRequest(dbi, sender, databaseRequest)
+    local chunkTableRequest = {}               --- @type LibP2PDB.TableRequest
     local chunkRowCount = 0
-    local currentTableName = nil --- @type LibP2PDB.TableName?
+    local currentTableName = nil               --- @type LibP2PDB.TableName?
+    local currentRowsPerChunk = ROWS_PER_CHUNK --- @type integer
 
     local function flushChunk()
         if IsNonEmptyTable(chunkTableRequest) then
             local chunkDatabaseRequest = { [currentTableName] = chunkTableRequest } --- @type LibP2PDB.DBRequest
-            local obj = { --- @type LibP2PDB.Packet
+            local obj = {                                                           --- @type LibP2PDB.Packet
                 CommMessageType.RowsRequest,
                 self.peerID,
                 chunkDatabaseRequest,
@@ -3626,13 +3673,15 @@ function Private:SendChunkedRowsRequest(dbi, chunkSize, sender, databaseRequest)
         -- Flush any pending keys from the previous table before starting a new one
         flushChunk()
         currentTableName = tableName
+        local ti = dbi.tables[tableName]
+        currentRowsPerChunk = ti and ti.rowsPerChunk or ROWS_PER_CHUNK
 
         for key, clock in pairs(tableRequest) do
             chunkTableRequest[key] = clock
             chunkRowCount = chunkRowCount + 1
 
             -- Send chunk when it reaches the row limit
-            if chunkRowCount >= chunkSize then
+            if chunkRowCount >= currentRowsPerChunk then
                 flushChunk()
             end
         end
@@ -4201,6 +4250,9 @@ local UnitTests = {
             Assert.IsNonEmptyTable(ti)
             Assert.AreEqual(ti.keyType, "string")
             Assert.AreEqual(ti.sync, true)
+            Assert.AreEqual(ti.immutable, false)
+            Assert.AreEqual(ti.exclusive, false)
+            Assert.AreEqual(ti.rowsPerChunk, ROWS_PER_CHUNK)
             Assert.IsNil(ti.schema)
             Assert.IsNil(ti.schemaSorted)
             Assert.IsNil(ti.onValidate)
@@ -4216,6 +4268,9 @@ local UnitTests = {
                 name = "Users2",
                 keyType = "number",
                 sync = false,
+                immutable = true,
+                exclusive = true,
+                rowsPerChunk = 64,
                 schema = {
                     name = "string",
                     age = { "number", "nil" },
@@ -4228,6 +4283,9 @@ local UnitTests = {
             Assert.IsNonEmptyTable(ti)
             Assert.AreEqual(ti.keyType, "number")
             Assert.AreEqual(ti.sync, false)
+            Assert.AreEqual(ti.immutable, true)
+            Assert.AreEqual(ti.exclusive, true)
+            Assert.AreEqual(ti.rowsPerChunk, 64)
             Assert.AreEqual(ti.schema, { name = "string", age = { "number", "nil" } })
             Assert.AreEqual(ti.schemaSorted, { { "age", { "number", "nil" } }, { "name", "string" } })
             Assert.IsFunction(ti.onValidate)
