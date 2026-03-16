@@ -94,6 +94,7 @@ local UINT32_MODULO = 2 ^ 32                --- @type integer Modulo for keeping
 local MIN_BUCKET_COUNT = 32                 --- @type integer Minimum number of buckets for summary filters.
 local KEYS_PER_BUCKET = 32                  --- @type integer Default bucket size for summary filters.
 local ROWS_PER_CHUNK = 128                  --- @type integer Default number of rows per chunk for chunked transmission.
+local CHUNK_SEND_DELAY = 1.5                --- @type number Seconds to wait between successive chunk sends to avoid message throttling.
 local MSG_CACHE_EXPIRY = 1.0                --- @type number Message cache expiry in seconds for suppressing duplicate cross-channel broadcasts.
 local ASYNC_NETWORK_IMPORT_MAX_TIME = 0.001 --- @type number Max seconds per async network import slice (~6% of a 60fps frame budget).
 local ASYNC_LOCAL_IMPORT_MAX_TIME = 1 / 60  --- @type number Max seconds per async local import slice (one full 60fps frame budget).
@@ -3630,6 +3631,23 @@ function Private:RowsResponseHandler(message)
     self:ImportDatabaseAsync(dbi, databaseState, message, nil, ASYNC_NETWORK_IMPORT_MAX_TIME)
 end
 
+--- Send a list of pre-built packets to a target peer, with CHUNK_SEND_DELAY seconds between each.
+--- The first chunk is sent immediately; subsequent chunks are scheduled via C_Timer.NewTimer.
+--- @param dbi LibP2PDB.DBInstance Database instance.
+--- @param chunks LibP2PDB.Packet[] Ordered list of packets to send.
+--- @param sender LibP2PDB.PeerName Target peer name.
+function Private:SendChunks(dbi, chunks, sender)
+    local function sendNext(index)
+        self:Send(dbi, chunks[index], "WHISPER", sender, CommPriority.Normal)
+        if index < #chunks then
+            C_Timer.NewTimer(CHUNK_SEND_DELAY, function() sendNext(index + 1) end)
+        end
+    end
+    if #chunks > 0 then
+        sendNext(1)
+    end
+end
+
 --- Send rows response in chunks to avoid transmission timeouts.
 --- @param dbi LibP2PDB.DBInstance Database instance.
 --- @param sender LibP2PDB.PeerName Target peer name.
@@ -3639,8 +3657,9 @@ function Private:SendChunkedRowsResponse(dbi, sender, tableStateMap)
     local chunkRowCount = 0
     local currentTableName = nil               --- @type LibP2PDB.TableName?
     local currentRowsPerChunk = ROWS_PER_CHUNK --- @type integer
+    local chunks = {}                          --- @type LibP2PDB.Packet[]
 
-    local function flushChunk()
+    local function collectChunk()
         if IsNonEmptyTable(chunkRowStateMap) then
             local chunkTableStateMap = { [currentTableName] = chunkRowStateMap } --- @type LibP2PDB.TableStateMap
             local obj = {                                                        --- @type LibP2PDB.Packet
@@ -3648,7 +3667,7 @@ function Private:SendChunkedRowsResponse(dbi, sender, tableStateMap)
                 self.peerID,
                 { dbi.version, dbi.clock, chunkTableStateMap }, --- @type LibP2PDB.DBState
             }
-            self:Send(dbi, obj, "WHISPER", sender, CommPriority.Normal)
+            tinsert(chunks, obj)
             chunkRowStateMap = {}
             chunkRowCount = 0
         end
@@ -3657,7 +3676,7 @@ function Private:SendChunkedRowsResponse(dbi, sender, tableStateMap)
     -- Iterate through all tables and rows; each chunk contains rows from a single table only
     for tableName, rowStateMap in pairs(tableStateMap) do
         -- Flush any pending rows from the previous table before starting a new one
-        flushChunk()
+        collectChunk()
         currentTableName = tableName
         local ti = dbi.tables[tableName]
         currentRowsPerChunk = ti and ti.rowsPerChunk or ROWS_PER_CHUNK
@@ -3666,15 +3685,17 @@ function Private:SendChunkedRowsResponse(dbi, sender, tableStateMap)
             chunkRowStateMap[key] = rowState
             chunkRowCount = chunkRowCount + 1
 
-            -- Send chunk when it reaches the row limit
+            -- Collect chunk when it reaches the row limit
             if chunkRowCount >= currentRowsPerChunk then
-                flushChunk()
+                collectChunk()
             end
         end
     end
 
-    -- Send final partial chunk if any rows remain
-    flushChunk()
+    -- Collect final partial chunk if any rows remain
+    collectChunk()
+
+    self:SendChunks(dbi, chunks, sender)
 end
 
 --- Send rows request in chunks to avoid transmission timeouts.
@@ -3686,8 +3707,9 @@ function Private:SendChunkedRowsRequest(dbi, sender, databaseRequest)
     local chunkRowCount = 0
     local currentTableName = nil               --- @type LibP2PDB.TableName?
     local currentRowsPerChunk = ROWS_PER_CHUNK --- @type integer
+    local chunks = {}                          --- @type LibP2PDB.Packet[]
 
-    local function flushChunk()
+    local function collectChunk()
         if IsNonEmptyTable(chunkTableRequest) then
             local chunkDatabaseRequest = { [currentTableName] = chunkTableRequest } --- @type LibP2PDB.DBRequest
             local obj = {                                                           --- @type LibP2PDB.Packet
@@ -3695,7 +3717,7 @@ function Private:SendChunkedRowsRequest(dbi, sender, databaseRequest)
                 self.peerID,
                 chunkDatabaseRequest,
             }
-            self:Send(dbi, obj, "WHISPER", sender, CommPriority.Normal)
+            tinsert(chunks, obj)
             chunkTableRequest = {}
             chunkRowCount = 0
         end
@@ -3704,7 +3726,7 @@ function Private:SendChunkedRowsRequest(dbi, sender, databaseRequest)
     -- Iterate through all tables and keys; each chunk contains keys from a single table only
     for tableName, tableRequest in pairs(databaseRequest) do
         -- Flush any pending keys from the previous table before starting a new one
-        flushChunk()
+        collectChunk()
         currentTableName = tableName
         local ti = dbi.tables[tableName]
         currentRowsPerChunk = ti and ti.rowsPerChunk or ROWS_PER_CHUNK
@@ -3713,15 +3735,17 @@ function Private:SendChunkedRowsRequest(dbi, sender, databaseRequest)
             chunkTableRequest[key] = clock
             chunkRowCount = chunkRowCount + 1
 
-            -- Send chunk when it reaches the row limit
+            -- Collect chunk when it reaches the key limit
             if chunkRowCount >= currentRowsPerChunk then
-                flushChunk()
+                collectChunk()
             end
         end
     end
 
-    -- Send final partial chunk if any keys remain
-    flushChunk()
+    -- Collect final partial chunk if any keys remain
+    collectChunk()
+
+    self:SendChunks(dbi, chunks, sender)
 end
 
 --- Compute an FNV1a32 hash of the summary buckets for a table, to use as a fingerprint for quick comparison between peers.
@@ -9326,6 +9350,64 @@ local NetworkTests = {
         end)
         Assert.IsTrue(allReceived, "All peers should have received the key within the maximum tick limit")
         Assert.IsLessThanOrEqual(tickCount, numRounds)
+    end,
+
+    SyncDatabase_MultiChunk = function()
+        -- Use a small rowsPerChunk to force multi-chunk transmission (64 rows / 8 rows-per-chunk = 8 chunks).
+        -- C_Timer.NewTimer is overridden in the test harness to fire immediately, so all chunks are
+        -- delivered synchronously, making the full multi-chunk code path exercisable in a unit test.
+        local rowsPerChunk = 8
+        local numRows = 64
+        local instances = {}
+        local databases = {}
+        for i = 1, numPeers do
+            instances[i] = NewPrivateInstance(i)
+            databases[i] = PrivateScope(instances[i], function()
+                local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+                LibP2PDB:NewTable(db, {
+                    name = "Users",
+                    keyType = "number",
+                    rowsPerChunk = rowsPerChunk,
+                    schema = { name = "string", age = "number" },
+                })
+                -- Only peer 1 starts with the full dataset; all other peers start empty
+                if i == 1 then
+                    for j = 1, numRows do
+                        LibP2PDB:InsertKey(db, "Users", j, { name = "Player" .. j, age = 20 + j })
+                    end
+                end
+                return db
+            end)
+        end
+
+        -- Make all peers broadcast their presence
+        VerbosityScope(3, function()
+            for i = 1, numPeers do
+                PrivateScope(instances[i], function() LibP2PDB:BroadcastPresence(databases[i]) end)
+            end
+            TickPrivateInstances(instances)
+        end)
+
+        -- Sync all peers for numRounds rounds; gossip converges in O(log n) rounds
+        VerbosityScope(3, function()
+            for r = 1, numRounds do
+                for i = 1, numPeers do
+                    PrivateScope(instances[i], function() LibP2PDB:SyncDatabase(databases[i]) end)
+                end
+                TickPrivateInstances(instances)
+            end
+        end)
+
+        -- Verify that every peer received all 1000 rows intact
+        for i = 1, numPeers do
+            PrivateScope(instances[i], function()
+                local keys = LibP2PDB:ListKeys(databases[i], "Users")
+                Assert.AreEqual(#keys, numRows)
+                for j = 1, numRows do
+                    Assert.AreEqual(LibP2PDB:GetKey(databases[i], "Users", j), { name = "Player" .. j, age = 20 + j })
+                end
+            end)
+        end
     end,
 }
 --- @diagnostic enable: param-type-mismatch, assign-type-mismatch, missing-fields
