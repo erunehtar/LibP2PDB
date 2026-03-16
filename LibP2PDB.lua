@@ -7655,23 +7655,20 @@ local testChannels = {
     YELL = {},
     WHISPER = {},
 }
+local testChannelNames = { "GUILD", "RAID", "PARTY", "YELL", "WHISPER" }
 
 --- Simulates ticking multiple private instances, processing their outgoing messages and OnUpdate handlers.
 --- @param instances table[] Array of private instances to tick.
 local function TickPrivateInstances(instances)
-    local orderedChannels = { "GUILD", "RAID", "PARTY", "YELL", "WHISPER" }
-
     -- Process messages until there are no more to process
     local moreMessagesToProcess = true
     while moreMessagesToProcess do
-        -- Take a copy of outgoing messages to process, since processing may generate new messages
-        local messages = DeepCopy(testChannels)
-        for channel in pairs(testChannels) do
-            testChannels[channel] = {}
-        end
+        -- Swap out the channel table so new messages go into the fresh one
+        local messages = testChannels
+        testChannels = { GUILD = {}, RAID = {}, PARTY = {}, YELL = {}, WHISPER = {} }
 
         -- Process outgoing messages from each instance
-        for _, channel in ipairs(orderedChannels) do
+        for _, channel in ipairs(testChannelNames) do
             for _, instance in ipairs(instances) do
                 for _, msg in ipairs(messages[channel] or {}) do
                     if channel ~= "WHISPER" or msg.target == instance.playerName then
@@ -7683,7 +7680,7 @@ local function TickPrivateInstances(instances)
 
         -- Check if there are more messages to process
         moreMessagesToProcess = false
-        for _, channel in ipairs(orderedChannels) do
+        for _, channel in ipairs(testChannelNames) do
             if #testChannels[channel] > 0 then
                 moreMessagesToProcess = true
                 break
@@ -9672,6 +9669,19 @@ local function RunTests()
         count = count + 1
     end
 
+    -- No-op compressor and encoder for network tests: eliminates LibDeflate compress/decompress overhead
+    -- since messages don't need to be network-safe in the test harness.
+    local _noopCompressor = {
+        Compress = function(self, str) return str end,
+        Decompress = function(self, str) return str end,
+    }
+    local _noopEncoder = {
+        EncodeForChannel = function(self, str) return str end,
+        DecodeFromChannel = function(self, str) return str end,
+        EncodeForPrint = function(self, str) return str end,
+        DecodeFromPrint = function(self, str) return str end,
+    }
+
     -- Run network tests
     for _, testFn in pairs(NetworkTests) do
         -- Override GetPlayerInfoByGUID to return fake player info based on the target name
@@ -9733,10 +9743,19 @@ local function RunTests()
             end,
         }
 
+        -- Override LibP2PDB.NewDatabase to inject no-op compressor/encoder, bypassing LibDeflate
+        local _NewDatabase = LibP2PDB.NewDatabase
+        LibP2PDB.NewDatabase = function(self, desc)
+            desc.compressor = desc.compressor or _noopCompressor
+            desc.encoder = desc.encoder or _noopEncoder
+            return _NewDatabase(self, desc)
+        end
+
         -- Run the test
         testFn()
 
         -- Restore overridden functions
+        LibP2PDB.NewDatabase = _NewDatabase
         AceComm = _AceComm
         C_ChatInfo.IsAddonMessagePrefixRegistered = _IsAddonMessagePrefixRegistered
         C_Timer.NewTicker = _NewTicker
