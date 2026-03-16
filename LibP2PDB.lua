@@ -1036,7 +1036,7 @@ end
 
 --- @alias LibP2PDB.Clock integer Lamport clock value.
 --- @alias LibP2PDB.PeerID integer Peer identifier value (48-bit integer combining serverID and playerUID).
---- @alias LibP2PDB.PeerName string Name of a peer (player name, 2-12 chars).
+--- @alias LibP2PDB.PeerName string Name of a peer (player name).
 --- @alias LibP2PDB.Tombstone boolean Flag indicating if a row is a tombstone (deleted).
 --- @alias LibP2PDB.TableName string Name of the table.
 --- @alias LibP2PDB.TableKeyType "string"|"number" Data type of the primary key.
@@ -1633,7 +1633,7 @@ function LibP2PDB:RequestKey(db, tableName, key, target)
     assert(IsEmptyTable(db), "db must be an empty table")
     assert(IsNonEmptyStringOrNil(tableName), "table name must be a non-empty string or nil")
     assert(IsNonEmptyString(key) or IsNumber(key), "key must be a string or number")
-    assert(IsNonEmptyStringEx(target, 2, 12), "target must be a non-empty string (2-12 chars)")
+    assert(IsNonEmptyString(target), "target must be a non-empty string")
 
     -- Validate db instance
     local dbi = priv.databases[db]
@@ -1676,7 +1676,7 @@ function LibP2PDB:SendKey(db, tableName, key, target)
     assert(IsEmptyTable(db), "db must be an empty table")
     assert(IsNonEmptyStringOrNil(tableName), "table name must be a non-empty string or nil")
     assert(IsNonEmptyString(key) or IsNumber(key), "key must be a string or number")
-    assert(IsNonEmptyStringEx(target, 2, 12), "target must be a non-empty string (2-12 chars)")
+    assert(IsNonEmptyString(target), "target must be a non-empty string")
 
     -- Validate db instance
     local dbi = priv.databases[db]
@@ -8320,7 +8320,6 @@ local NetworkTests = {
             Assert.Throws(function() LibP2PDB:RequestKey(db, "Users", "key1", true) end)
             Assert.Throws(function() LibP2PDB:RequestKey(db, "Users", "key1", false) end)
             Assert.Throws(function() LibP2PDB:RequestKey(db, "Users", "key1", "") end)
-            Assert.Throws(function() LibP2PDB:RequestKey(db, "Users", "key1", "ThisTargetNameIsTooLong") end)
             Assert.Throws(function() LibP2PDB:RequestKey(db, "Users", "key1", 123) end)
             Assert.Throws(function() LibP2PDB:RequestKey(db, "Users", "key1", {}) end)
         end)
@@ -8632,7 +8631,6 @@ local NetworkTests = {
             Assert.Throws(function() LibP2PDB:SendKey(db, "Users", "key1", true) end)
             Assert.Throws(function() LibP2PDB:SendKey(db, "Users", "key1", false) end)
             Assert.Throws(function() LibP2PDB:SendKey(db, "Users", "key1", "") end)
-            Assert.Throws(function() LibP2PDB:SendKey(db, "Users", "key1", "ThisTargetNameIsTooLong") end)
             Assert.Throws(function() LibP2PDB:SendKey(db, "Users", "key1", 123) end)
             Assert.Throws(function() LibP2PDB:SendKey(db, "Users", "key1", {}) end)
         end)
