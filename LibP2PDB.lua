@@ -714,6 +714,7 @@ end
 
 --- @class LibP2PDB.Private Private instance base class.
 --- @field playerName string The player's name.
+--- @field playerRealm string The player's realm name.
 --- @field playerGUID string The player's GUID.
 --- @field peerID LibP2PDB.PeerID The player's peer ID.
 --- @field prefixes table<string, LibP2PDB.DBHandle> Mapping of database prefixes to database handles.
@@ -723,15 +724,18 @@ Private.__index = Private
 
 --- Create a new private library state instance.
 --- @param playerName string Player name.
+--- @param playerRealm string Player realm name.
 --- @param playerGUID string Player GUID.
 --- @return LibP2PDB.Private instance New private library state instance.
-function Private.New(playerName, playerGUID)
+function Private.New(playerName, playerRealm, playerGUID)
     assert(IsNonEmptyString(playerName), "player name must be a non-empty string")
+    assert(IsNonEmptyString(playerRealm), "player realm must be a non-empty string")
     assert(IsNonEmptyString(playerGUID), "player GUID must be a non-empty string")
     local peerID = PlayerGUIDToPeerID(playerGUID)
     assert(PeerIDToPlayerGUID(peerID) == playerGUID, "peerID conversion must be reversible")
     local instance = setmetatable({
         playerName = playerName,
+        playerRealm = playerRealm,
         playerGUID = playerGUID,
         peerID = peerID,
         prefixes = setmetatable({}, { __mode = "v" }),
@@ -741,7 +745,7 @@ function Private.New(playerName, playerGUID)
 end
 
 --- The private library state instance.
-local priv = Private.New(assert(UnitName("player"), "unable to get player name"), assert(UnitGUID("player"), "unable to get player GUID"))
+local priv = Private.New(assert(UnitName("player"), "unable to get player name"), assert(GetRealmName(), "unable to get player realm"), assert(UnitGUID("player"), "unable to get player GUID"))
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Public API: Database Instance Creation
@@ -3156,11 +3160,12 @@ function Private:VerifySenderPeerID(message)
     end
 
     -- Try to resolve the player name from the WoW client cache
-    local name = select(6, GetPlayerInfoByGUID(playerGUID))
+    local name, realm = select(6, GetPlayerInfoByGUID(playerGUID))
     if name and name ~= "" then
         -- Cache hit: definitive match or mismatch
-        if name ~= sender then
-            Error("received message from %s with mismatched sender name %s peer ID %X on channel '%s'", sender, name, peerID, message.channel)
+        local fullName = (realm and realm ~= "") and (name .. "-" .. realm) or name
+        if fullName ~= sender then
+            Error("received message from %s with mismatched sender name %s peer ID %X on channel '%s'", sender, fullName, peerID, message.channel)
             return false
         end
         return true
@@ -3199,8 +3204,8 @@ end
 --- @param channel string The channel the message was received on.
 --- @param sender LibP2PDB.PeerName The sender of the message.
 function Private:OnCommReceived(prefix, encoded, channel, sender)
-    -- Ignore messages from self
-    if sender == self.playerName then
+    -- Ignore messages from self (sender may have realm suffix on cross-realm channels)
+    if sender == self.playerName or sender == self.playerName .. "-" .. self.playerRealm then
         return
     end
 
@@ -3879,7 +3884,7 @@ local Assert = {
 --- @param index integer Player index.
 --- @return table instance New private instance.
 local function NewPrivateInstance(index)
-    return Private.New(format("Player%d", index), format("Player-%04d-%08X", ((index - 1) % 9999) + 1, index))
+    return Private.New(format("Player%d", index), format("Realm%d", index % 2), format("Player-%04d-%08X", ((index - 1) % 9999) + 1, index))
 end
 
 --- Executes a function within the context of a given private instance.
