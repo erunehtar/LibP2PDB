@@ -1897,6 +1897,39 @@ function LibP2PDB:ListRows(db, tableName)
     return rows
 end
 
+--- Return a stateful iterator over all non-deleted rows in a table.
+--- Only includes rows that are not marked as tombstones (deleted).
+--- Rows inserted after the iterator is created may or may not be visited.
+--- @param db LibP2PDB.DBHandle Database handle.
+--- @param tableName LibP2PDB.TableName Name of the table to iterate over.
+--- @return fun(): LibP2PDB.TableKey?, LibP2PDB.RowData? iterator Stateful iterator returning key and row data for each non-deleted row, or nil when done.
+function LibP2PDB:IterateRows(db, tableName)
+    assert(IsEmptyTable(db), "db must be an empty table")
+    assert(IsNonEmptyString(tableName), "tableName must be a non-empty string")
+
+    -- Validate db instance
+    local dbi = priv.databases[db]
+    assert(dbi, "db is not a recognized database handle")
+
+    -- Validate table
+    local ti = dbi.tables[tableName]
+    assert(ti, "table '" .. tableName .. "' is not defined in the database")
+
+    -- Create an iterator over the rows in the table, skipping tombstones
+    local rows = ti.rows
+    local key = nil
+    return function()
+        local row
+        repeat
+            key, row = next(rows, key)
+        until key == nil or (row and not row.version.tombstone)
+        if key == nil or not row then
+            return nil
+        end
+        return key, ShallowCopy(row.data)
+    end
+end
+
 --- List all known peers for this database.
 --- This list is not persisted and is reset on logout/reload.
 --- @param db LibP2PDB.DBHandle Database handle.
@@ -7361,6 +7394,45 @@ local UnitTests = {
         Assert.Throws(function() LibP2PDB:ListRows(db, {}) end)
     end,
 
+    IterateRows = function()
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+        LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 })
+        LibP2PDB:InsertKey(db, "Users", 2, { name = "Alice", age = 30 })
+        LibP2PDB:InsertKey(db, "Users", 3, { name = "Eve", age = 35 })
+        LibP2PDB:DeleteKey(db, "Users", 2)
+        local rowCount = 0
+        for key, row in LibP2PDB:IterateRows(db, "Users") do
+            Assert.IsTable(row)
+            if key == 1 then
+                Assert.AreEqual(row, { name = "Bob", age = 25 })
+            elseif key == 3 then
+                Assert.AreEqual(row, { name = "Eve", age = 35 })
+            end
+            rowCount = rowCount + 1
+            row.name = "hello"
+            row.age = 123
+            row.field = "world"
+        end
+        Assert.AreEqual(rowCount, 2)
+        Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
+        Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 3), { name = "Eve", age = 35 })
+    end,
+
+    IterateRows_DBIsInvalid_Throws = function()
+        Assert.Throws(function() LibP2PDB:IterateRows(nil, "Users") end)
+        Assert.Throws(function() LibP2PDB:IterateRows(123, "Users") end)
+        Assert.Throws(function() LibP2PDB:IterateRows("", "Users") end)
+        Assert.Throws(function() LibP2PDB:IterateRows({}, "Users") end)
+    end,
+
+    IterateRows_TableNameIsInvalid_Throws = function()
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        Assert.Throws(function() LibP2PDB:IterateRows(db, nil) end)
+        Assert.Throws(function() LibP2PDB:IterateRows(db, 123) end)
+        Assert.Throws(function() LibP2PDB:IterateRows(db, {}) end)
+    end,
+
     SerializeDeserialize = function()
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
         local testData = { a = "value", b = 42, c = true, d = nil, nested = { e = "nested", f = 100, g = false, h = nil } }
@@ -9400,6 +9472,26 @@ local PerformanceTests = {
         Print("Database (%d rows) encoded for channel: %s (%s)", sampleCount, FormatSize(#encodedForChannel), FormatSize(#encodedForChannel / sampleCount, true))
         local encodedForPrint = LibP2PDB:EncodeForPrint(db, compressed)
         Print("Database (%d rows) encoded for print: %s (%s)", sampleCount, FormatSize(#encodedForPrint), FormatSize(#encodedForPrint / sampleCount, true))
+    end,
+
+    ListKeys = function()
+        local db = GenerateDatabase(sampleCount)
+
+        ProfileReset("LibP2PDB:ListKeys")
+        ProfileBegin("LibP2PDB:ListKeys")
+        local keys = LibP2PDB:ListKeys(db, "Players")
+        ProfileEnd("LibP2PDB:ListKeys")
+        PrintProfileMarker("LibP2PDB:ListKeys", "ListKeys")
+    end,
+
+    ListRows = function()
+        local db = GenerateDatabase(sampleCount)
+
+        ProfileReset("LibP2PDB:ListRows")
+        ProfileBegin("LibP2PDB:ListRows")
+        local rows = LibP2PDB:ListRows(db, "Players")
+        ProfileEnd("LibP2PDB:ListRows")
+        PrintProfileMarker("LibP2PDB:ListRows", "ListRows")
     end,
 }
 
