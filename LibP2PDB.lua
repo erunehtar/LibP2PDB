@@ -770,6 +770,7 @@ local priv = Private.New(assert(UnitName("player"), "unable to get player name")
 --- @field encoder LibP2PDB.Encoder? Optional custom encoder for encoding/decoding data for chat channels and print (default: LibDeflate if available).
 --- @field channels string[]? Optional array of custom channels to use for broadcasts, in addition to default channels (GUILD, RAID, PARTY, YELL).
 --- @field onChange LibP2PDB.DBOnChangeCallback? Optional callback function(tableName, key, data) invoked on any row change.
+--- @field onIsAdmin LibP2PDB.DBOnIsAdminCallback? Optional callback invoked with the acting peer's ID and name before enforcing `exclusive` or `immutable` restrictions. Return true to grant admin bypass for that peer.
 --- @field peerTimeout number? Optional seconds of inactivity after which a peer is considered inactive (default: 100.0).
 
 --- @class LibP2PDB.Filter Filter interface for generating data digests.
@@ -798,6 +799,7 @@ local priv = Private.New(assert(UnitName("player"), "unable to get player name")
 --- @alias LibP2PDB.DBOnMigrateTableCallback fun(target: LibP2PDB.MigrationContext, source: LibP2PDB.MigrationContext): LibP2PDB.TableName? Callback function invoked when table migration is needed. Return the target table name to migrate into (use source.tableName to keep the same name), or nil to drop/skip the table entirely.
 --- @alias LibP2PDB.DBOnMigrateRowCallback fun(target: LibP2PDB.MigrationContext, source: LibP2PDB.MigrationContext): LibP2PDB.TableKey?, LibP2PDB.RowData? Callback function invoked when row migration is needed. Return the target key and row data to migrate the row (use source.key and source.data to preserve as-is). Return nil as the first value to drop/skip the row entirely. Return a key with nil data to write a tombstone. Note: if key is nil, the row is always dropped regardless of the data value.
 --- @alias LibP2PDB.DBOnChangeCallback fun(tableName: LibP2PDB.TableName, key: LibP2PDB.TableKey, newData: LibP2PDB.RowData?, oldData: LibP2PDB.RowData?) Callback function invoked on any row change.
+--- @alias LibP2PDB.DBOnIsAdminCallback fun(peerID: LibP2PDB.PeerID, peerName: LibP2PDB.PeerName?): boolean Callback to determine if a peer has admin privileges. Return true to grant the peer permission to bypass `exclusive` and `immutable` restrictions. The peerName may be nil if the peer is not yet known.
 
 --- @class LibP2PDB.MigrationContext Context information for database/table/row migrations.
 --- @field db LibP2PDB.DBHandle Database handle.
@@ -826,6 +828,7 @@ function LibP2PDB:NewDatabase(desc)
     assert(IsInterfaceOrNil(desc.encoder, "EncodeForChannel", "DecodeFromChannel", "EncodeForPrint", "DecodeFromPrint"), "desc.encoder must be an encoder interface if provided")
     assert(IsNonEmptyTableOrNil(desc.channels), "desc.channels must be a non-empty array of string if provided")
     assert(IsFunctionOrNil(desc.onChange), "desc.onChange must be a function if provided")
+    assert(IsFunctionOrNil(desc.onIsAdmin), "desc.onIsAdmin must be a function if provided")
     assert(IsNumberOrNil(desc.peerTimeout, 0.0), "desc.peerTimeout must be a positive number if provided")
 
     if desc.channels then
@@ -863,7 +866,7 @@ function LibP2PDB:NewDatabase(desc)
         onMigrateRow = desc.onMigrateRow,
         onChange = desc.onChange,
         -- Access control
-        --writePolicy = nil,
+        onIsAdmin = desc.onIsAdmin,
     }
 
     -- Add self in peers list for easier comparisons (but never updated)
@@ -1234,7 +1237,7 @@ function LibP2PDB:SetKey(db, tableName, key, data)
     assert(type(key) == ti.keyType, "expected key of type '" .. ti.keyType .. "' for table '" .. tableName .. "', but was '" .. type(key) .. "'")
 
     -- Block modification if table is immutable
-    if ti.immutable and ti.rows[key] then
+    if ti.immutable and ti.rows[key] and not priv:IsAdmin(dbi, priv.peerID, priv.playerName) then
         ReportError(dbi, "cannot set key '%s' in table '%s' because the table is immutable", tostring(key), tableName)
         return false
     end
@@ -1275,7 +1278,7 @@ function LibP2PDB:UpdateKey(db, tableName, key, updateFn)
 
     -- Block modification if table is immutable
     local existingRow = ti.rows[key]
-    if ti.immutable and existingRow then
+    if ti.immutable and existingRow and not priv:IsAdmin(dbi, priv.peerID, priv.playerName) then
         ReportError(dbi, "cannot update key '%s' in table '%s' because the table is immutable", tostring(key), tableName)
         return false
     end
@@ -1323,7 +1326,7 @@ function LibP2PDB:DeleteKey(db, tableName, key)
     end
 
     -- Block deletion if table is immutable (tombstones are never valid in immutable tables)
-    if ti.immutable then
+    if ti.immutable and not priv:IsAdmin(dbi, priv.peerID, priv.playerName) then
         ReportError(dbi, "cannot delete key '%s' from table '%s' because the table is immutable", tostring(key), tableName)
         return false
     end
@@ -2135,6 +2138,7 @@ end
 --- @field onMigrateTable LibP2PDB.DBOnMigrateTableCallback? Callback for table migrations.
 --- @field onMigrateRow LibP2PDB.DBOnMigrateRowCallback? Callback for row migrations.
 --- @field onChange LibP2PDB.DBOnChangeCallback? Callback for row changes.
+--- @field onIsAdmin LibP2PDB.DBOnIsAdminCallback? Callback for admin privilege checks.
 
 --- @class LibP2PDB.PeerInfo Peer information.
 --- @field name LibP2PDB.PeerName Name of the peer.
@@ -2181,6 +2185,20 @@ end
 --- @alias LibP2PDB.TableRequest table<LibP2PDB.TableKey, LibP2PDB.RowRequest> Table of row requests mapped by their keys.
 --- @alias LibP2PDB.RowRequest LibP2PDB.Clock Current Lamport clock for the row.
 
+--- Determine if a peer has admin privileges, based on the database's onIsAdmin callback.
+--- Returns false if no callback is configured, or if the callback throws an error.
+--- @param dbi LibP2PDB.DBInstance Database instance.
+--- @param peerID LibP2PDB.PeerID Peer ID to check.
+--- @param peerName LibP2PDB.PeerName? Name of the peer (may be nil if not yet known).
+--- @return boolean isAdmin True if the peer has admin privileges, false otherwise.
+function Private:IsAdmin(dbi, peerID, peerName)
+    if not dbi.onIsAdmin then
+        return false
+    end
+    local success, result = SafeCall(dbi, dbi.onIsAdmin, peerID, peerName)
+    return success and result == true
+end
+
 --- Set a row in a table, overwriting any existing row.
 --- @param dbi LibP2PDB.DBInstance Database instance.
 --- @param tableName LibP2PDB.TableName Name of the table.
@@ -2196,15 +2214,19 @@ function Private:SetKey(dbi, tableName, ti, key, rowData)
     if ti.exclusive and existingRow and not existingRow.version.tombstone then
         local existingPeerID = existingRow.version.peerID == 0 and key or existingRow.version.peerID
         if existingPeerID ~= priv.peerID and key ~= priv.peerID then
-            ReportError(dbi, "cannot set key '%s' in exclusive table '%s'", key, tableName)
-            return false
+            if not self:IsAdmin(dbi, priv.peerID, priv.playerName) then
+                ReportError(dbi, "cannot set key '%s' in exclusive table '%s'", key, tableName)
+                return false
+            end
         end
     end
 
     -- Block modification if the table is immutable and the row already exists and is not a tombstone.
     if ti.immutable and existingRow and not existingRow.version.tombstone then
-        ReportError(dbi, "cannot set key '%s' in immutable table '%s'", key, tableName)
-        return false
+        if not self:IsAdmin(dbi, priv.peerID, priv.playerName) then
+            ReportError(dbi, "cannot set key '%s' in immutable table '%s'", key, tableName)
+            return false
+        end
     end
 
     -- Run custom validation if provided
@@ -2298,8 +2320,11 @@ function Private:MergeKey(dbi, dbClock, tableName, ti, key, rowData, rowVersion,
         local existingPeerID = existingRow.version.peerID == 0 and key or existingRow.version.peerID
         local incomingPeerID = rowVersion.peerID == 0 and key or rowVersion.peerID
         if existingPeerID ~= incomingPeerID and incomingPeerID ~= key then
-            ReportError(dbi, "cannot merge key '%s' in exclusive table '%s'", key, tableName)
-            return false
+            local incomingPeerName = dbi.peers[incomingPeerID] and dbi.peers[incomingPeerID].name
+            if not self:IsAdmin(dbi, incomingPeerID --[[@as LibP2PDB.PeerID]], incomingPeerName) then
+                ReportError(dbi, "cannot merge key '%s' in exclusive table '%s'", key, tableName)
+                return false
+            end
         end
     end
 
@@ -2318,8 +2343,12 @@ function Private:MergeKey(dbi, dbClock, tableName, ti, key, rowData, rowVersion,
     -- Block modification if the table is immutable and the row already exists and is not a tombstone.
     -- Only enforced for network merges. Local imports and migrations are trusted and bypass this.
     if message and changes and ti.immutable and (rowData == nil or (existingRow and not existingRow.version.tombstone)) then
-        ReportError(dbi, "cannot merge key '%s' in immutable table '%s'", key, tableName)
-        return false
+        local incomingPeerID = rowVersion.peerID == 0 and key or rowVersion.peerID
+        local incomingPeerName = dbi.peers[incomingPeerID] and dbi.peers[incomingPeerID].name
+        if not self:IsAdmin(dbi, incomingPeerID --[[@as LibP2PDB.PeerID]], incomingPeerName) then
+            ReportError(dbi, "cannot merge key '%s' in immutable table '%s'", key, tableName)
+            return false
+        end
     end
 
     -- Run custom validation if provided
@@ -4193,6 +4222,15 @@ local UnitTests = {
         Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = {} }) end)
     end,
 
+    NewDatabase_DescOnIsAdminIsInvalid_Throws = function()
+        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onIsAdmin = true }) end)
+        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onIsAdmin = false }) end)
+        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onIsAdmin = "" }) end)
+        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onIsAdmin = "invalid" }) end)
+        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onIsAdmin = 123 }) end)
+        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onIsAdmin = {} }) end)
+    end,
+
     NewDatabase_PrefixAlreadyExists_Throws = function()
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
         Assert.IsEmptyTable(db)
@@ -4933,6 +4971,50 @@ local UnitTests = {
         Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
     end,
 
+    SetKey_ImmutableTable_AdminBypass = function()
+        -- Admin can overwrite an existing immutable row via SetKey.
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onIsAdmin = function(peerID, peerName) return peerID == priv.peerID end })
+        LibP2PDB:NewTable(db, { name = "Users", keyType = "number", immutable = true, schema = { name = "string", age = "number" } })
+        Assert.AreEqual(LibP2PDB:SetKey(db, "Users", 1, { name = "Bob", age = 25 }), true)
+        -- Admin bypasses the immutable block
+        Assert.AreEqual(LibP2PDB:SetKey(db, "Users", 1, { name = "Alice", age = 30 }), true)
+        Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Alice", age = 30 })
+    end,
+
+    SetKey_ExclusiveTable_AdminBypass = function()
+        -- Admin can overwrite another peer's exclusive row via SetKey.
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onIsAdmin = function(peerID, peerName) return peerID == priv.peerID end })
+        LibP2PDB:NewTable(db, { name = "Users", keyType = "number", exclusive = true, schema = { name = "string", age = "number" } })
+        Assert.AreEqual(LibP2PDB:SetKey(db, "Users", 1, { name = "Bob", age = 25 }), true)
+        -- Simulate the row being authored by a different peer
+        local dbi = priv.databases[db]
+        dbi.tables["Users"].rows[1].version.peerID = 0x123456789ABC
+        -- Admin bypasses the exclusive block
+        Assert.AreEqual(LibP2PDB:SetKey(db, "Users", 1, { name = "Alice", age = 30 }), true)
+        Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Alice", age = 30 })
+    end,
+
+    SetKey_AdminBypass_NonAdminStillBlocked = function()
+        -- Non-admin is still blocked by both exclusive and immutable after onIsAdmin is configured.
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onIsAdmin = function(peerID, peerName) return false end })
+        LibP2PDB:NewTable(db, { name = "Immut", keyType = "number", immutable = true, schema = { name = "string" } })
+        LibP2PDB:NewTable(db, { name = "Excl", keyType = "number", exclusive = true, schema = { name = "string" } })
+        -- Immutable: first insert OK, overwrite rejected
+        Assert.AreEqual(LibP2PDB:SetKey(db, "Immut", 1, { name = "Bob" }), true)
+        Assert.ExpectErrors(function()
+            Assert.AreEqual(LibP2PDB:SetKey(db, "Immut", 1, { name = "Alice" }), false)
+        end)
+        Assert.AreEqual(LibP2PDB:GetKey(db, "Immut", 1), { name = "Bob" })
+        -- Exclusive: own row OK, other peer's row rejected
+        Assert.AreEqual(LibP2PDB:SetKey(db, "Excl", 1, { name = "Bob" }), true)
+        local dbi = priv.databases[db]
+        dbi.tables["Excl"].rows[1].version.peerID = 0x123456789ABC
+        Assert.ExpectErrors(function()
+            Assert.AreEqual(LibP2PDB:SetKey(db, "Excl", 1, { name = "Alice" }), false)
+        end)
+        Assert.AreEqual(LibP2PDB:GetKey(db, "Excl", 1), { name = "Bob" })
+    end,
+
     SetKey_ExclusiveTable = function()
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
         LibP2PDB:NewTable(db, { name = "Users", keyType = "number", exclusive = true, schema = { name = "string", age = "number" } })
@@ -5247,6 +5329,28 @@ local UnitTests = {
         Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Bob", age = 25 })
     end,
 
+    UpdateKey_ImmutableTable_AdminBypass = function()
+        -- Admin can update an existing immutable row via UpdateKey.
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onIsAdmin = function(peerID, peerName) return peerID == priv.peerID end })
+        LibP2PDB:NewTable(db, { name = "Users", keyType = "number", immutable = true, schema = { name = "string", age = "number" } })
+        Assert.AreEqual(LibP2PDB:UpdateKey(db, "Users", 1, function() return { name = "Bob", age = 25 } end), true)
+        -- Admin bypasses the immutable block
+        Assert.AreEqual(LibP2PDB:UpdateKey(db, "Users", 1, function() return { name = "Alice", age = 30 } end), true)
+        Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Alice", age = 30 })
+    end,
+
+    UpdateKey_ExclusiveTable_AdminBypass = function()
+        -- Admin can update another peer's exclusive row via UpdateKey.
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onIsAdmin = function(peerID, peerName) return peerID == priv.peerID end })
+        LibP2PDB:NewTable(db, { name = "Users", keyType = "number", exclusive = true, schema = { name = "string", age = "number" } })
+        Assert.AreEqual(LibP2PDB:UpdateKey(db, "Users", 1, function() return { name = "Bob", age = 25 } end), true)
+        local dbi = priv.databases[db]
+        dbi.tables["Users"].rows[1].version.peerID = 0x123456789ABC
+        -- Admin bypasses the exclusive block
+        Assert.AreEqual(LibP2PDB:UpdateKey(db, "Users", 1, function() return { name = "Alice", age = 30 } end), true)
+        Assert.AreEqual(LibP2PDB:GetKey(db, "Users", 1), { name = "Alice", age = 30 })
+    end,
+
     UpdateKey_ExclusiveTable = function()
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
         LibP2PDB:NewTable(db, { name = "Users", keyType = "number", exclusive = true, schema = { name = "string", age = "number" } })
@@ -5538,6 +5642,31 @@ local UnitTests = {
         -- Deleting a non-existent key is a no-op (nothing to protect), must not create a tombstone row
         Assert.AreEqual(LibP2PDB:DeleteKey(db, "Users", 2), true)
         Assert.IsNil(rows[2])
+    end,
+
+    DeleteKey_ImmutableTable_AdminBypass = function()
+        -- Admin can tombstone a row in an immutable table via DeleteKey.
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onIsAdmin = function(peerID, peerName) return peerID == priv.peerID end })
+        LibP2PDB:NewTable(db, { name = "Users", keyType = "number", immutable = true, schema = { name = "string", age = "number" } })
+        local dbi = priv.databases[db]
+        local rows = dbi.tables["Users"].rows
+        Assert.AreEqual(LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }), true)
+        -- Admin bypasses the immutable delete block
+        Assert.AreEqual(LibP2PDB:DeleteKey(db, "Users", 1), true)
+        Assert.AreEqual(rows[1].version.tombstone, true)
+        Assert.IsNil(LibP2PDB:GetKey(db, "Users", 1))
+    end,
+
+    DeleteKey_ExclusiveTable_AdminBypass = function()
+        -- Admin can tombstone another peer's exclusive row via DeleteKey.
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onIsAdmin = function(peerID, peerName) return peerID == priv.peerID end })
+        LibP2PDB:NewTable(db, { name = "Users", keyType = "number", exclusive = true, schema = { name = "string", age = "number" } })
+        Assert.AreEqual(LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 }), true)
+        local dbi = priv.databases[db]
+        dbi.tables["Users"].rows[1].version.peerID = 0x123456789ABC
+        -- Admin bypasses the exclusive delete block
+        Assert.AreEqual(LibP2PDB:DeleteKey(db, "Users", 1), true)
+        Assert.IsNil(LibP2PDB:GetKey(db, "Users", 1))
     end,
 
     DeleteKey_ExclusiveTable = function()
@@ -6708,6 +6837,95 @@ local UnitTests = {
         Assert.AreEqual(row.version.clock, 5)
         Assert.AreEqual(row.data, originalData)
         Assert.IsNil(row.version.tombstone)
+    end,
+
+    MergeKey_ExclusiveTable_AdminBypass = function()
+        -- Incoming network merge from an admin peer bypasses the exclusive restriction.
+        local officerPeerID = 0xAABBCCDDEEFF
+        local officerName = "Officer-Realm"
+        local db = LibP2PDB:NewDatabase({
+            prefix = "LibP2PDBTests",
+            onIsAdmin = function(peerID, peerName) return peerID == officerPeerID end,
+        })
+        LibP2PDB:NewTable(db, { name = "Users", keyType = "number", exclusive = true, schema = { name = "string", age = "number" } })
+        local dbi = priv.databases[db]
+        local ti = dbi.tables["Users"]
+
+        -- Plant an existing row belonging to some other peer (trusted import)
+        local originalAuthorPeerID = 0x111111111111
+        priv:MergeKey(dbi, 1, "Users", ti, 1, { name = "Bob", age = 25 }, { clock = 1, peerID = originalAuthorPeerID }, nil)
+        Assert.AreEqual(ti.rows[1].data.name, "Bob")
+
+        -- Fake peer info entry so IsAdmin can resolve the officer name
+        dbi.peers[officerPeerID] = { name = officerName, lastSeen = 0 }
+
+        -- Officer overrides the exclusive row via network merge
+        priv:MergeKey(dbi, 2, "Users", ti, 1,
+            { name = "Fixed", age = 99 },
+            { clock = 2, peerID = officerPeerID },
+            { peerID = officerPeerID, sender = officerName, channel = "GUILD" }
+        )
+        Assert.AreEqual(ti.rows[1].data.name, "Fixed")
+    end,
+
+    MergeKey_ImmutableTable_AdminBypass = function()
+        -- Incoming network merge from an admin peer bypasses the immutable restriction.
+        local officerPeerID = 0xAABBCCDDEEFF
+        local officerName = "Officer-Realm"
+        local db = LibP2PDB:NewDatabase({
+            prefix = "LibP2PDBTests",
+            onIsAdmin = function(peerID, peerName) return peerID == officerPeerID end,
+        })
+        LibP2PDB:NewTable(db, { name = "Users", keyType = "number", immutable = true, schema = { name = "string", age = "number" } })
+        local dbi = priv.databases[db]
+        local ti = dbi.tables["Users"]
+
+        -- Write the initial row (trusted import)
+        priv:MergeKey(dbi, 1, "Users", ti, 1, { name = "Bob", age = 25 }, { clock = 1, peerID = 0x111111111111 }, nil)
+        Assert.AreEqual(ti.rows[1].data.name, "Bob")
+
+        -- Fake peer info entry so IsAdmin can resolve the officer name
+        dbi.peers[officerPeerID] = { name = officerName, lastSeen = 0 }
+
+        -- Officer overrides the immutable row via network merge
+        priv:MergeKey(dbi, 2, "Users", ti, 1,
+            { name = "Fixed", age = 99 },
+            { clock = 2, peerID = officerPeerID },
+            { peerID = officerPeerID, sender = officerName, channel = "GUILD" }
+        )
+        Assert.AreEqual(ti.rows[1].data.name, "Fixed")
+    end,
+
+    MergeKey_AdminBypass_NonAdminNetworkStillBlocked = function()
+        -- Non-admin network peer is still blocked by both exclusive and immutable.
+        local db = LibP2PDB:NewDatabase({
+            prefix = "LibP2PDBTests",
+            onIsAdmin = function(peerID, peerName) return false end,
+        })
+        LibP2PDB:NewTable(db, { name = "Immut", keyType = "number", immutable = true, schema = { name = "string" } })
+        LibP2PDB:NewTable(db, { name = "Excl", keyType = "number", exclusive = true, schema = { name = "string" } })
+        local dbi = priv.databases[db]
+        local tiImmut = dbi.tables["Immut"]
+        local tiExcl = dbi.tables["Excl"]
+        local renegadePeerID = 0x123456789ABC
+        local renegadeName = "Hacker-Realm"
+        local fakeMessage = { peerID = renegadePeerID, sender = renegadeName, channel = "GUILD" }
+
+        -- Plant initial rows via trusted import
+        priv:MergeKey(dbi, 1, "Immut", tiImmut, 1, { name = "Bob" }, { clock = 1, peerID = 0x111111111111 }, nil)
+        priv:MergeKey(dbi, 2, "Excl", tiExcl, 1, { name = "Bob" }, { clock = 2, peerID = 0x111111111111 }, nil)
+
+        -- Renegade tries to overwrite immutable row via network merge — must be rejected
+        Assert.ExpectErrors(function()
+            priv:MergeKey(dbi, 3, "Immut", tiImmut, 1, { name = "Hack" }, { clock = 3, peerID = renegadePeerID }, fakeMessage)
+        end)
+        Assert.AreEqual(tiImmut.rows[1].data.name, "Bob")
+
+        -- Renegade tries to overwrite exclusive row via network merge — must be rejected
+        Assert.ExpectErrors(function()
+            priv:MergeKey(dbi, 4, "Excl", tiExcl, 1, { name = "Hack" }, { clock = 4, peerID = renegadePeerID }, fakeMessage)
+        end)
+        Assert.AreEqual(tiExcl.rows[1].data.name, "Bob")
     end,
 
     Migration = function()
