@@ -62,7 +62,7 @@ local type, ipairs, pairs, rawequal = type, ipairs, pairs, rawequal
 local min, max, abs, floor, ceil, sin, log = min, max, abs, floor, ceil, sin, log
 local bnot, band, bor, bxor, lshift, rshift = bit.bnot, bit.band, bit.bor, bit.bxor, bit.lshift, bit.rshift
 local tonumber, tostring, tostringall = tonumber, tostring, tostringall
-local format, strsub, strfind, strjoin, strmatch, strbyte, strchar = format, strsub, strfind, strjoin, strmatch, strbyte, strchar
+local format, strsub, strfind, strjoin, strmatch, strbyte, strchar, strlower = format, strsub, strfind, strjoin, strmatch, strbyte, strchar, strlower
 local tinsert, tremove, tconcat, tsort = table.insert, table.remove, table.concat, table.sort
 local unpack, select = unpack, select
 local setmetatable, getmetatable = setmetatable, getmetatable
@@ -76,6 +76,9 @@ local UnitName, UnitGUID = UnitName, UnitGUID
 local GetTime, GetServerTime = GetTime, GetServerTime
 local IsInGuild, IsInRaid, IsInGroup, IsInInstance = IsInGuild, IsInRaid, IsInGroup, IsInInstance
 local GetPlayerInfoByGUID = GetPlayerInfoByGUID
+local GetRealmName = GetRealmName
+local GetChannelName = GetChannelName
+local SendChatMessage = C_ChatInfo.SendChatMessage
 
 local InActiveBattlefield
 if C_PvP and C_PvP.IsActiveBattlefield then
@@ -720,6 +723,7 @@ end
 --- @field peerID LibP2PDB.PeerID The player's peer ID.
 --- @field prefixes table<string, LibP2PDB.DBHandle> Mapping of database prefixes to database handles.
 --- @field databases table<LibP2PDB.DBHandle, LibP2PDB.DBInstance> Mapping of database handles to database instances.
+--- @field frame Frame? Hidden frame for CHAT_MSG_CHANNEL event delivery. Nil when no chat channels are registered.
 local Private = {}
 Private.__index = Private
 
@@ -741,6 +745,7 @@ function Private.New(playerName, playerRealm, playerGUID)
         peerID = peerID,
         prefixes = setmetatable({}, { __mode = "v" }),
         databases = setmetatable({}, { __mode = "k" }),
+        frame = nil,
     }, Private)
     return instance
 end
@@ -1738,6 +1743,113 @@ function LibP2PDB:BroadcastKey(db, tableName, key)
     return true
 end
 
+--- Register a custom chat channel for receiving sync messages.
+--- @param db LibP2PDB.DBHandle Database handle.
+--- @param channel string Name of the custom chat channel to listen on.
+function LibP2PDB:RegisterChatChannel(db, channel)
+    assert(IsEmptyTable(db), "db must be an empty table")
+    assert(IsNonEmptyString(channel), "channelName must be a non-empty string")
+
+    -- Validate db instance
+    local dbi = priv.databases[db]
+    assert(dbi, "db is not a recognized database handle")
+
+    -- Initialize chat channels table
+    dbi.chatChannels = dbi.chatChannels or {}
+
+    -- No-op if already registered
+    local lower = strlower(channel)
+    if dbi.chatChannels[lower] then
+        return
+    end
+    dbi.chatChannels[lower] = true
+
+    -- Create the CHAT_MSG_CHANNEL listener frame on first use
+    if not priv.frame then
+        local frame = CreateFrame("Frame")
+        frame:RegisterEvent("CHAT_MSG_CHANNEL")
+        frame:SetScript("OnEvent", function(_, _, msg, sender, _, _, _, _, _, _, channel)
+            priv:OnChatMsgChannel(msg, channel, sender)
+        end)
+        priv.frame = frame
+    end
+end
+
+--- Unregister a custom chat channel previously registered with RegisterChatChannel.
+--- @param db LibP2PDB.DBHandle Database handle.
+--- @param channel string Name of the custom chat channel to stop listening on.
+function LibP2PDB:UnregisterChatChannel(db, channel)
+    assert(IsEmptyTable(db), "db must be an empty table")
+    assert(IsNonEmptyString(channel), "channelName must be a non-empty string")
+
+    -- Validate db instance
+    local dbi = priv.databases[db]
+    assert(dbi, "db is not a recognized database handle")
+
+    -- No-op if nothing registered for this db
+    if not dbi.chatChannels then
+        return
+    end
+
+    -- Remove the channel
+    dbi.chatChannels[strlower(channel)] = nil
+end
+
+--- Broadcast a key to registered chat channels.
+--- The function must be called from a hardware event handler (e.g. button click) or it will not succeed.
+--- Validates the key type against the table definition.
+--- @param db LibP2PDB.DBHandle Database handle.
+--- @param tableName LibP2PDB.TableName? Name of the table to send from, or nil to send from all tables that contain the key.
+--- @param key LibP2PDB.TableKey Primary key value for the row (must match table's keyType).
+--- @return boolean success Returns true on success, false otherwise.
+function LibP2PDB:BroadcastKeyChatChannel(db, tableName, key)
+    assert(IsEmptyTable(db), "db must be an empty table")
+    assert(IsNonEmptyStringOrNil(tableName), "table name must be a non-empty string or nil")
+    assert(IsNonEmptyString(key) or IsNumber(key), "key must be a string or number")
+
+    -- Validate db instance
+    local dbi = priv.databases[db]
+    assert(dbi, "db is not a recognized database handle")
+
+    -- Gather the tables to send
+    local tableNames = {} --- @type LibP2PDB.TableName[]
+    if tableName then
+        tinsert(tableNames, tableName)
+    else
+        for tableName in pairs(dbi.tables) do
+            tinsert(tableNames, tableName)
+        end
+    end
+
+    -- Collect the rows to send
+    local tableStateMap = {} --- @type LibP2PDB.TableStateMap
+    for _, tableName in ipairs(tableNames) do
+        local ti = dbi.tables[tableName]
+        if ti then
+            local row = ti.rows[key]
+            if row then
+                tableStateMap[tableName] = { [key] = priv:ExportRow(row, ti.schemaSorted) } --- @type LibP2PDB.RowStateMap
+            end
+        end
+    end
+
+    -- Ensure there is at least one row to send
+    if IsEmptyTable(tableStateMap) then
+        ReportError(dbi, "no valid rows to broadcast")
+        return false
+    end
+
+    -- Send the row to the target player
+    Spam("broadcasting key '%s' from table(s) '%s' to chat channels", key, strjoin(", ", unpack(tableNames)))
+    local obj = { --- @type LibP2PDB.Packet
+        CommMessageType.RowsResponse,
+        priv.peerID,
+        { dbi.version, dbi.clock, tableStateMap }, --- @type LibP2PDB.DBState
+    }
+    priv:BroadcastChatChannel(dbi, obj, CommPriority.High)
+    return true
+end
+
 ------------------------------------------------------------------------------------------------------------------------
 -- Public API: Utility / Metadata
 ------------------------------------------------------------------------------------------------------------------------
@@ -2124,6 +2236,7 @@ end
 --- @field version LibP2PDB.DBVersion Database version.
 --- @field clock LibP2PDB.Clock Lamport clock for versioning.
 --- @field channels string[]? List of custom channels for broadcasts.
+--- @field chatChannels table<string, boolean>? Lowercase-normalized set of registered chat channel names. Nil when no channels are registered.
 --- @field filter LibP2PDB.Filter Filter interface.
 --- @field serializer LibP2PDB.Serializer Serializer interface.
 --- @field compressor LibP2PDB.Compressor Compressor interface.
@@ -3159,6 +3272,52 @@ function Private:Broadcast(dbi, data, channels, priority)
     -- end
 end
 
+--- Broadcast a message to registered chat channels.
+--- @param dbi LibP2PDB.DBInstance Database instance.
+--- @param data any The message data to send.
+--- @param priority LibP2PDB.CommPriority The priority of the message.
+function Private:BroadcastChatChannel(dbi, data, priority)
+    local serialized = dbi.serializer:Serialize(data)
+    if not serialized then
+        ReportError(dbi, "failed to serialize data for prefix '%s'", dbi.prefix)
+        return
+    end
+
+    local compressed = dbi.compressor:Compress(serialized)
+    if not compressed then
+        ReportError(dbi, "failed to compress data for prefix '%s'", dbi.prefix)
+        return
+    end
+
+    local encoded = dbi.encoder:EncodeForPrint(compressed)
+    if not encoded then
+        ReportError(dbi, "failed to encode data for prefix '%s'", dbi.prefix)
+        return
+    end
+
+    local msg = dbi.prefix .. ";" .. #encoded .. ";" .. encoded
+    if #msg > 255 then
+        ReportError(dbi, "encoded message exceeds 255 byte limit for chat channels for prefix '%s'", dbi.prefix)
+        return
+    end
+
+    Spam("broadcasting %d bytes on prefix '%s' to chat channels", #msg, dbi.prefix)
+    if DEBUG and VERBOSITY >= 5 then
+        DevTools_Dump(data)
+    end
+
+    for channel in pairs(dbi.chatChannels) do
+        local chanID = GetChannelName(channel)
+        if chanID and chanID > 0 then
+            local success = SafeCall(dbi, SendChatMessage, msg, "CHANNEL", nil, chanID)
+            if not success then
+                ReportError(dbi, "failed to send message on chat channel '%s' for prefix '%s'", channel, dbi.prefix)
+                break -- stop if something went wrong to avoid spamming errors for each channel
+            end
+        end
+    end
+end
+
 --- Verify that the sender name matches the claimed peer ID.
 --- Returns true if verified, false if a definitive mismatch was detected (spoofed peer ID),
 --- or nil if the check was inconclusive due to a WoW client-cache miss for an unknown peer.
@@ -3177,13 +3336,24 @@ function Private:VerifySenderPeerID(message)
         return false
     end
 
+    -- Normalize sender to fully-qualified "Name-Realm" form for comparison;
+    -- if the sender string has no realm suffix, assume it is the local player's realm.
+    local senderFull = strmatch(sender, "%-") and sender or (sender .. "-" .. self.playerRealm)
+    local senderBase = strmatch(senderFull, "^([^%-]+)")
+
     -- Try to resolve the player name from the WoW client cache
     local name, realm = select(6, GetPlayerInfoByGUID(playerGUID))
-    if name and name ~= "" then
-        -- Cache hit: definitive match or mismatch
-        local fullName = (realm and realm ~= "") and (name .. "-" .. realm) or name
-        if fullName ~= sender then
-            Error("received message from %s with mismatched sender name %s peer ID %X on channel '%s'", sender, fullName, peerID, message.channel)
+    if IsNonEmptyString(name) then
+        -- Cache hit: definitive match or mismatch.
+        local mismatch
+        if IsNonEmptyString(realm) then
+            mismatch = senderFull ~= name .. "-" .. realm
+        else
+            mismatch = senderBase ~= name
+        end
+        if mismatch then
+            local expected = IsNonEmptyString(realm) and (name .. "-" .. realm) or name
+            Error("received message from %s with mismatched sender name %s peer ID %X on channel '%s'", sender, expected, peerID, message.channel)
             return false
         end
         return true
@@ -3192,7 +3362,13 @@ function Private:VerifySenderPeerID(message)
     -- Cache miss: fall back to our own verified peer registry
     local knownPeer = dbi.peers[peerID]
     if knownPeer then
-        if knownPeer.name ~= sender then
+        local mismatch
+        if strmatch(knownPeer.name, "%-") then
+            mismatch = senderFull ~= knownPeer.name
+        else
+            mismatch = senderBase ~= knownPeer.name
+        end
+        if mismatch then
             Error("received message from %s claiming peer ID %X already known as %s on channel '%s'", sender, peerID, knownPeer.name, message.channel)
             return false
         end
@@ -3216,7 +3392,7 @@ end
 --- @field sender LibP2PDB.PeerName The sender name of the message.
 --- @field dbi LibP2PDB.DBInstance Database instance the message is associated with.
 
---- Handler for received communication messages.
+--- Handler for received AceComm messages (encoded with EncodeForChannel).
 --- @param prefix string The communication prefix.
 --- @param encoded string The encoded message data.
 --- @param channel string The channel the message was received on.
@@ -3240,27 +3416,93 @@ function Private:OnCommReceived(prefix, encoded, channel, sender)
         return
     end
 
-    -- If this message is already being processed or was recently processed, skip it to prevent duplicate processing.
-    if dbi.msgCache[encoded] then
-        return
-    end
-
-    -- Deserialize message
     local compressed = dbi.encoder:DecodeFromChannel(encoded)
     if not compressed then
         ReportError(dbi, "failed to decode message from %s prefix '%s' channel '%s'", sender, prefix, channel)
         return
     end
 
+    self:HandleCompressedMessage(dbi, compressed, channel, sender)
+end
+
+--- Handler for received chat messages on registered channels (encoded with EncodeForPrint).
+--- Messages that are not well-formed sync packets are silently ignored.
+--- @param msg string The chat message text.
+--- @param channel string The channel name.
+--- @param sender string The name of the sender (may include realm suffix).
+function Private:OnChatMsgChannel(msg, channel, sender)
+    -- Ignore messages from self
+    if sender == self.playerName or sender == self.playerName .. "-" .. self.playerRealm then
+        return
+    end
+
+    -- Parse: prefix;length;encoded — reject anything without a semi-colon
+    local prefix, length, encoded = strmatch(msg, "^(%w+);(%d+);(.+)$")
+    if not prefix or not length or not encoded then
+        return
+    end
+
+    -- Check that the prefix is indeed a non-empty string
+    if not IsNonEmptyString(prefix) then
+        return
+    end
+
+    -- Check that the encoded message is indeed a non-empty string
+    if not IsNonEmptyString(encoded) then
+        return
+    end
+
+    -- Check that the length is a valid integer and matches the actual length of the encoded message
+    local expectedLength = tonumber(length)
+    if not IsInteger(expectedLength) or expectedLength ~= #encoded then
+        return
+    end
+
+    -- Look up the database for this prefix
+    local db = self.prefixes[prefix]
+    if not db then
+        return
+    end
+    local dbi = self.databases[db]
+    if not dbi then
+        return
+    end
+
+    -- Verify this channel is registered for this database
+    local lower = strlower(channel)
+    if not dbi.chatChannels or not dbi.chatChannels[lower] then
+        return
+    end
+
+    -- Decode from print-safe encoding (EncodeForPrint) used by the chat channel send path
+    local compressed = dbi.encoder:DecodeFromPrint(encoded)
+    if not compressed then
+        return
+    end
+
+    self:HandleCompressedMessage(dbi, compressed, channel, sender)
+end
+
+--- Handle a received communication message given its already-decoded compressed payload.
+--- @param dbi LibP2PDB.DBInstance Database instance.
+--- @param compressed string The compressed payload bytes.
+--- @param channel string The channel the message was received on.
+--- @param sender LibP2PDB.PeerName The sender of the message.
+function Private:HandleCompressedMessage(dbi, compressed, channel, sender)
+    -- If this message is already being processed or was recently processed, skip it.
+    if dbi.msgCache[compressed] then
+        return
+    end
+
     local serialized = dbi.compressor:Decompress(compressed)
     if not serialized then
-        ReportError(dbi, "failed to decompress message from %s prefix '%s' channel '%s'", sender, prefix, channel)
+        ReportError(dbi, "failed to decompress message from %s prefix '%s' channel '%s'", sender, dbi.prefix, channel)
         return
     end
 
     local obj = dbi.serializer:Deserialize(serialized)
     if not obj then
-        ReportError(dbi, "failed to deserialize message from %s prefix '%s' channel '%s': %s", sender, prefix, channel, Dump(obj))
+        ReportError(dbi, "failed to deserialize message from %s prefix '%s' channel '%s': %s", sender, dbi.prefix, channel, Dump(obj))
         return
     end
 
@@ -3315,35 +3557,35 @@ function Private:OnCommReceived(prefix, encoded, channel, sender)
     local verifyResult = self:VerifySenderPeerID(message)
     if verifyResult == true then
         -- Verified, process immediately
-        self:ProcessMessage(message, encoded)
+        self:ProcessMessage(message, compressed)
     elseif verifyResult == false then
         -- Definitive mismatch, reject immediately
         return
     elseif verifyResult == nil then
         -- Cache miss, defer re-verification after 1s.
-        dbi.msgCache[encoded] = C_Timer.NewTimer(1, function()
+        dbi.msgCache[compressed] = C_Timer.NewTimer(1, function()
             -- Hard re-verification gate: only true (not nil) allows dispatch.
             -- This catches deferred cache-miss cases and defends in depth against spoofing.
             -- If the WoW client cache is still empty after 1s, the message is dropped.
             if self:VerifySenderPeerID(message) ~= true then
                 Warn("dropping message from %s peer ID %X on channel '%s': could not verify sender after delay", sender, message.peerID, channel)
-                dbi.msgCache[encoded] = nil
+                dbi.msgCache[compressed] = nil
                 return
             end
-            self:ProcessMessage(message, encoded)
+            self:ProcessMessage(message, compressed)
         end)
     end
 end
 
 --- Process a peer-verified message.
 --- @param message LibP2PDB.Message The peer-verified message to process.
---- @param encoded string The encoded wire string used as the message cache key.
-function Private:ProcessMessage(message, encoded)
+--- @param compressed string The compressed wire string used as the message cache key.
+function Private:ProcessMessage(message, compressed)
     local dbi = message.dbi
     self:UpdatePeer(message)
     self:DispatchMessage(message)
-    dbi.msgCache[encoded] = C_Timer.NewTimer(MSG_CACHE_EXPIRY, function()
-        dbi.msgCache[encoded] = nil
+    dbi.msgCache[compressed] = C_Timer.NewTimer(MSG_CACHE_EXPIRY, function()
+        dbi.msgCache[compressed] = nil
     end)
 end
 
@@ -7791,20 +8033,26 @@ local testChannels = {
 }
 local testChannelNames = { "GUILD", "RAID", "PARTY", "YELL", "WHISPER" }
 
---- Simulates ticking multiple private instances, processing their outgoing messages and OnUpdate handlers.
+--- Fake queue of chat channel messages, populated by the mocked SendChatMessage during tests.
+--- Each entry: { msg = string, channel = string, sender = string }
+local testChatMessages = {}
+
+--- Simulates ticking multiple private instances, processing all outgoing messages (both AceComm addon
+--- channels and WoW chat channels) until no more messages remain in either queue.
 --- @param instances table[] Array of private instances to tick.
 local function TickPrivateInstances(instances)
-    -- Process messages until there are no more to process
     local moreMessagesToProcess = true
     while moreMessagesToProcess do
-        -- Swap out the channel table so new messages go into the fresh one
-        local messages = testChannels
+        -- Swap out both queues so new messages from this round go into fresh ones
+        local commMessages = testChannels
         testChannels = { GUILD = {}, RAID = {}, PARTY = {}, YELL = {}, WHISPER = {} }
+        local chatMessages = testChatMessages
+        testChatMessages = {}
 
-        -- Process outgoing messages from each instance
+        -- Dispatch AceComm addon-channel messages
         for _, channel in ipairs(testChannelNames) do
             for _, instance in ipairs(instances) do
-                for _, msg in ipairs(messages[channel] or {}) do
+                for _, msg in ipairs(commMessages[channel] or {}) do
                     if channel ~= "WHISPER" or msg.target == instance.playerName then
                         PrivateScope(instance, function() instance:OnCommReceived(msg.prefix, msg.text, msg.distribution, msg.sender) end)
                     end
@@ -7812,12 +8060,23 @@ local function TickPrivateInstances(instances)
             end
         end
 
-        -- Check if there are more messages to process
-        moreMessagesToProcess = false
-        for _, channel in ipairs(testChannelNames) do
-            if #testChannels[channel] > 0 then
-                moreMessagesToProcess = true
-                break
+        -- Dispatch WoW chat-channel messages
+        for _, msg in ipairs(chatMessages) do
+            for _, instance in ipairs(instances) do
+                PrivateScope(instance, function()
+                    instance:OnChatMsgChannel(msg.msg, msg.channel, msg.sender)
+                end)
+            end
+        end
+
+        -- Continue until both queues are empty
+        moreMessagesToProcess = #testChatMessages > 0
+        if not moreMessagesToProcess then
+            for _, channel in ipairs(testChannelNames) do
+                if #testChannels[channel] > 0 then
+                    moreMessagesToProcess = true
+                    break
+                end
             end
         end
     end
@@ -9234,6 +9493,164 @@ local NetworkTests = {
         end
     end,
 
+    BroadcastKeyChatChannel = function()
+        local instances = {}
+        local databases = {}
+        local testChannel = "libp2pdbtestchan"
+        for i = 1, numPeers do
+            instances[i] = NewPrivateInstance(i)
+            databases[i] = PrivateScope(instances[i], function()
+                local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+                LibP2PDB:NewTable(db, {
+                    name = "Users",
+                    keyType = "number",
+                    schema = {
+                        name = "string",
+                        age = "number"
+                    },
+                    onValidate = function(key, data, context)
+                        Assert.IsNumber(key)
+                        Assert.IsTable(data)
+                        Assert.IsTableOrNil(context)
+                        if context then
+                            Assert.IsNumber(context.peerID)
+                            Assert.IsNonEmptyString(context.peerName)
+                            Assert.IsNonEmptyString(context.channel)
+                            -- in this test only peer 1 broadcasts, so it should be the sender on the chat channel
+                            Assert.AreEqual(context.peerID, instances[1].peerID)
+                            Assert.AreEqual(context.peerName, instances[1].playerName)
+                            instances[i].receivedBroadcast = true
+                        end
+                        return true
+                    end,
+                })
+                LibP2PDB:InsertKey(db, "Users", i, { name = "Player" .. i, age = 20 + i })
+                -- Pre-set the frame to prevent CreateFrame from being called in tests
+                priv.frame = priv.frame or {}
+                LibP2PDB:RegisterChatChannel(db, testChannel)
+                return db
+            end)
+        end
+
+        -- Make all peers broadcast their presence so each peer has a verified peer registry
+        VerbosityScope(3, function()
+            for i = 1, numPeers do
+                PrivateScope(instances[i], function() LibP2PDB:BroadcastPresence(databases[i]) end)
+            end
+            TickPrivateInstances(instances)
+        end)
+
+        -- Make peer 1 broadcast a key to all other peers via the chat channel
+        VerbosityScope(3, function()
+            PrivateScope(instances[1], function()
+                LibP2PDB:BroadcastKeyChatChannel(databases[1], "Users", 1)
+            end)
+            TickPrivateInstances(instances)
+        end)
+
+        -- Check that peer 1 did not receive its own broadcast
+        PrivateScope(instances[1], function()
+            Assert.IsNil(instances[1].receivedBroadcast)
+        end)
+
+        -- Check that all other peers have received the data
+        for i = 2, numPeers do
+            PrivateScope(instances[i], function()
+                local keys = LibP2PDB:ListKeys(databases[i], "Users")
+                Assert.AreEqual(#keys, 2)
+                Assert.AreEqual(LibP2PDB:GetKey(databases[i], "Users", 1), { name = "Player1", age = 21 })
+                Assert.AreEqual(LibP2PDB:GetKey(databases[i], "Users", i), { name = "Player" .. i, age = 20 + i })
+                Assert.IsTrue(instances[i].receivedBroadcast)
+            end)
+        end
+    end,
+
+    BroadcastKeyChatChannel_FromAnyTables = function()
+        local instances = {}
+        local databases = {}
+        local testChannel = "libp2pdbtestchan"
+        for i = 1, numPeers do
+            instances[i] = NewPrivateInstance(i)
+            databases[i] = PrivateScope(instances[i], function()
+                local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+                LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
+                LibP2PDB:NewTable(db, { name = "Scores", keyType = "number", schema = { score = "number" } })
+                LibP2PDB:InsertKey(db, "Users", i, { name = "Player" .. i, age = 20 + i })
+                LibP2PDB:InsertKey(db, "Scores", i, { score = i * 10 })
+                priv.frame = priv.frame or {}
+                LibP2PDB:RegisterChatChannel(db, testChannel)
+                return db
+            end)
+        end
+
+        -- Make all peers broadcast their presence
+        VerbosityScope(3, function()
+            for i = 1, numPeers do
+                PrivateScope(instances[i], function() LibP2PDB:BroadcastPresence(databases[i]) end)
+            end
+            TickPrivateInstances(instances)
+        end)
+
+        -- Make peer 1 broadcast key 1 from all tables (nil tableName)
+        VerbosityScope(3, function()
+            PrivateScope(instances[1], function()
+                LibP2PDB:BroadcastKeyChatChannel(databases[1], nil, 1)
+            end)
+            TickPrivateInstances(instances)
+        end)
+
+        -- Check that all other peers have received data from both tables
+        for i = 2, numPeers do
+            PrivateScope(instances[i], function()
+                local keys = LibP2PDB:ListKeys(databases[i], "Users")
+                Assert.AreEqual(#keys, 2)
+                Assert.AreEqual(LibP2PDB:GetKey(databases[i], "Users", 1), { name = "Player1", age = 21 })
+                Assert.AreEqual(LibP2PDB:GetKey(databases[i], "Users", i), { name = "Player" .. i, age = 20 + i })
+                keys = LibP2PDB:ListKeys(databases[i], "Scores")
+                Assert.AreEqual(#keys, 2)
+                Assert.AreEqual(LibP2PDB:GetKey(databases[i], "Scores", 1), { score = 10 })
+                Assert.AreEqual(LibP2PDB:GetKey(databases[i], "Scores", i), { score = i * 10 })
+            end)
+        end
+    end,
+
+    BroadcastKeyChatChannel_DBIsInvalid_Throws = function()
+        local instance = NewPrivateInstance(1)
+        PrivateScope(instance, function()
+            Assert.Throws(function() LibP2PDB:BroadcastKeyChatChannel(nil, "Users", 1) end)
+            Assert.Throws(function() LibP2PDB:BroadcastKeyChatChannel(true, "Users", 1) end)
+            Assert.Throws(function() LibP2PDB:BroadcastKeyChatChannel(false, "Users", 1) end)
+            Assert.Throws(function() LibP2PDB:BroadcastKeyChatChannel("", "Users", 1) end)
+            Assert.Throws(function() LibP2PDB:BroadcastKeyChatChannel("invalid", "Users", 1) end)
+            Assert.Throws(function() LibP2PDB:BroadcastKeyChatChannel(123, "Users", 1) end)
+            Assert.Throws(function() LibP2PDB:BroadcastKeyChatChannel({}, "Users", 1) end)
+        end)
+    end,
+
+    BroadcastKeyChatChannel_TableNameIsInvalid_Throws = function()
+        local instance = NewPrivateInstance(1)
+        PrivateScope(instance, function()
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+            Assert.Throws(function() LibP2PDB:BroadcastKeyChatChannel(db, true, 1) end)
+            Assert.Throws(function() LibP2PDB:BroadcastKeyChatChannel(db, false, 1) end)
+            Assert.Throws(function() LibP2PDB:BroadcastKeyChatChannel(db, "", 1) end)
+            Assert.Throws(function() LibP2PDB:BroadcastKeyChatChannel(db, 123, 1) end)
+            Assert.Throws(function() LibP2PDB:BroadcastKeyChatChannel(db, {}, 1) end)
+        end)
+    end,
+
+    BroadcastKeyChatChannel_KeyIsInvalid_Throws = function()
+        local instance = NewPrivateInstance(1)
+        PrivateScope(instance, function()
+            local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+            LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { name = "string", age = "number" } })
+            Assert.Throws(function() LibP2PDB:BroadcastKeyChatChannel(db, "Users", nil) end)
+            Assert.Throws(function() LibP2PDB:BroadcastKeyChatChannel(db, "Users", true) end)
+            Assert.Throws(function() LibP2PDB:BroadcastKeyChatChannel(db, "Users", false) end)
+            Assert.Throws(function() LibP2PDB:BroadcastKeyChatChannel(db, "Users", {}) end)
+        end)
+    end,
+
     Version = function()
         local instances = {}
         local databases = {}
@@ -9897,6 +10314,31 @@ local function RunTests()
             end,
         }
 
+        -- Override GetChannelName to return deterministic fake channel IDs, so BroadcastChatChannel can send
+        local fakeChannelIDs = {}
+        local fakeChannelNames = {}
+        local fakeNextChanID = 1
+        local _GetChannelName = GetChannelName
+        GetChannelName = function(channel)
+            local lower = strlower(channel)
+            if not fakeChannelIDs[lower] then
+                fakeChannelIDs[lower] = fakeNextChanID
+                fakeChannelNames[fakeNextChanID] = lower
+                fakeNextChanID = fakeNextChanID + 1
+            end
+            return fakeChannelIDs[lower]
+        end
+
+        -- Override SendChatMessage to capture outgoing chat messages for TickInstances
+        local _SendChatMessage = SendChatMessage
+        SendChatMessage = function(msg, chatType, language, chanID)
+            tinsert(testChatMessages, {
+                msg = msg,
+                channel = fakeChannelNames[chanID] or "",
+                sender = priv.playerName,
+            })
+        end
+
         -- Override LibP2PDB.NewDatabase to inject no-op compressor/encoder, bypassing LibDeflate
         local _NewDatabase = LibP2PDB.NewDatabase
         LibP2PDB.NewDatabase = function(self, desc)
@@ -9915,6 +10357,8 @@ local function RunTests()
         C_Timer.NewTicker = _NewTicker
         C_Timer.NewTimer = _NewTimer
         GetPlayerInfoByGUID = _GetPlayerInfoByGUID
+        SendChatMessage = _SendChatMessage
+        GetChannelName = _GetChannelName
         count = count + 1
     end
 
