@@ -1846,7 +1846,7 @@ function LibP2PDB:BroadcastKeyChatChannel(db, tableName, key)
         priv.peerID,
         { dbi.version, dbi.clock, tableStateMap }, --- @type LibP2PDB.DBState
     }
-    priv:BroadcastChatChannel(dbi, obj, CommPriority.High)
+    priv:BroadcastChatChannel(dbi, obj)
     return true
 end
 
@@ -3275,8 +3275,7 @@ end
 --- Broadcast a message to registered chat channels.
 --- @param dbi LibP2PDB.DBInstance Database instance.
 --- @param data any The message data to send.
---- @param priority LibP2PDB.CommPriority The priority of the message.
-function Private:BroadcastChatChannel(dbi, data, priority)
+function Private:BroadcastChatChannel(dbi, data)
     local serialized = dbi.serializer:Serialize(data)
     if not serialized then
         ReportError(dbi, "failed to serialize data for prefix '%s'", dbi.prefix)
@@ -3306,7 +3305,7 @@ function Private:BroadcastChatChannel(dbi, data, priority)
         DevTools_Dump(data)
     end
 
-    for channel in pairs(dbi.chatChannels) do
+    for channel in pairs(dbi.chatChannels or {}) do
         local chanID = GetChannelName(channel)
         if chanID and chanID > 0 then
             local success = SafeCall(dbi, SendChatMessage, msg, "CHANNEL", nil, chanID)
