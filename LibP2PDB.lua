@@ -3308,11 +3308,7 @@ function Private:BroadcastChatChannel(dbi, data)
     for channel in pairs(dbi.chatChannels or {}) do
         local chanID = GetChannelName(channel)
         if chanID and chanID > 0 then
-            local success = SafeCall(dbi, SendChatMessage, msg, "CHANNEL", nil, chanID)
-            if not success then
-                ReportError(dbi, "failed to send message on chat channel '%s' for prefix '%s'", channel, dbi.prefix)
-                break -- stop if something went wrong to avoid spamming errors for each channel
-            end
+            SendChatMessage(msg, "CHANNEL", nil, chanID --[[@as string]])
         end
     end
 end
