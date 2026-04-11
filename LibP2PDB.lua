@@ -1545,9 +1545,6 @@ function LibP2PDB:BroadcastPresence(db)
     local dbi = priv.databases[db]
     assert(dbi, "db is not a recognized database handle")
 
-    -- Prune timed-out peers
-    priv:PruneTimedOutPeers(dbi)
-
     -- Send an empty message
     Spam("broadcasting presence message")
     local obj = { --- @type LibP2PDB.Packet
@@ -2058,7 +2055,7 @@ function LibP2PDB:ListPeers(db)
     -- Collect peers
     local peers = {}
     for peerID, peerInfo in pairs(dbi.peers) do
-        peers[peerID] = DeepCopy(peerInfo)
+        peers[peerID] = { name = peerInfo.name, lastSeen = peerInfo.lastSeen }
     end
     return peers
 end
@@ -2079,7 +2076,7 @@ function LibP2PDB:GetPeerInfo(db, peerID)
     -- Return a copy of the peer info if found
     local peerInfo = dbi.peers[peerID]
     if peerInfo then
-        return DeepCopy(peerInfo)
+        return { name = peerInfo.name, lastSeen = peerInfo.lastSeen }
     end
     return nil
 end
@@ -2241,7 +2238,7 @@ end
 --- @field serializer LibP2PDB.Serializer Serializer interface.
 --- @field compressor LibP2PDB.Compressor Compressor interface.
 --- @field encoder LibP2PDB.Encoder Encoder interface.
---- @field peers table<LibP2PDB.PeerID, LibP2PDB.PeerInfo> Known peers for this session.
+--- @field peers table<LibP2PDB.PeerID, LibP2PDB.PeerInfoInternal> Known peers for this session.
 --- @field peersSorted LibP2PDB.PeerID[] Sorted array of peer IDs for efficient neighbors lookup.
 --- @field peerTimeout number Timeout in seconds for considering a peer inactive.
 --- @field msgCache table<string, table> Content-keyed message table mapping encoded wire strings to timer handles to suppress duplicate cross-channel broadcasts.
@@ -2256,6 +2253,9 @@ end
 --- @class LibP2PDB.PeerInfo Peer information.
 --- @field name LibP2PDB.PeerName Name of the peer.
 --- @field lastSeen number Local timestamp of the last time the peer was seen.
+
+--- @class LibP2PDB.PeerInfoInternal : LibP2PDB.PeerInfo Internal peer information (not exposed to callers).
+--- @field expiryTimer FunctionContainer? Timer handle for automatic peer expiry, or nil for the local peer.
 
 --- @class LibP2PDB.TableInstance Table instance.
 --- @field keyType LibP2PDB.TableKeyType Primary key type for the table.
@@ -4028,8 +4028,15 @@ function Private:UpdatePeer(message)
     -- Update existing peer
     if peerInfo then
         peerInfo.lastSeen = now
+        if peerID ~= self.peerID then
+            -- Refresh the expiry timer
+            if peerInfo.expiryTimer then
+                peerInfo.expiryTimer:Cancel()
+            end
+            peerInfo.expiryTimer = C_Timer.NewTimer(dbi.peerTimeout, function() self:RemovePeer(dbi, peerID) end)
+        end
     else -- Insert new peer
-        peerInfo = {
+        peerInfo = { --- @type LibP2PDB.PeerInfoInternal
             name = peerName,
             lastSeen = now,
         }
@@ -4040,27 +4047,25 @@ function Private:UpdatePeer(message)
         --assert(index >= 1 and index <= #dbi.peersSorted + 1, "LowerBound returned invalid index")
         --assert(dbi.peersSorted[index] ~= peerID, "peerID already exists in peersSorted")
         tinsert(dbi.peersSorted, index, peerID)
+
+        -- Schedule automatic expiry (never for self)
+        if peerID ~= self.peerID then
+            peerInfo.expiryTimer = C_Timer.NewTimer(dbi.peerTimeout, function() self:RemovePeer(dbi, peerID) end)
+        end
     end
 end
 
---- Prune peers that have timed out from the peer and neighbors list.
+--- Remove a peer from the peer list, cancelling its expiry timer if present.
 --- @param dbi LibP2PDB.DBInstance Database instance.
-function Private:PruneTimedOutPeers(dbi)
-    local now = GetTime()
-    local timedOutPeers = {}
-    for peerID, peerInfo in pairs(dbi.peers) do
-        if peerID ~= self.peerID then -- never remove self
-            if now - peerInfo.lastSeen >= dbi.peerTimeout then
-                tinsert(timedOutPeers, peerID)
-            end
-        end
-    end
-    for _, peerID in ipairs(timedOutPeers) do
-        dbi.peers[peerID] = nil
-        local index = IndexOf(dbi.peersSorted, peerID)
-        if index then
-            tremove(dbi.peersSorted, index)
-        end
+--- @param peerID LibP2PDB.PeerID Peer ID to remove.
+function Private:RemovePeer(dbi, peerID)
+    local peerInfo = dbi.peers[peerID]
+    if not peerInfo then return end
+    if peerInfo.expiryTimer then peerInfo.expiryTimer:Cancel() end
+    dbi.peers[peerID] = nil
+    local index = IndexOf(dbi.peersSorted, peerID)
+    if index then
+        tremove(dbi.peersSorted, index)
     end
 end
 
@@ -8160,6 +8165,76 @@ local NetworkTests = {
         end)
     end,
 
+    BroadcastPresence_TimedOutPeersAreRemoved = function()
+        local instance1 = NewPrivateInstance(1)
+        local instance2 = NewPrivateInstance(2)
+        local db1 = PrivateScope(instance1, function()
+            return LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", peerTimeout = 60.0 })
+        end)
+        local db2 = PrivateScope(instance2, function()
+            return LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", peerTimeout = 60.0 })
+        end)
+
+        -- Peer 2 broadcasts; peer 1 receives and learns about peer 2
+        VerbosityScope(3, function()
+            PrivateScope(instance2, function() LibP2PDB:BroadcastPresence(db2) end)
+            TickPrivateInstances({ instance1, instance2 })
+        end)
+
+        local dbi1 = instance1.databases[db1]
+        Assert.ContainsKey(dbi1.peers, instance2.peerID)
+        Assert.AreEqual(#dbi1.peersSorted, 2)
+
+        -- Fire the expiry timer for peer 2 directly
+        local peerInfo = dbi1.peers[instance2.peerID]
+        Assert.IsNotNil(peerInfo.expiryTimer)
+        PrivateScope(instance1, function()
+            instance1:RemovePeer(dbi1, instance2.peerID)
+        end)
+
+        -- Peer 2 should now be gone from both peers and peersSorted
+        Assert.DoesNotContainKey(dbi1.peers, instance2.peerID)
+        Assert.AreEqual(#dbi1.peersSorted, 1)
+        Assert.AreEqual(dbi1.peersSorted[1], instance1.peerID)
+
+        -- Self (peer 1) must never be removed
+        Assert.ContainsKey(dbi1.peers, instance1.peerID)
+    end,
+
+    BroadcastPresence_TimerRefreshedOnActivity = function()
+        local instance1 = NewPrivateInstance(1)
+        local instance2 = NewPrivateInstance(2)
+        local db1 = PrivateScope(instance1, function()
+            return LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", peerTimeout = 60.0 })
+        end)
+        local db2 = PrivateScope(instance2, function()
+            return LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", peerTimeout = 60.0 })
+        end)
+
+        -- First broadcast: peer 1 learns about peer 2 and an expiry timer is scheduled
+        VerbosityScope(3, function()
+            PrivateScope(instance2, function() LibP2PDB:BroadcastPresence(db2) end)
+            TickPrivateInstances({ instance1, instance2 })
+        end)
+
+        local dbi1 = instance1.databases[db1]
+        local firstTimer = dbi1.peers[instance2.peerID].expiryTimer
+
+        -- Second broadcast: expiry timer should be replaced with a fresh one
+        VerbosityScope(3, function()
+            PrivateScope(instance2, function() LibP2PDB:BroadcastPresence(db2) end)
+            TickPrivateInstances({ instance1, instance2 })
+        end)
+
+        local secondTimer = dbi1.peers[instance2.peerID].expiryTimer
+        Assert.IsNotNil(secondTimer)
+        Assert.AreNotEqual(firstTimer, secondTimer)
+
+        -- Peer 2 must still be present (the refreshed timer did not fire)
+        Assert.ContainsKey(dbi1.peers, instance2.peerID)
+        Assert.AreEqual(#dbi1.peersSorted, 2)
+    end,
+
     SyncDatabase = function()
         local instances = {}
         local databases = {}
@@ -10260,13 +10335,21 @@ local function RunTests()
             end
         end
 
-        -- Override C_Timer.NewTimer to call the callback immediately
+        -- Override C_Timer.NewTimer:
+        --   Short-delay timers (< 10s: msg cache expiry, deferred verify, chunk sends) fire
+        --   immediately and return nil, preserving the original test behaviour where the
+        --   msgCache assignment resolves to nil and does not block later deduplication.
+        --   Long-delay timers (>= 10s: peer expiry at peerTimeout seconds) must NOT fire, so
+        --   we return a no-op cancel stub instead; RemovePeer guards against nil before Cancel().
         local _NewTimer = C_Timer.NewTimer
         ---@diagnostic disable-next-line: duplicate-set-field
         C_Timer.NewTimer = function(delay, callback)
-            ---@diagnostic disable-next-line: missing-parameter
-            callback()
-            return nil
+            if delay < 10 then
+                ---@diagnostic disable-next-line: missing-parameter
+                callback()
+                return nil
+            end
+            return { Cancel = function() end }
         end
 
         -- Override C_Timer.NewTicker to drive coroutines synchronously
