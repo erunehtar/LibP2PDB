@@ -1167,7 +1167,6 @@ function LibP2PDB:NewTable(db, desc)
         schemaSorted = schemaSorted,
         onValidate = desc.onValidate,
         onChange = desc.onChange,
-        subscribers = setmetatable({}, { __mode = "k" }),
         callbacks = setmetatable({}, { __mode = "k" }),
         seed = 0,
         rowCount = 0,
@@ -2268,7 +2267,6 @@ end
 --- @field schemaSorted LibP2PDB.TableSchemaSorted? Cached sorted schema for the table.
 --- @field onValidate LibP2PDB.TableOnValidateCallback? Optional validation callback for rows.
 --- @field onChange LibP2PDB.TableOnChangeCallback? Optional change callback for rows.
---- @field subscribers table<LibP2PDB.TableOnChangeCallback, boolean> Weak table of subscriber callbacks.
 --- @field callbacks table<table, LibP2PDB.TableOnChangeCallback> Weak table of registered change callbacks for the table.
 --- @field seed integer Seed value for the table's filter and bucket hash set.
 --- @field rowCount integer Total number of rows in the table (including tombstones).
@@ -2623,7 +2621,7 @@ end
 --- @param oldRowData LibP2PDB.RowData? Previous row data before the change (or nil if no previous data).
 function Private:InvokeChangeCallbacks(dbi, tableName, ti, key, newRowData, oldRowData)
     local newRowDataCopy
-    if dbi.onChange or ti.onChange or IsNonEmptyTable(ti.subscribers) or IsNonEmptyTable(ti.callbacks) then
+    if dbi.onChange or ti.onChange or IsNonEmptyTable(ti.callbacks) then
         newRowDataCopy = DeepCopy(newRowData)
     end
 
@@ -2635,11 +2633,6 @@ function Private:InvokeChangeCallbacks(dbi, tableName, ti, key, newRowData, oldR
     -- Invoke database table change callback
     if ti.onChange then
         SafeCall(dbi, ti.onChange, key, newRowDataCopy, oldRowData)
-    end
-
-    -- Invoke database table subscribers
-    for callback in pairs(ti.subscribers) do
-        SafeCall(dbi, callback, key, newRowDataCopy, oldRowData)
     end
 
     -- Invoke database table registered callbacks
@@ -4625,7 +4618,6 @@ local UnitTests = {
             Assert.IsNil(ti.schemaSorted)
             Assert.IsNil(ti.onValidate)
             Assert.IsNil(ti.onChange)
-            Assert.IsTable(ti.subscribers)
             Assert.IsTable(ti.callbacks)
             Assert.AreEqual(ti.rowCount, 0)
             Assert.IsEmptyTable(ti.rows)
@@ -4658,7 +4650,6 @@ local UnitTests = {
             Assert.AreEqual(ti.schemaSorted, { { "age", { "number", "nil" } }, { "name", "string" } })
             Assert.IsFunction(ti.onValidate)
             Assert.IsFunction(ti.onChange)
-            Assert.IsTable(ti.subscribers)
             Assert.IsTable(ti.callbacks)
             Assert.AreEqual(ti.rowCount, 0)
             Assert.IsEmptyTable(ti.rows)
