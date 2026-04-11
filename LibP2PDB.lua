@@ -94,6 +94,7 @@ end
 local NIL_MARKER = strchar(0)               --- @type string Marker for nil values in serialization.
 local LOG2 = log(2)                         --- @type number Precomputed log(2) for efficiency.
 local UINT32_MODULO = 2 ^ 32                --- @type integer Modulo for keeping integers within 32-bit unsigned range.
+local MAX_CLOCK = 0xFFFFFFFF                --- @type integer Maximum valid Lamport clock value (2^32 - 1).
 local MIN_BUCKET_COUNT = 32                 --- @type integer Minimum number of buckets for summary filters.
 local KEYS_PER_BUCKET = 32                  --- @type integer Default bucket size for summary filters.
 local ROWS_PER_CHUNK = 128                  --- @type integer Default number of rows per chunk for chunked transmission.
@@ -2368,8 +2369,8 @@ function Private:SetKey(dbi, tableName, ti, key, rowData)
 
     -- Apply changes if any
     if changes then
-        -- Update database Lamport clock
-        dbi.clock = dbi.clock + 1
+        -- Update database Lamport clock (wraps around at UINT32_MODULO, keeping it within [0, MAX_CLOCK])
+        dbi.clock = (dbi.clock + 1) % UINT32_MODULO
 
         -- Handle pre changes updates
         if existingRow then
@@ -2484,8 +2485,11 @@ function Private:MergeKey(dbi, dbClock, tableName, ti, key, rowData, rowVersion,
         end
     end
 
-    -- Merge database Lamport clock
-    dbi.clock = max(dbi.clock, dbClock)
+    -- Merge database Lamport clock (RFC 1982: only advance if dbClock is strictly ahead).
+    local clockDiff = (dbClock - dbi.clock) % UINT32_MODULO
+    if clockDiff > 0 and clockDiff <= UINT32_MODULO / 2 then
+        dbi.clock = dbClock
+    end
 
     -- Handle pre merge updates
     if existingRow then
@@ -2769,7 +2773,7 @@ function Private:ImportDatabase(dbi, state, message, thread, maxTime)
 
     -- Validate database state clock
     local dbClock = state[2] --- @type LibP2PDB.Clock
-    if not IsInteger(dbClock, 0) then
+    if not IsInteger(dbClock, 0, MAX_CLOCK) then
         ReportError(dbi, "invalid database clock in state")
         return false
     end
@@ -2902,8 +2906,15 @@ function Private:ImportRow(dbi, dbClock, tableName, ti, key, rowState, message)
 
     -- Validate version clock
     local incomingVersionClock = rowState[2]
-    if not IsInteger(incomingVersionClock, 0) then
+    if not IsInteger(incomingVersionClock, 0, MAX_CLOCK) then
         ReportError(dbi, "invalid clock in row version state for key '%s' in table '%s'", key, tableName)
+        return
+    end
+
+    -- Reject if the row clock is strictly ahead of the database clock (RFC 1982).
+    local rowClockAdvance = (incomingVersionClock - dbClock) % UINT32_MODULO
+    if rowClockAdvance > 0 and rowClockAdvance <= UINT32_MODULO / 2 then
+        ReportError(dbi, "row clock exceeds database clock for key '%s' in table '%s'", key, tableName)
         return
     end
 
@@ -3145,13 +3156,15 @@ function Private:CompareVersion(a, b)
     elseif b == nil then
         return false
     end
-    if a.clock < b.clock then
-        return true
-    elseif a.clock > b.clock then
-        return false
-    else
-        return a.peerID < b.peerID
+
+    -- RFC 1982 serial number arithmetic: a precedes b (is older) if the forward circular
+    -- distance from a to b falls in (0, 2^31]. At distance 0 (equal clocks), break the
+    -- tie by peerID so the higher peerID wins (i.e. a is older when a.peerID < b.peerID).
+    local diff = (b.clock - a.clock) % UINT32_MODULO
+    if diff == 0 then
+        return a.peerID < b.peerID   -- same clock: higher peerID wins
     end
+    return diff <= UINT32_MODULO / 2 -- forward half (including midpoint): a is older
 end
 
 --- Get neighbors for the local peer.
@@ -4064,7 +4077,8 @@ function Private:UpdatePeer(message)
             end
             peerInfo.expiryTimer = C_Timer.NewTimer(dbi.peerTimeout, function() self:RemovePeer(dbi, peerID) end)
         end
-    else -- Insert new peer
+    else
+        -- Insert new peer
         peerInfo = { --- @type LibP2PDB.PeerInfoInternal
             name = peerName,
             lastSeen = now,
@@ -8165,6 +8179,94 @@ local UnitTests = {
         Assert.Throws(function() LibP2PDB:DecodeFromPrint("invalid", encoded) end)
         Assert.Throws(function() LibP2PDB:DecodeFromPrint(123, encoded) end)
         Assert.Throws(function() LibP2PDB:DecodeFromPrint({}, encoded) end)
+    end,
+
+    ClockWrapAround = function()
+        -- Verifies that the database clock wraps correctly at MAX_CLOCK and that the library
+        -- remains fully functional across the boundary. Also validates that a malicious
+        -- packet with dbClock=MAX_CLOCK cannot permanently break ordering.
+        local remotePeerID = 0x000011111111
+
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        LibP2PDB:NewTable(db, { name = "T", keyType = "number", schema = { v = "number" } })
+        local dbi = priv.databases[db]
+        local ti = dbi.tables["T"]
+
+        -- Plant a normal row at clock 1 via trusted import.
+        priv:MergeKey(dbi, 1, "T", ti, 1, { v = 10 }, { clock = 1, peerID = remotePeerID }, nil)
+        Assert.AreEqual(dbi.clock, 1)
+        Assert.AreEqual(ti.rows[1].data.v, 10)
+
+        -- Force the database clock to MAX_CLOCK - 1 as if many writes already happened.
+        dbi.clock = MAX_CLOCK - 1
+
+        -- Local write at MAX_CLOCK - 1: clock must advance to MAX_CLOCK.
+        Assert.IsTrue(LibP2PDB:SetKey(db, "T", 2, { v = 20 }))
+        Assert.AreEqual(dbi.clock, MAX_CLOCK)
+        Assert.AreEqual(ti.rows[2].version.clock, MAX_CLOCK)
+
+        -- Local write at MAX_CLOCK: clock must wrap to 0.
+        Assert.IsTrue(LibP2PDB:SetKey(db, "T", 3, { v = 30 }))
+        Assert.AreEqual(dbi.clock, 0)
+        Assert.AreEqual(ti.rows[3].version.clock, 0)
+
+        -- Another local write after wrap: clock must advance to 1.
+        Assert.IsTrue(LibP2PDB:SetKey(db, "T", 4, { v = 40 }))
+        Assert.AreEqual(dbi.clock, 1)
+        Assert.AreEqual(ti.rows[4].version.clock, 1)
+
+        -- All four rows are still readable.
+        Assert.AreEqual(LibP2PDB:GetKey(db, "T", 1).v, 10)
+        Assert.AreEqual(LibP2PDB:GetKey(db, "T", 2).v, 20)
+        Assert.AreEqual(LibP2PDB:GetKey(db, "T", 3).v, 30)
+        Assert.AreEqual(LibP2PDB:GetKey(db, "T", 4).v, 40)
+
+        -- Attack: a malicious packet claims dbClock=MAX_CLOCK and sends a new row 99.
+        -- With RFC 1982 arithmetic, MAX_CLOCK is OLDER than the current post-wrap clock (1),
+        -- so the db clock is NOT advanced. The row itself is still imported since key 99 has
+        -- no existing entry to compare against.
+        local fakeMessage = { peerID = remotePeerID, sender = "Attacker-Realm", channel = "GUILD" }
+        priv:MergeKey(dbi, MAX_CLOCK, "T", ti, 99, { v = 99 }, { clock = MAX_CLOCK, peerID = remotePeerID }, fakeMessage)
+        Assert.AreEqual(dbi.clock, 1, "RFC 1982: MAX_CLOCK is older than post-wrap clock 1; db clock must NOT be bumped")
+        Assert.AreEqual(ti.rows[99].data.v, 99)
+
+        -- Next local write after the attack: clock advances normally from 1 to 2.
+        Assert.IsTrue(LibP2PDB:SetKey(db, "T", 5, { v = 50 }))
+        Assert.AreEqual(dbi.clock, 2)
+        Assert.AreEqual(ti.rows[5].version.clock, 2)
+        Assert.IsTrue(IsInteger(ti.rows[5].version.clock, 0, MAX_CLOCK), "version.clock must remain within [0, MAX_CLOCK] after wrap")
+
+        -- RFC 1982 eliminates the inconsistency window: a pre-wrap forged row (clock=MAX_CLOCK)
+        -- is correctly recognized as OLDER than the post-wrap local row (clock=2).
+        -- Forward distance: (2 - MAX_CLOCK) % 2^32 = 3 < 2^31, so MAX_CLOCK precedes 2.
+        -- The merge is skipped and row 5 keeps its post-wrap value.
+        priv:MergeKey(dbi, MAX_CLOCK, "T", ti, 5, { v = 999 }, { clock = MAX_CLOCK, peerID = remotePeerID }, fakeMessage)
+        Assert.AreEqual(ti.rows[5].data.v, 50, "RFC 1982: pre-wrap row (clock=MAX_CLOCK) must lose to post-wrap row (clock=2)")
+        Assert.AreEqual(dbi.clock, 2, "clock must NOT be bumped by a stale pre-wrap forged row")
+
+        -- Recovery: local writes continue advancing normally.
+        Assert.IsTrue(LibP2PDB:SetKey(db, "T", 6, { v = 60 }))
+        Assert.AreEqual(dbi.clock, 3)
+
+        -- A peer that has also wrapped sends a row with clock=0. Tie on clock, resolved by peerID.
+        -- remotePeerID > 0 (local peerID sentinel), so remote wins the tie.
+        priv:MergeKey(dbi, 0, "T", ti, 7, { v = 70 }, { clock = 0, peerID = remotePeerID }, fakeMessage)
+        Assert.AreEqual(ti.rows[7].data.v, 70)
+
+        -- Reject forged packet: dbClock above MAX_CLOCK must be invalid.
+        local state = { 1, MAX_CLOCK + 1, {} }
+        Assert.ExpectErrors(function() priv:ImportDatabase(dbi, state, fakeMessage, nil, nil) end)
+        Assert.AreNotEqual(dbi.clock, MAX_CLOCK + 1)
+
+        -- Reject forged packet: row clock above MAX_CLOCK must be invalid.
+        state = { 1, MAX_CLOCK, { T = { [10] = { { v = 1 }, MAX_CLOCK + 1, remotePeerID } } } }
+        Assert.ExpectErrors(function() priv:ImportDatabase(dbi, state, fakeMessage, nil, nil) end)
+        Assert.IsNil(ti.rows[10])
+
+        -- Reject forged packet: row clock exceeding db clock must be invalid.
+        state = { 1, 5, { T = { [11] = { { v = 1 }, 6, remotePeerID } } } }
+        Assert.ExpectErrors(function() priv:ImportDatabase(dbi, state, fakeMessage, nil, nil) end)
+        Assert.IsNil(ti.rows[11])
     end,
 }
 
