@@ -1060,7 +1060,7 @@ end
 --- @alias LibP2PDB.TableOnChangeCallback fun(key: LibP2PDB.TableKey, newData: LibP2PDB.RowData?, oldData: LibP2PDB.RowData?) Callback function invoked on row data changes.
 --- @alias LibP2PDB.RowData table<LibP2PDB.RowDataKey, LibP2PDB.RowDataValue> Data for a row in a table.
 --- @alias LibP2PDB.RowDataKey string|number Key of a field in a row.
---- @alias LibP2PDB.RowDataValue boolean|string|number|nil Value of a field in a row.
+--- @alias LibP2PDB.RowDataValue boolean|string|number|table|nil Value of a field in a row.
 
 --- @class LibP2PDB.Row Row in a table.
 --- @field data LibP2PDB.RowData? Data for the row (nil if tombstone).
@@ -1110,11 +1110,11 @@ function LibP2PDB:NewTable(db, desc)
             --- @cast allowedTypes string[]
             for _, allowedType in ipairs(allowedTypes) do
                 assert(IsNonEmptyString(allowedType), "each type in desc.schema field types must be a non-empty string")
-                assert(IsPrimitiveType(allowedType), "field types in desc.schema must be 'string', 'number', 'boolean', or 'nil'")
+                assert(IsPrimitiveType(allowedType) or allowedType == "table", "field types in desc.schema must be 'string', 'number', 'boolean', 'table', or 'nil'")
             end
         elseif IsNonEmptyString(allowedTypes) then
             --- @cast allowedTypes string
-            assert(IsPrimitiveType(allowedTypes), "field type in desc.schema must be 'string', 'number', 'boolean', or 'nil'")
+            assert(IsPrimitiveType(allowedTypes) or allowedTypes == "table", "field type in desc.schema must be 'string', 'number', 'boolean', 'table', or 'nil'")
         else
             error("each field value in desc.schema must be a non-empty string or non-empty table of strings")
         end
@@ -1289,7 +1289,7 @@ function LibP2PDB:UpdateKey(db, tableName, key, updateFn)
     end
 
     -- Call the update function to get the updated row data
-    local success, updatedRow = SafeCall(dbi, updateFn, existingRow and ShallowCopy(existingRow.data) or nil)
+    local success, updatedRow = SafeCall(dbi, updateFn, existingRow and DeepCopy(existingRow.data) or nil)
     if not success then
         return false
     end
@@ -1397,7 +1397,7 @@ function LibP2PDB:GetKey(db, tableName, key)
     end
 
     -- Return a copy of the row data
-    return ShallowCopy(row.data)
+    return DeepCopy(row.data)
 end
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -2003,7 +2003,7 @@ function LibP2PDB:ListRows(db, tableName)
     local rows = {}
     for key, row in pairs(ti.rows) do
         if row and not row.version.tombstone then
-            rows[key] = ShallowCopy(row.data)
+            rows[key] = DeepCopy(row.data)
         end
     end
     return rows
@@ -2038,7 +2038,7 @@ function LibP2PDB:IterateRows(db, tableName)
         if key == nil or not row then
             return nil
         end
-        return key, ShallowCopy(row.data)
+        return key, DeepCopy(row.data)
     end
 end
 
@@ -2357,7 +2357,7 @@ function Private:SetKey(dbi, tableName, ti, key, rowData)
     -- Determine if the row will change
     local changes = false
     if rowData then
-        if not existingRow or existingRow.version.tombstone or not ShallowEqual(existingRow.data, rowData) then
+        if not existingRow or existingRow.version.tombstone or not DeepEqual(existingRow.data, rowData) then
             changes = true -- new row or data changes
         end
     else
@@ -2387,7 +2387,7 @@ function Private:SetKey(dbi, tableName, ti, key, rowData)
         end
 
         -- Copy the existing row data for change callbacks before overwriting
-        local oldRowData = ShallowCopy(existingRow and existingRow.data or nil) or nil
+        local oldRowData = DeepCopy(existingRow and existingRow.data or nil) or nil
 
         -- Store the row
         ti.rows[key] = {
@@ -2444,7 +2444,7 @@ function Private:MergeKey(dbi, dbClock, tableName, ti, key, rowData, rowVersion,
     -- Determine if the row data will change
     local changes = false
     if rowData then
-        if not existingRow or existingRow.version.tombstone or not ShallowEqual(existingRow.data, rowData) then
+        if not existingRow or existingRow.version.tombstone or not DeepEqual(existingRow.data, rowData) then
             changes = true -- new row, or tombstone removed, or data changes
         end
     else
@@ -2503,7 +2503,7 @@ function Private:MergeKey(dbi, dbClock, tableName, ti, key, rowData, rowVersion,
     end
 
     -- Copy the existing row data for change callbacks before overwriting
-    local oldRowData = changes and ShallowCopy(existingRow and existingRow.data or nil) or nil
+    local oldRowData = changes and DeepCopy(existingRow and existingRow.data or nil) or nil
 
     -- Store the row
     ti.rows[key] = {
@@ -2526,9 +2526,32 @@ function Private:MergeKey(dbi, dbClock, tableName, ti, key, rowData, rowVersion,
     return true
 end
 
+--- Recursively copy a value for row storage, skipping non-string/number keys and non-serializable leaf values.
+--- @param value LibP2PDB.RowDataValue Value to copy.
+--- @return LibP2PDB.RowDataValue copy The sanitized copy, or nil if the value itself is non-serializable.
+function Private:CopyRowDataValue(value)
+    local t = type(value)
+    if t == "table" then
+        local copy = {}
+        for k, v in pairs(value) do
+            local kt = type(k)
+            if kt == "string" or kt == "number" then
+                local vc = self:CopyRowDataValue(v)
+                if vc ~= nil then
+                    copy[k] = vc
+                end
+            end
+        end
+        return copy
+    elseif t == "boolean" or t == "string" or t == "number" then
+        return value
+    end
+    return nil
+end
+
 --- Prepare data for a row.
 --- If a schema is defined, validates field types and copies only defined fields.
---- If no schema is defined, copies all primitive fields with string or number keys.
+--- If no schema is defined, copies all primitive fields or table values with string or number keys.
 --- @param tableName LibP2PDB.TableName Name of the table.
 --- @param ti LibP2PDB.TableInstance Table instance.
 --- @param data table? Row data to prepare (or nil for tombstone).
@@ -2553,13 +2576,17 @@ function Private:PrepareRowData(tableName, ti, data)
             else
                 error("invalid schema definition for field '" .. k .. "' in table '" .. tableName .. "'")
             end
-            rowData[k] = v
+            rowData[k] = IsTable(v) and self:CopyRowDataValue(v) or v
         end
     else
-        -- No schema: copy all primitive fields with string or number keys
+        -- No schema: copy all primitive fields or table values with string or number keys
         for k, v in pairs(data) do
-            if (IsString(k) or IsNumber(k)) and IsPrimitive(v) then
-                rowData[k] = v
+            if IsString(k) or IsNumber(k) then
+                if IsPrimitive(v) then
+                    rowData[k] = v
+                elseif IsTable(v) then
+                    rowData[k] = self:CopyRowDataValue(v)
+                end
             end
         end
     end
@@ -2593,7 +2620,7 @@ end
 function Private:InvokeChangeCallbacks(dbi, tableName, ti, key, newRowData, oldRowData)
     local newRowDataCopy
     if dbi.onChange or ti.onChange or IsNonEmptyTable(ti.subscribers) or IsNonEmptyTable(ti.callbacks) then
-        newRowDataCopy = ShallowCopy(newRowData)
+        newRowDataCopy = DeepCopy(newRowData)
     end
 
     -- Invoke database global change callback
@@ -2957,11 +2984,13 @@ function Private:ImportRowData(dbi, schemaSorted, rowDataState)
             importedRowData[fieldKey] = fieldValue
         end
     else
-        -- No schema: copy all primitive fields with string or number keys
+        -- No schema: copy all primitive fields or table values with string or number keys
         --- @cast rowDataState LibP2PDB.RowData
         for k, v in pairs(rowDataState or {}) do
-            if (IsString(k) or IsNumber(k)) and IsPrimitive(v) then
-                importedRowData[k] = v
+            if IsString(k) or IsNumber(k) then
+                if IsPrimitive(v) or IsTable(v) then
+                    importedRowData[k] = v
+                end
             end
         end
     end
@@ -3062,7 +3091,7 @@ function Private:MigrateRow(target, source)
             version = source.dbi.version,
             tableName = source.tableName,
             key = source.key,
-            data = ShallowCopy(source.rowData),
+            data = DeepCopy(source.rowData),
         }
         local success, newKey, newRowData = SafeCall(target.dbi, target.dbi.onMigrateRow, targetCtx, sourceCtx)
         if not success then
@@ -4626,8 +4655,9 @@ local UnitTests = {
                 boolField = "boolean",
                 strField = "string",
                 numField = "number",
-                nilField = "nil", -- not really useful?
-                multiple = { "boolean", "string", "number", "nil" },
+                nilField = "nil",
+                tableField = "table",
+                multiple = { "boolean", "string", "number", "table", "nil" },
             }
             LibP2PDB:NewTable(db, {
                 name = "Users3",
@@ -4698,7 +4728,6 @@ local UnitTests = {
         Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = true } }) end)
         Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = false } }) end)
         Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = "" } }) end)
-        Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = "table" } }) end)
         Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = "function" } }) end)
         Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = "userdata" } }) end)
         Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = "thread" } }) end)
@@ -4707,7 +4736,6 @@ local UnitTests = {
         Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = { true } } }) end)
         Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = { false } } }) end)
         Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = { "" } } }) end)
-        Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = { "table" } } }) end)
         Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = { "function" } } }) end)
         Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = { "userdata" } } }) end)
         Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", schema = { a = { "thread" } } }) end)
@@ -4811,6 +4839,32 @@ local UnitTests = {
             Assert.AreEqual(LibP2PDB:GetKey(db, "Users3", 2), { name = "Eve" })
             Assert.IsTrue(LibP2PDB:InsertKey(db, "Users3", 3, { name = "Bob" }))
             Assert.AreEqual(LibP2PDB:GetKey(db, "Users3", 3), { name = "Bob" })
+        end
+        do -- no-schema: table values accepted and deep copied
+            LibP2PDB:NewTable(db, { name = "Users4", keyType = "string" })
+            local tags = { "warrior", "tank" }
+            Assert.IsTrue(LibP2PDB:InsertKey(db, "Users4", "u1", { name = "Bob", tags = tags }))
+            local result = LibP2PDB:GetKey(db, "Users4", "u1")
+            Assert.AreEqual(result, { name = "Bob", tags = { "warrior", "tank" } })
+            -- inserting with table value that has non-string/number keys is silently dropped at field level
+            Assert.IsTrue(LibP2PDB:InsertKey(db, "Users4", "u2", { name = "Alice", meta = { level = 60, guild = "Test" } }))
+            Assert.AreEqual(LibP2PDB:GetKey(db, "Users4", "u2"), { name = "Alice", meta = { level = 60, guild = "Test" } })
+        end
+        do -- schema with table type field
+            LibP2PDB:NewTable(db, {
+                name = "Users5",
+                keyType = "string",
+                schema = {
+                    name = "string",
+                    tags = { "table", "nil" },
+                },
+            })
+            Assert.IsTrue(LibP2PDB:InsertKey(db, "Users5", "u1", { name = "Bob", tags = { "warrior", "tank" } }))
+            Assert.AreEqual(LibP2PDB:GetKey(db, "Users5", "u1"), { name = "Bob", tags = { "warrior", "tank" } })
+            Assert.IsTrue(LibP2PDB:InsertKey(db, "Users5", "u2", { name = "Alice" }))
+            Assert.AreEqual(LibP2PDB:GetKey(db, "Users5", "u2"), { name = "Alice" })
+            -- wrong type for table field should throw
+            Assert.Throws(function() LibP2PDB:InsertKey(db, "Users5", "u3", { name = "Eve", tags = "not-a-table" }) end)
         end
     end,
 
@@ -5053,6 +5107,27 @@ local UnitTests = {
             Assert.AreEqual(LibP2PDB:GetKey(db, "Users3", 2), { name = "Eve" })
             Assert.IsTrue(LibP2PDB:SetKey(db, "Users3", 3, { name = "Bob" }))
             Assert.AreEqual(LibP2PDB:GetKey(db, "Users3", 3), { name = "Bob" })
+        end
+        do -- no-schema: table values accepted
+            LibP2PDB:NewTable(db, { name = "Users4", keyType = "string" })
+            Assert.IsTrue(LibP2PDB:SetKey(db, "Users4", "u1", { name = "Bob", tags = { "warrior" } }))
+            Assert.AreEqual(LibP2PDB:GetKey(db, "Users4", "u1"), { name = "Bob", tags = { "warrior" } })
+            Assert.IsTrue(LibP2PDB:SetKey(db, "Users4", "u1", { name = "Bob", tags = { "warrior", "tank" } }))
+            Assert.AreEqual(LibP2PDB:GetKey(db, "Users4", "u1"), { name = "Bob", tags = { "warrior", "tank" } })
+        end
+        do -- schema with table type field
+            LibP2PDB:NewTable(db, {
+                name = "Users5",
+                keyType = "string",
+                schema = {
+                    name = "string",
+                    config = "table",
+                },
+            })
+            Assert.IsTrue(LibP2PDB:SetKey(db, "Users5", "u1", { name = "Bob", config = { x = 1 } }))
+            Assert.AreEqual(LibP2PDB:GetKey(db, "Users5", "u1"), { name = "Bob", config = { x = 1 } })
+            Assert.IsTrue(LibP2PDB:SetKey(db, "Users5", "u1", { name = "Bob", config = { x = 2, y = 3 } }))
+            Assert.AreEqual(LibP2PDB:GetKey(db, "Users5", "u1"), { name = "Bob", config = { x = 2, y = 3 } })
         end
     end,
 
@@ -5383,6 +5458,34 @@ local UnitTests = {
             Assert.AreEqual(LibP2PDB:GetKey(db, "Users3", 2), { name = "Eve" })
             Assert.IsTrue(LibP2PDB:UpdateKey(db, "Users3", 3, function(data) return { name = "Bob" } end))
             Assert.AreEqual(LibP2PDB:GetKey(db, "Users3", 3), { name = "Bob" })
+        end
+        do -- no-schema: table values in updateFn result accepted
+            LibP2PDB:NewTable(db, { name = "Users4", keyType = "string" })
+            Assert.IsTrue(LibP2PDB:UpdateKey(db, "Users4", "u1", function(data)
+                return { name = "Bob", tags = { "warrior" } }
+            end))
+            Assert.AreEqual(LibP2PDB:GetKey(db, "Users4", "u1"), { name = "Bob", tags = { "warrior" } })
+            -- existing table field value is passed as deep copy to updateFn
+            Assert.IsTrue(LibP2PDB:UpdateKey(db, "Users4", "u1", function(data)
+                Assert.AreEqual(data, { name = "Bob", tags = { "warrior" } })
+                data.tags[2] = "tank" -- mutate the copy
+                return data
+            end))
+            Assert.AreEqual(LibP2PDB:GetKey(db, "Users4", "u1"), { name = "Bob", tags = { "warrior", "tank" } })
+        end
+        do -- schema with table type field
+            LibP2PDB:NewTable(db, {
+                name = "Users5",
+                keyType = "string",
+                schema = {
+                    name = "string",
+                    settings = { "table", "nil" },
+                },
+            })
+            Assert.IsTrue(LibP2PDB:UpdateKey(db, "Users5", "u1", function(data)
+                return { name = "Alice", settings = { volume = 100 } }
+            end))
+            Assert.AreEqual(LibP2PDB:GetKey(db, "Users5", "u1"), { name = "Alice", settings = { volume = 100 } })
         end
     end,
 
@@ -6201,6 +6304,43 @@ local UnitTests = {
             Assert.IsTrue(LibP2PDB:InsertKey(db, "Users3", 3, { name = "Bob" }))
             Assert.AreEqual(LibP2PDB:GetKey(db, "Users3", 3), { name = "Bob" })
         end
+        do -- no-schema: mutating returned table must not affect stored data
+            LibP2PDB:NewTable(db, { name = "Users4", keyType = "string" })
+            Assert.IsTrue(LibP2PDB:InsertKey(db, "Users4", "u1", { name = "Bob", tags = { "warrior" } }))
+            local data = LibP2PDB:GetKey(db, "Users4", "u1")
+            Assert.IsNotNil(data)
+            if data ~= nil then
+                local tags = data.tags
+                if type(tags) == "table" then
+                    tags[1] = "mage" -- mutate the returned copy
+                end
+                data.name = "Eve"
+                -- stored data must be unchanged
+                Assert.AreEqual(LibP2PDB:GetKey(db, "Users4", "u1"), { name = "Bob", tags = { "warrior" } })
+            end
+        end
+        do -- schema with table field
+            LibP2PDB:NewTable(db, {
+                name = "Users5",
+                keyType = "string",
+                schema = {
+                    name = "string",
+                    tags = { "table", "nil" },
+                },
+            })
+            Assert.IsTrue(LibP2PDB:InsertKey(db, "Users5", "u1", { name = "Alice", tags = { "tank", "healer" } }))
+            local data = LibP2PDB:GetKey(db, "Users5", "u1")
+            Assert.IsNotNil(data)
+            if data ~= nil then
+                local tags = data.tags
+                if type(tags) == "table" then
+                    tags[1] = "dps" -- mutate the returned copy
+                end
+                data.name = "Eve"
+                -- stored data must be unchanged
+                Assert.AreEqual(LibP2PDB:GetKey(db, "Users5", "u1"), { name = "Alice", tags = { "tank", "healer" } })
+            end
+        end
     end,
 
     GetKey_DBIsInvalid_Throws = function()
@@ -6469,8 +6609,8 @@ local UnitTests = {
 
     ExportDatabase = function()
         local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
-        LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number" } })
-        LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25 })
+        LibP2PDB:NewTable(db, { name = "Users", keyType = "number", schema = { name = "string", age = "number", tags = { "table", "nil" } } })
+        LibP2PDB:InsertKey(db, "Users", 1, { name = "Bob", age = 25, tags = { "warrior", "tank" } })
         LibP2PDB:InsertKey(db, "Users", 2, { name = "Alice", age = 30 })
 
         local state = LibP2PDB:ExportDatabase(db)
@@ -6498,7 +6638,7 @@ local UnitTests = {
                 end
             }
             LibP2PDB:NewTable(dbExport, tableDesc)
-            LibP2PDB:InsertKey(dbExport, "Users", "user1", { name = "Bob", age = 25, city = "NY" })
+            LibP2PDB:InsertKey(dbExport, "Users", "user1", { name = "Bob", age = 25, city = "NY", tags = { "warrior", "tank" } })
             LibP2PDB:InsertKey(dbExport, "Users", "user2", { name = "Alice", age = 30, town = "LA" })
             LibP2PDB:InsertKey(dbExport, "Users", "user3", { name = "Eve", age = -1 })
             LibP2PDB:InsertKey(dbExport, "Users", "user4", {})
@@ -6528,7 +6668,8 @@ local UnitTests = {
                 data = {
                     name = "Bob",
                     age = 25,
-                    city = "NY"
+                    city = "NY",
+                    tags = { "warrior", "tank" }
                 },
                 version = {
                     clock = 1,
@@ -6577,6 +6718,10 @@ local UnitTests = {
                     age = {
                         "number",
                         "nil"
+                    },
+                    tags = {
+                        "table",
+                        "nil"
                     }
                 },
                 onValidate = function(key, data)
@@ -6584,7 +6729,7 @@ local UnitTests = {
                 end
             }
             LibP2PDB:NewTable(dbExport, tableDesc)
-            LibP2PDB:InsertKey(dbExport, "Users", 1, { name = "Bob", age = 25 })
+            LibP2PDB:InsertKey(dbExport, "Users", 1, { name = "Bob", age = 25, tags = { "warrior", "tank" } })
             LibP2PDB:InsertKey(dbExport, "Users", 2, { name = "Alice" })
             LibP2PDB:InsertKey(dbExport, "Users", 3, { name = "Eve", age = -1 })
             LibP2PDB:InsertKey(dbExport, "Users", 4, { name = "Charlie", age = 28 })
@@ -6611,7 +6756,8 @@ local UnitTests = {
             Assert.AreEqual(rows[1], {
                 data = {
                     name = "Bob",
-                    age = 25
+                    age = 25,
+                    tags = { "warrior", "tank" }
                 },
                 version = {
                     clock = 1,
