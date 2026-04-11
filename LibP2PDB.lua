@@ -8022,8 +8022,16 @@ local UnitTests = {
     end,
 }
 
+--- @class LibP2PDB.TestCommMessage Fake AceComm message entry used in the test harness.
+--- @field prefix string Communication prefix.
+--- @field text string Encoded message text.
+--- @field distribution string Channel distribution type (e.g. "GUILD", "WHISPER").
+--- @field sender string Name of the sending player.
+--- @field target string? Target player name (only set for WHISPER messages).
+--- @field prio string? Message priority.
+
 --- Fake communication channels to simulate message passing between private instances.
---- @type table<string, table<string, function>>
+--- @type table<string, LibP2PDB.TestCommMessage[]>
 local testChannels = {
     GUILD = {},
     RAID = {},
