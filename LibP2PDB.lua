@@ -777,6 +777,8 @@ local priv = Private.New(assert(UnitName("player"), "unable to get player name")
 --- @field channels string[]? Optional array of custom channels to use for broadcasts, in addition to default channels (GUILD, RAID, PARTY, YELL).
 --- @field onChange LibP2PDB.DBOnChangeCallback? Optional callback function(tableName, key, data) invoked on any row change.
 --- @field onIsAdmin LibP2PDB.DBOnIsAdminCallback? Optional callback invoked with the acting peer's ID and name before enforcing `exclusive` or `immutable` restrictions. Return true to grant admin bypass for that peer.
+--- @field onPeerAdded LibP2PDB.DBOnPeerAddedCallback? Optional callback function(peerID, peerName) invoked when a new peer is first observed.
+--- @field onPeerExpired LibP2PDB.DBOnPeerExpiredCallback? Optional callback function(peerID, peerName) invoked when a peer times out and is removed.
 --- @field peerTimeout number? Optional seconds of inactivity after which a peer is considered inactive (default: 100.0).
 
 --- @class LibP2PDB.Filter Filter interface for generating data digests.
@@ -806,6 +808,8 @@ local priv = Private.New(assert(UnitName("player"), "unable to get player name")
 --- @alias LibP2PDB.DBOnMigrateRowCallback fun(target: LibP2PDB.MigrationContext, source: LibP2PDB.MigrationContext): LibP2PDB.TableKey?, LibP2PDB.RowData? Callback function invoked when row migration is needed. Return the target key and row data to migrate the row (use source.key and source.data to preserve as-is). Return nil as the first value to drop/skip the row entirely. Return a key with nil data to write a tombstone. Note: if key is nil, the row is always dropped regardless of the data value.
 --- @alias LibP2PDB.DBOnChangeCallback fun(tableName: LibP2PDB.TableName, key: LibP2PDB.TableKey, newData: LibP2PDB.RowData?, oldData: LibP2PDB.RowData?) Callback function invoked on any row change.
 --- @alias LibP2PDB.DBOnIsAdminCallback fun(peerID: LibP2PDB.PeerID, peerName: LibP2PDB.PeerName?): boolean Callback to determine if a peer has admin privileges. Return true to grant the peer permission to bypass `exclusive` and `immutable` restrictions. The peerName may be nil if the peer is not yet known.
+--- @alias LibP2PDB.DBOnPeerAddedCallback fun(peerID: LibP2PDB.PeerID, peerName: LibP2PDB.PeerName) Callback function invoked when a new peer is first observed.
+--- @alias LibP2PDB.DBOnPeerExpiredCallback fun(peerID: LibP2PDB.PeerID, peerName: LibP2PDB.PeerName) Callback function invoked when a peer times out and is removed.
 
 --- @class LibP2PDB.MigrationContext Context information for database/table/row migrations.
 --- @field db LibP2PDB.DBHandle Database handle.
@@ -835,6 +839,8 @@ function LibP2PDB:NewDatabase(desc)
     assert(IsNonEmptyTableOrNil(desc.channels), "desc.channels must be a non-empty array of string if provided")
     assert(IsFunctionOrNil(desc.onChange), "desc.onChange must be a function if provided")
     assert(IsFunctionOrNil(desc.onIsAdmin), "desc.onIsAdmin must be a function if provided")
+    assert(IsFunctionOrNil(desc.onPeerAdded), "desc.onPeerAdded must be a function if provided")
+    assert(IsFunctionOrNil(desc.onPeerExpired), "desc.onPeerExpired must be a function if provided")
     assert(IsNumberOrNil(desc.peerTimeout, 0.0), "desc.peerTimeout must be a positive number if provided")
 
     if desc.channels then
@@ -871,6 +877,8 @@ function LibP2PDB:NewDatabase(desc)
         onMigrateTable = desc.onMigrateTable,
         onMigrateRow = desc.onMigrateRow,
         onChange = desc.onChange,
+        onPeerAdded = desc.onPeerAdded,
+        onPeerExpired = desc.onPeerExpired,
         -- Access control
         onIsAdmin = desc.onIsAdmin,
     }
@@ -2249,6 +2257,8 @@ end
 --- @field onMigrateRow LibP2PDB.DBOnMigrateRowCallback? Callback for row migrations.
 --- @field onChange LibP2PDB.DBOnChangeCallback? Callback for row changes.
 --- @field onIsAdmin LibP2PDB.DBOnIsAdminCallback? Callback for admin privilege checks.
+--- @field onPeerAdded LibP2PDB.DBOnPeerAddedCallback? Callback invoked when a new peer is first observed.
+--- @field onPeerExpired LibP2PDB.DBOnPeerExpiredCallback? Callback invoked when a peer times out and is removed.
 
 --- @class LibP2PDB.PeerInfo Peer information.
 --- @field name LibP2PDB.PeerName Name of the peer.
@@ -4084,6 +4094,11 @@ function Private:UpdatePeer(message)
         --assert(dbi.peersSorted[index] ~= peerID, "peerID already exists in peersSorted")
         tinsert(dbi.peersSorted, index, peerID)
 
+        -- Notify listeners
+        if dbi.onPeerAdded then
+            SafeCall(dbi, dbi.onPeerAdded, peerID, peerName)
+        end
+
         -- Schedule automatic expiry (never for self)
         if peerID ~= self.peerID then
             peerInfo.expiryTimer = C_Timer.NewTimer(dbi.peerTimeout, function() self:RemovePeer(dbi, peerID) end)
@@ -4096,8 +4111,15 @@ end
 --- @param peerID LibP2PDB.PeerID Peer ID to remove.
 function Private:RemovePeer(dbi, peerID)
     local peerInfo = dbi.peers[peerID]
-    if not peerInfo then return end
-    if peerInfo.expiryTimer then peerInfo.expiryTimer:Cancel() end
+    if not peerInfo then
+        return
+    end
+    if peerInfo.expiryTimer then
+        peerInfo.expiryTimer:Cancel()
+    end
+    if dbi.onPeerExpired then
+        SafeCall(dbi, dbi.onPeerExpired, peerID, peerInfo.name)
+    end
     dbi.peers[peerID] = nil
     local index = IndexOf(dbi.peersSorted, peerID)
     if index then
@@ -4376,6 +4398,9 @@ local UnitTests = {
             Assert.IsNil(dbi.onMigrateTable)
             Assert.IsNil(dbi.onMigrateRow)
             Assert.IsNil(dbi.onChange)
+            Assert.IsNil(dbi.onPeerAdded)
+            Assert.IsNil(dbi.onPeerExpired)
+            Assert.IsNil(dbi.onIsAdmin)
         end
         do -- check new database creation with full description
             Assert.IsNil(LibP2PDB:GetDatabase("LibP2PDBTests2"))
@@ -4422,6 +4447,9 @@ local UnitTests = {
                 },
                 channels = { "CUSTOM" },
                 onChange = function(table, key, row) end,
+                onPeerAdded = function(peerID, peerName) end,
+                onPeerExpired = function(peerID, peerName) end,
+                onIsAdmin = function(peerID) return false end,
                 peerTimeout = 300.0,
             })
             Assert.IsEmptyTable(db)
@@ -4445,6 +4473,9 @@ local UnitTests = {
             Assert.IsEmptyTable(dbi.tables)
             Assert.IsFunction(dbi.onError)
             Assert.IsFunction(dbi.onChange)
+            Assert.IsFunction(dbi.onPeerAdded)
+            Assert.IsFunction(dbi.onPeerExpired)
+            Assert.IsFunction(dbi.onIsAdmin)
         end
     end,
 
@@ -4498,6 +4529,24 @@ local UnitTests = {
         Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = "invalid" }) end)
         Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = 123 }) end)
         Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onChange = {} }) end)
+    end,
+
+    NewDatabase_DescOnPeerAddedIsInvalid_Throws = function()
+        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onPeerAdded = true }) end)
+        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onPeerAdded = false }) end)
+        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onPeerAdded = "" }) end)
+        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onPeerAdded = "invalid" }) end)
+        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onPeerAdded = 123 }) end)
+        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onPeerAdded = {} }) end)
+    end,
+
+    NewDatabase_DescOnPeerExpiredIsInvalid_Throws = function()
+        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onPeerExpired = true }) end)
+        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onPeerExpired = false }) end)
+        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onPeerExpired = "" }) end)
+        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onPeerExpired = "invalid" }) end)
+        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onPeerExpired = 123 }) end)
+        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onPeerExpired = {} }) end)
     end,
 
     NewDatabase_DescOnIsAdminIsInvalid_Throws = function()
@@ -10145,6 +10194,92 @@ local NetworkTests = {
             Assert.Throws(function() LibP2PDB:GetPeerInfo(db, "") end)
             Assert.Throws(function() LibP2PDB:GetPeerInfo(db, "invalid") end)
             Assert.Throws(function() LibP2PDB:GetPeerInfo(db, {}) end)
+        end)
+    end,
+
+    UpdatePeer_CallsOnPeerAddedCallback = function()
+        local instance = NewPrivateInstance(1)
+        PrivateScope(instance, function()
+            local addedPeerID, addedPeerName
+            local callCount = 0
+            local db = LibP2PDB:NewDatabase({
+                prefix = "LibP2PDBTests",
+                onPeerAdded = function(peerID, peerName)
+                    addedPeerID = peerID
+                    addedPeerName = peerName
+                    callCount = callCount + 1
+                end
+            })
+            local dbi = priv.databases[db]
+            -- Simulate a message from a new peer
+            local newPeerID = 9999
+            local newPeerName = "NewPlayer"
+            priv:UpdatePeer({ dbi = dbi, peerID = newPeerID, sender = newPeerName })
+            Assert.AreEqual(callCount, 1, "onPeerAdded should fire exactly once for a new peer")
+            Assert.AreEqual(addedPeerID, newPeerID)
+            Assert.AreEqual(addedPeerName, newPeerName)
+        end)
+    end,
+
+    UpdatePeer_OnPeerAddedNotCalledOnRefresh = function()
+        local instance = NewPrivateInstance(1)
+        PrivateScope(instance, function()
+            local callCount = 0
+            local db = LibP2PDB:NewDatabase({
+                prefix = "LibP2PDBTests",
+                onPeerAdded = function(peerID, peerName)
+                    callCount = callCount + 1
+                end
+            })
+            local dbi = priv.databases[db]
+            local newPeerID = 9999
+            priv:UpdatePeer({ dbi = dbi, peerID = newPeerID, sender = "NewPlayer" })
+            priv:UpdatePeer({ dbi = dbi, peerID = newPeerID, sender = "NewPlayer" })
+            Assert.AreEqual(callCount, 1, "onPeerAdded should only fire on first observation")
+        end)
+    end,
+
+    RemovePeer_CallsOnPeerExpiredCallback = function()
+        local instance = NewPrivateInstance(1)
+        PrivateScope(instance, function()
+            local expiredPeerID, expiredPeerName
+            local callCount = 0
+            local db = LibP2PDB:NewDatabase({
+                prefix = "LibP2PDBTests",
+                onPeerExpired = function(peerID, peerName)
+                    expiredPeerID = peerID
+                    expiredPeerName = peerName
+                    callCount = callCount + 1
+                end
+            })
+            local dbi = priv.databases[db]
+            -- Insert a fake peer directly
+            local fakePeerID = 8888
+            local fakePeerName = "ExpiredPlayer"
+            dbi.peers[fakePeerID] = { name = fakePeerName, lastSeen = 0 }
+            tinsert(dbi.peersSorted, fakePeerID)
+            -- Remove it
+            priv:RemovePeer(dbi, fakePeerID)
+            Assert.AreEqual(callCount, 1, "onPeerExpired should fire once")
+            Assert.AreEqual(expiredPeerID, fakePeerID)
+            Assert.AreEqual(expiredPeerName, fakePeerName)
+            Assert.IsNil(dbi.peers[fakePeerID], "peer should be removed after expiry")
+        end)
+    end,
+
+    RemovePeer_OnPeerExpiredNotCalledForUnknownPeer = function()
+        local instance = NewPrivateInstance(1)
+        PrivateScope(instance, function()
+            local callCount = 0
+            local db = LibP2PDB:NewDatabase({
+                prefix = "LibP2PDBTests",
+                onPeerExpired = function(peerID, peerName)
+                    callCount = callCount + 1
+                end
+            })
+            local dbi = priv.databases[db]
+            priv:RemovePeer(dbi, 7777)
+            Assert.AreEqual(callCount, 0, "onPeerExpired should not fire for unknown peer")
         end)
     end,
 
