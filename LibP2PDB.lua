@@ -1066,6 +1066,7 @@ end
 --- @alias LibP2PDB.TableSchema table<string|number, string|string[]> Table schema definition.
 --- @alias LibP2PDB.TableSchemaSorted [string|number, string|string[]] Table schema as a sorted array of field name and allowed types pairs.
 --- @alias LibP2PDB.TableOnValidateCallback fun(key: LibP2PDB.TableKey, data: LibP2PDB.RowData, context: LibP2PDB.TableOnValidateContext?):boolean Callback function for custom row validation.
+--- @alias LibP2PDB.TableOnIsExpiredCallback fun(key: LibP2PDB.TableKey, data: LibP2PDB.RowData):boolean Callback function to determine if a row is expired. Must return true if the row is expired, false otherwise. Data is a copy.
 --- @alias LibP2PDB.TableOnChangeCallback fun(key: LibP2PDB.TableKey, newData: LibP2PDB.RowData?, oldData: LibP2PDB.RowData?) Callback function invoked on row data changes.
 --- @alias LibP2PDB.RowData table<LibP2PDB.RowDataKey, LibP2PDB.RowDataValue> Data for a row in a table.
 --- @alias LibP2PDB.RowDataKey string|number Key of a field in a row.
@@ -1094,6 +1095,7 @@ end
 --- @field rowsPerChunk integer? Optional number of rows per network chunk for this table (default: 128).
 --- @field schema LibP2PDB.TableSchema? Optional table schema defining field names and their allowed data types.
 --- @field onValidate LibP2PDB.TableOnValidateCallback? Optional callback function(key, data, context) for custom row validation. Must return true if valid, false otherwise. Data is a copy and has not yet been applied when this is called.
+--- @field onIsExpired LibP2PDB.TableOnIsExpiredCallback? Optional callback function(key, data) to determine if a row is expired. Must return true if the row should be excluded from serialization and transmission. Data is a copy. Tombstones are never passed to this callback.
 --- @field onChange LibP2PDB.TableOnChangeCallback? Optional callback function(key, data) on row data changes. Data is nil for deletions. Data is a copy, and has already been applied when this is called.
 
 --- @class LibP2PDB.Summary : LibBucketedHashSet
@@ -1130,6 +1132,7 @@ function LibP2PDB:NewTable(db, desc)
     end
     assert(IsIntegerOrNil(desc.rowsPerChunk, 1), "desc.rowsPerChunk must be a positive integer if provided")
     assert(IsFunctionOrNil(desc.onValidate), "desc.onValidate must be a function if provided")
+    assert(IsFunctionOrNil(desc.onIsExpired), "desc.onIsExpired must be a function if provided")
     assert(IsFunctionOrNil(desc.onChange), "desc.onChange must be a function if provided")
 
     -- Validate db instance
@@ -1174,6 +1177,7 @@ function LibP2PDB:NewTable(db, desc)
         schema = desc.schema,
         schemaSorted = schemaSorted,
         onValidate = desc.onValidate,
+        onIsExpired = desc.onIsExpired,
         onChange = desc.onChange,
         callbacks = setmetatable({}, { __mode = "k" }),
         seed = 0,
@@ -1947,7 +1951,7 @@ function LibP2PDB:EstimateOptimalRowsPerChunk(db, tableName)
     end
 
     -- Export the full table
-    local rowStateMap = priv:ExportTable(ti)
+    local rowStateMap = priv:ExportTable(dbi, ti)
     if not rowStateMap then
         return nil
     end
@@ -2276,6 +2280,7 @@ end
 --- @field schema LibP2PDB.TableSchema? Optional schema definition for the table.
 --- @field schemaSorted LibP2PDB.TableSchemaSorted? Cached sorted schema for the table.
 --- @field onValidate LibP2PDB.TableOnValidateCallback? Optional validation callback for rows.
+--- @field onIsExpired LibP2PDB.TableOnIsExpiredCallback? Optional callback to determine if a row is expired and should be excluded from serialization and transmission.
 --- @field onChange LibP2PDB.TableOnChangeCallback? Optional change callback for rows.
 --- @field callbacks table<table, LibP2PDB.TableOnChangeCallback> Weak table of registered change callbacks for the table.
 --- @field seed integer Seed value for the table's filter and bucket hash set.
@@ -2661,7 +2666,7 @@ function Private:ExportDatabase(dbi)
     -- Export each table
     local tableStateMap = {} --- @type LibP2PDB.TableStateMap
     for tableName, ti in pairs(dbi.tables) do
-        local rowStateMap = self:ExportTable(ti)
+        local rowStateMap = self:ExportTable(dbi, ti)
         if rowStateMap then
             tableStateMap[tableName] = rowStateMap
         end
@@ -2676,16 +2681,34 @@ function Private:ExportDatabase(dbi)
     return { dbi.version, dbi.clock, tableStateMap } --- @type LibP2PDB.DBState
 end
 
+--- Determine if a row is expired and should be excluded from serialization.
+--- Returns false if no onIsExpired callback is configured, if the row is a tombstone, or if the callback throws.
+--- @param dbi LibP2PDB.DBInstance Database instance.
+--- @param ti LibP2PDB.TableInstance Table instance.
+--- @param key LibP2PDB.TableKey Primary key value for the row.
+--- @param row LibP2PDB.TableRow The row to check.
+--- @return boolean isExpired True if the row is expired and should be excluded, false otherwise.
+function Private:IsRowExpired(dbi, ti, key, row)
+    if not ti.onIsExpired or not row.data then
+        return false
+    end
+    local success, result = SafeCall(dbi, ti.onIsExpired, key, self:CopyRowDataValue(row.data))
+    return success and result == true
+end
+
 --- Export a single table to compact format.
 --- If the table has a schema, fields are exported in alphabetical order without names.
 --- If no schema is defined, all fields are exported in arbitrary order with names.
+--- @param dbi LibP2PDB.DBInstance Database instance.
 --- @param ti LibP2PDB.TableInstance Table instance to export.
 --- @return LibP2PDB.RowStateMap? rowStateMap The exported row state map, or nil if no rows to export.
-function Private:ExportTable(ti)
+function Private:ExportTable(dbi, ti)
     -- Export each row
     local rowStateMap = {} --- @type LibP2PDB.RowStateMap
     for key, row in pairs(ti.rows) do
-        rowStateMap[key] = self:ExportRow(row, ti.schemaSorted)
+        if not self:IsRowExpired(dbi, ti, key, row) then
+            rowStateMap[key] = self:ExportRow(row, ti.schemaSorted)
+        end
     end
 
     -- Return nil if no rows to export
@@ -2793,7 +2816,7 @@ function Private:ImportDatabase(dbi, state, message, thread, maxTime)
     local migrationDBI = nil --- @type LibP2PDB.DBInstance
     if dbVersion ~= dbi.version and dbi.onMigrateDB then
         migrationDB = {}
-        ---@diagnostic disable-next-line: missing-fields
+        --- @diagnostic disable-next-line: missing-fields
         migrationDBI = {
             version = dbVersion,
             clock = dbClock,
@@ -3376,7 +3399,7 @@ function Private:VerifySenderPeerID(message)
         return false
     end
 
-    -- Normalize sender to fully-qualified "Name-Realm" form for comparison;
+    -- Normalize sender to fully-qualified "Name-Realm" form for comparison
     -- if the sender string has no realm suffix, assume it is the local player's realm.
     local senderFull = strmatch(sender, "%-") and sender or (sender .. "-" .. self.playerRealm)
     local senderBase = strmatch(senderFull, "^([^%-]+)")
@@ -4815,6 +4838,16 @@ local UnitTests = {
         Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", onChange = "invalid" }) end)
         Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", onChange = 123 }) end)
         Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", onChange = {} }) end)
+    end,
+
+    NewTable_DescOnIsExpiredIsInvalid_Throws = function()
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", onIsExpired = true }) end)
+        Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", onIsExpired = false }) end)
+        Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", onIsExpired = "" }) end)
+        Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", onIsExpired = "invalid" }) end)
+        Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", onIsExpired = 123 }) end)
+        Assert.Throws(function() LibP2PDB:NewTable(db, { name = "Users", keyType = "string", onIsExpired = {} }) end)
     end,
 
     NewTable_NameAlreadyExists_Throws = function()
@@ -6679,6 +6712,72 @@ local UnitTests = {
         Assert.Throws(function() LibP2PDB:ExportDatabase("invalid") end)
         Assert.Throws(function() LibP2PDB:ExportDatabase(123) end)
         Assert.Throws(function() LibP2PDB:ExportDatabase({}) end)
+    end,
+
+    OnIsExpired = function()
+        local db = LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests" })
+        do -- expired row is excluded from ExportTable
+            LibP2PDB:NewTable(db, {
+                name = "Items1",
+                keyType = "string",
+                onIsExpired = function(key, data) return data.expired == true end,
+            })
+            LibP2PDB:InsertKey(db, "Items1", "item1", { name = "sword" })
+            LibP2PDB:InsertKey(db, "Items1", "item2", { name = "shield", expired = true })
+            LibP2PDB:InsertKey(db, "Items1", "item3", { name = "bow" })
+            local dbi = priv.databases[db]
+            local ti = dbi.tables["Items1"]
+            local rowStateMap = priv:ExportTable(dbi, ti)
+            Assert.IsNonEmptyTable(rowStateMap)
+            Assert.ContainsKey(rowStateMap, "item1")
+            Assert.DoesNotContainKey(rowStateMap, "item2") -- expired
+            Assert.ContainsKey(rowStateMap, "item3")
+        end
+        do -- no onIsExpired callback: all rows exported
+            LibP2PDB:NewTable(db, { name = "Items2", keyType = "string" })
+            LibP2PDB:InsertKey(db, "Items2", "item1", { name = "sword" })
+            LibP2PDB:InsertKey(db, "Items2", "item2", { name = "shield", expired = true })
+            local dbi = priv.databases[db]
+            local ti = dbi.tables["Items2"]
+            local rowStateMap = priv:ExportTable(dbi, ti)
+            Assert.IsNonEmptyTable(rowStateMap)
+            Assert.ContainsKey(rowStateMap, "item1")
+            Assert.ContainsKey(rowStateMap, "item2")
+        end
+        do -- tombstones are never passed to onIsExpired, always exported
+            local expiredCalled = false
+            LibP2PDB:NewTable(db, {
+                name = "Items3",
+                keyType = "string",
+                onIsExpired = function(key, data)
+                    expiredCalled = true
+                    return true
+                end,
+            })
+            LibP2PDB:InsertKey(db, "Items3", "item1", { name = "sword" })
+            LibP2PDB:DeleteKey(db, "Items3", "item1")
+            expiredCalled = false
+            local dbi = priv.databases[db]
+            local ti = dbi.tables["Items3"]
+            local rowStateMap = priv:ExportTable(dbi, ti)
+            Assert.IsFalse(expiredCalled)            -- tombstone never passed to onIsExpired
+            Assert.ContainsKey(rowStateMap, "item1") -- tombstone always exported
+        end
+        do                                           -- ExportDatabase excludes expired rows
+            LibP2PDB:NewTable(db, {
+                name = "Items5",
+                keyType = "string",
+                onIsExpired = function(key, data) return data.expired == true end,
+            })
+            LibP2PDB:InsertKey(db, "Items5", "item1", { name = "sword" })
+            LibP2PDB:InsertKey(db, "Items5", "item2", { name = "shield", expired = true })
+            local state = LibP2PDB:ExportDatabase(db) --- @cast state LibP2PDB.DBState
+            Assert.IsNonEmptyTable(state)
+            local tableState = state[3]["Items5"]
+            Assert.IsNonEmptyTable(tableState)
+            Assert.ContainsKey(tableState, "item1")
+            Assert.DoesNotContainKey(tableState, "item2")
+        end
     end,
 
     ImportDatabase = function()
@@ -10651,7 +10750,7 @@ local NetworkPerformanceTests = {
         -- Override C_Timer.NewTicker to drive coroutines synchronously, so profiling captures the full merge cost
         -- even after Phase 2 switches RowsResponseHandler to async import via coroutines.
         local _NewTicker = C_Timer.NewTicker
-        ---@diagnostic disable-next-line: duplicate-set-field
+        --- @diagnostic disable-next-line: duplicate-set-field
         C_Timer.NewTicker = function(delay, callback)
             local cancelled = false
             local ticker = { Cancel = function(self) cancelled = true end }
@@ -10724,10 +10823,10 @@ local function RunTests()
         --   Long-delay timers (>= 10s: peer expiry at peerTimeout seconds) must NOT fire, so
         --   we return a no-op cancel stub instead; RemovePeer guards against nil before Cancel().
         local _NewTimer = C_Timer.NewTimer
-        ---@diagnostic disable-next-line: duplicate-set-field
+        --- @diagnostic disable-next-line: duplicate-set-field
         C_Timer.NewTimer = function(delay, callback)
             if delay < 10 then
-                ---@diagnostic disable-next-line: missing-parameter
+                --- @diagnostic disable-next-line: missing-parameter
                 callback()
                 return nil
             end
@@ -10736,7 +10835,7 @@ local function RunTests()
 
         -- Override C_Timer.NewTicker to drive coroutines synchronously
         local _NewTicker = C_Timer.NewTicker
-        ---@diagnostic disable-next-line: duplicate-set-field
+        --- @diagnostic disable-next-line: duplicate-set-field
         C_Timer.NewTicker = function(delay, callback)
             local cancelled = false
             local ticker = { Cancel = function(self) cancelled = true end }
@@ -10748,7 +10847,7 @@ local function RunTests()
 
         -- Override C_ChatInfo.IsAddonMessagePrefixRegistered to check our fake registered prefixes
         local _IsAddonMessagePrefixRegistered = C_ChatInfo.IsAddonMessagePrefixRegistered
-        ---@diagnostic disable-next-line: duplicate-set-field
+        --- @diagnostic disable-next-line: duplicate-set-field
         C_ChatInfo.IsAddonMessagePrefixRegistered = function(prefix)
             --- @diagnostic disable-next-line: undefined-field
             return priv.registeredPrefixes and priv.registeredPrefixes[prefix] ~= nil
