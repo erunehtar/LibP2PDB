@@ -24,7 +24,7 @@
 -- LibP2PDB: A lightweight, embeddable library for peer-to-peer distributed-database synchronization in WoW addons.
 ------------------------------------------------------------------------------------------------------------------------
 
-local MAJOR, MINOR = "LibP2PDB", 13
+local MAJOR, MINOR = "LibP2PDB", 14
 assert(LibStub, MAJOR .. " requires LibStub")
 
 --- @class LibP2PDB Main library class.
