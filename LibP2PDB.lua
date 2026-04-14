@@ -779,6 +779,7 @@ local priv = Private.New(assert(UnitName("player"), "unable to get player name")
 --- @field onIsAdmin LibP2PDB.DBOnIsAdminCallback? Optional callback invoked with the acting peer's ID and name before enforcing `exclusive` or `immutable` restrictions. Return true to grant admin bypass for that peer.
 --- @field onPeerAdded LibP2PDB.DBOnPeerAddedCallback? Optional callback function(peerID, peerName) invoked when a new peer is first observed.
 --- @field onPeerExpired LibP2PDB.DBOnPeerExpiredCallback? Optional callback function(peerID, peerName) invoked when a peer times out and is removed.
+--- @field onNewerVersion LibP2PDB.DBOnNewerVersionCallback? Optional callback function(newVersion) invoked when a newer database version is detected from another peer.
 --- @field peerTimeout number? Optional seconds of inactivity after which a peer is considered inactive (default: 100.0).
 
 --- @class LibP2PDB.Filter Filter interface for generating data digests.
@@ -810,6 +811,7 @@ local priv = Private.New(assert(UnitName("player"), "unable to get player name")
 --- @alias LibP2PDB.DBOnIsAdminCallback fun(peerID: LibP2PDB.PeerID, peerName: LibP2PDB.PeerName?): boolean Callback to determine if a peer has admin privileges. Return true to grant the peer permission to bypass `exclusive` and `immutable` restrictions. The peerName may be nil if the peer is not yet known.
 --- @alias LibP2PDB.DBOnPeerAddedCallback fun(peerID: LibP2PDB.PeerID, peerName: LibP2PDB.PeerName) Callback function invoked when a new peer is first observed.
 --- @alias LibP2PDB.DBOnPeerExpiredCallback fun(peerID: LibP2PDB.PeerID, peerName: LibP2PDB.PeerName) Callback function invoked when a peer times out and is removed.
+--- @alias LibP2PDB.DBOnNewerVersionCallback fun(newVersion: LibP2PDB.DBVersion) Callback function invoked when a newer database version is detected from another peer.
 
 --- @class LibP2PDB.MigrationContext Context information for database/table/row migrations.
 --- @field db LibP2PDB.DBHandle Database handle.
@@ -841,6 +843,7 @@ function LibP2PDB:NewDatabase(desc)
     assert(IsFunctionOrNil(desc.onIsAdmin), "desc.onIsAdmin must be a function if provided")
     assert(IsFunctionOrNil(desc.onPeerAdded), "desc.onPeerAdded must be a function if provided")
     assert(IsFunctionOrNil(desc.onPeerExpired), "desc.onPeerExpired must be a function if provided")
+    assert(IsFunctionOrNil(desc.onNewerVersion), "desc.onNewerVersion must be a function if provided")
     assert(IsNumberOrNil(desc.peerTimeout, 0.0), "desc.peerTimeout must be a positive number if provided")
 
     if desc.channels then
@@ -879,6 +882,7 @@ function LibP2PDB:NewDatabase(desc)
         onChange = desc.onChange,
         onPeerAdded = desc.onPeerAdded,
         onPeerExpired = desc.onPeerExpired,
+        onNewerVersion = desc.onNewerVersion,
         -- Access control
         onIsAdmin = desc.onIsAdmin,
     }
@@ -2263,6 +2267,7 @@ end
 --- @field onIsAdmin LibP2PDB.DBOnIsAdminCallback? Callback for admin privilege checks.
 --- @field onPeerAdded LibP2PDB.DBOnPeerAddedCallback? Callback invoked when a new peer is first observed.
 --- @field onPeerExpired LibP2PDB.DBOnPeerExpiredCallback? Callback invoked when a peer times out and is removed.
+--- @field onNewerVersion LibP2PDB.DBOnNewerVersionCallback? Callback invoked when a newer database version is observed from a peer.
 
 --- @class LibP2PDB.PeerInfo Peer information.
 --- @field name LibP2PDB.PeerName Name of the peer.
@@ -2794,6 +2799,15 @@ function Private:ImportDatabase(dbi, state, message, thread, maxTime)
     local dbVersion = state[1] --- @type LibP2PDB.DBVersion
     if not IsInteger(dbVersion, 1) then
         ReportError(dbi, "invalid database version in state")
+        return false
+    end
+
+    -- Check for version compatibility
+    if dbVersion > dbi.version then
+        ReportError(dbi, "database version is newer than supported version")
+        if dbi.onNewerVersion then
+            SafeCall(dbi, dbi.onNewerVersion, dbVersion)
+        end
         return false
     end
 
@@ -4579,6 +4593,15 @@ local UnitTests = {
         Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onIsAdmin = "invalid" }) end)
         Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onIsAdmin = 123 }) end)
         Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onIsAdmin = {} }) end)
+    end,
+
+    NewDatabase_DescOnNewerVersionIsInvalid_Throws = function()
+        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onNewerVersion = true }) end)
+        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onNewerVersion = false }) end)
+        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onNewerVersion = "" }) end)
+        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onNewerVersion = "invalid" }) end)
+        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onNewerVersion = 123 }) end)
+        Assert.Throws(function() LibP2PDB:NewDatabase({ prefix = "LibP2PDBTests", onNewerVersion = {} }) end)
     end,
 
     NewDatabase_PrefixAlreadyExists_Throws = function()
@@ -7227,6 +7250,29 @@ local UnitTests = {
         Assert.IsNonEmptyTable(row)
         Assert.AreEqual(row.data.name, "Newcomer")
         Assert.AreEqual(row.version.peerID, otherPeerID)
+    end,
+
+    ImportDatabase_OnNewerVersion_Called = function()
+        local calledWithVersion = nil
+        local callCount = 0
+        local db = LibP2PDB:NewDatabase({
+            prefix = "LibP2PDBTests",
+            onNewerVersion = function(newVersion)
+                calledWithVersion = newVersion
+                callCount = callCount + 1
+            end,
+        })
+
+        --- @type LibP2PDB.DBState
+        local state = {
+            [1] = 2, -- dbVersion: newer than current (1)
+            [2] = 0, -- dbClock
+            [3] = {},
+        }
+
+        Assert.ExpectErrors(function() LibP2PDB:ImportDatabase(db, state) end)
+        Assert.AreEqual(callCount, 1)
+        Assert.AreEqual(calledWithVersion, 2)
     end,
 
     MergeKey_ExclusiveTable_SelfAuthoredRowOverridesForger = function()
