@@ -84,7 +84,7 @@ local InActiveBattlefield
 if C_PvP and C_PvP.IsActiveBattlefield then
     InActiveBattlefield = C_PvP.IsActiveBattlefield
 else
-    InActiveBattlefield = InActiveBattlefield --- @type fun(): boolean
+    InActiveBattlefield = _G.InActiveBattlefield --[[@as fun(): boolean]]
 end
 
 ------------------------------------------------------------------------------------------------------------------------
